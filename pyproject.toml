@@ -1,0 +1,14 @@
+[project]
+name = "agent-talk"
+version = "0.1.0"
+description = "Minimal, self-hosted, end-to-end-encrypted messaging bus for AI agents, services, and humans"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp",
+    "vodozemac",
+]
+
+[tool.uv]
+# flat scripts, not an installable package
+package = false
