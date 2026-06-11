@@ -38,18 +38,29 @@ groups a person's users).
 
 ## Install
 
-[uv](https://docs.astral.sh/uv/) manages the environment (`pyproject.toml`
-declares the two dependencies, `mcp` and `vodozemac`):
+agent-talk is a Python package (dependencies: `mcp`, `vodozemac`). As a
+dependency of your project:
+
+```
+uv add git+https://github.com/xhluca/agent-talk      # or: pip install git+...
+```
+
+For development, clone the repo and let [uv](https://docs.astral.sh/uv/)
+set up the environment:
 
 ```
 uv sync
 ```
 
+Installing provides the `agent_talk` library (`from agent_talk import
+User`) and two commands: `agent-talk` (a user poll loop) and
+`agent-talk-broker` (the relay).
+
 ## Run the broker (one public machine)
 
 ```
 BROKER_PORT=8766 BROKER_AUDIENCE=https://broker.example.com/mcp \
-  uv run broker.py
+  uv run agent-talk-broker
 ```
 
 No user setup needed — users onboard themselves. `BROKER_AUDIENCE` must
@@ -64,15 +75,16 @@ broker.example.com {
 
 ## Run the users (one per machine)
 
-`runner.py` is the entrypoint: it publishes keys, optionally sends one
-message, then polls forever (decrypting, acking, and doing key
-maintenance). On machine A:
+The `agent-talk` command publishes keys, optionally sends one message,
+then polls forever (decrypting, acking, and doing key maintenance) —
+everything is configured via environment variables (full list in
+`src/agent_talk/runner.py`). On machine A:
 
 ```
 BROKER_URL=https://broker.example.com/mcp \
 PICKLE_SECRET=<local-secret-a> STORE=user_a.db NICKNAME=alice-user-1 \
 PEER=<B's user id> PEER_NAME=bob \
-SEND="hello b" uv run runner.py
+SEND="hello b" uv run agent-talk
 ```
 
 On machine B, the same with its own secrets plus `AUTO_REPLY=1` to
@@ -82,10 +94,10 @@ acknowledge every received message:
 BROKER_URL=https://broker.example.com/mcp \
 PICKLE_SECRET=<local-secret-b> STORE=user_b.db NICKNAME=bob-user-1 \
 PEER=<A's user id> PEER_NAME=alice \
-AUTO_REPLY=1 uv run runner.py
+AUTO_REPLY=1 uv run agent-talk
 ```
 
-The runner prints its own user ID on startup; exchange IDs
+The command prints its own user ID on startup; exchange IDs
 out-of-band and pass the peer's as `PEER`. `PEER_PIN` optionally adds an
 explicit full-key pin on top of the fingerprint check. `PICKLE_SECRET`
 encrypts the private keys at rest in the local `STORE` SQLite file: losing
@@ -118,6 +130,20 @@ MIN_OTKS=20            replenish below this many unclaimed one-time keys
 OTK_BATCH=100          batch size for initial publish and replenishment
 FALLBACK_MAX_AGE=86400 rotate the fallback key after this many seconds
 MAINTAIN_INTERVAL=60   seconds between maintenance checks
+```
+
+## Library usage
+
+```python
+from agent_talk import User
+
+alice = User("https://broker.example.com/mcp", pickle_secret="...",
+              nickname="alice-1", store="alice.db")
+print(alice.user_id())            # share out-of-band; address + pin in one
+await alice.publish()             # onboard to the broker
+await alice.send("<bob's id>", "hello")
+for sender, name, text in await alice.receive():
+    print(name or sender, text)
 ```
 
 ## Docs

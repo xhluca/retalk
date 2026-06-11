@@ -294,5 +294,9 @@ def read_messages(auth: dict) -> str:
         conn.close()
 
 
-if __name__ == "__main__":
+def main():
     mcp.run(transport="streamable-http")
+
+
+if __name__ == "__main__":
+    main()

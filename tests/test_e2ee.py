@@ -46,9 +46,6 @@ import sys
 import tempfile
 import time
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
-sys.path.insert(0, ROOT)
 PORT = 8767
 PORT2 = 8768
 
@@ -79,7 +76,7 @@ def start_broker(db: str, port: int) -> subprocess.Popen:
                BROKER_PORT=str(port),
                BROKER_AUDIENCE=f"http://127.0.0.1:{port}/mcp")
     proc = subprocess.Popen(
-        [sys.executable, os.path.join(ROOT, "broker.py")],
+        [sys.executable, "-m", "agent_talk.broker"],
         env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     wait_for_port(port)
@@ -89,7 +86,7 @@ def start_broker(db: str, port: int) -> subprocess.Popen:
 async def main(tmp: str):
     import vodozemac as vz
 
-    from user import User, PinMismatchError
+    from agent_talk import User, PinMismatchError
 
     broker_db = os.path.join(tmp, "broker.db")
     store_a = os.path.join(tmp, "user_a.db")
@@ -186,16 +183,15 @@ async def main(tmp: str):
         # 8. concurrent sends from two processes sharing A's store
         sender_src = (
             "import asyncio, sys\n"
-            "sys.path.insert(0, sys.argv[1])\n"
-            "from user import User\n"
+            "from agent_talk import User\n"
             "async def main():\n"
-            "    a = User(sys.argv[2], 'pickle-secret-a', store=sys.argv[3])\n"
+            "    a = User(sys.argv[1], 'pickle-secret-a', store=sys.argv[2])\n"
             "    for i in range(5):\n"
-            "        await a.send(sys.argv[4], f'msg-{sys.argv[5]}-{i}')\n"
+            "        await a.send(sys.argv[3], f'msg-{sys.argv[4]}-{i}')\n"
             "asyncio.run(main())\n"
         )
         procs = [subprocess.Popen([sys.executable, "-c", sender_src,
-                                   ROOT, url, store_a, bid, tag])
+                                   url, store_a, bid, tag])
                  for tag in ("P1", "P2")]
         for p in procs:
             assert p.wait(timeout=60) == 0, "concurrent sender crashed"

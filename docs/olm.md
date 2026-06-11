@@ -26,7 +26,7 @@ handshake alone, immediately, while B is asleep. When B wakes up and reads
 the pre-key message, B finds the matching private half and finishes its
 side.
 
-That is exactly what happens in `user.py`: A's first `send` to a peer
+That is exactly what happens in `agent_talk/user.py`: A's first `send` to a peer
 claims one prekey and calls `create_outbound_session`; B's `receive` sees
 the pre-key message (`mtype == 0`) and calls `create_inbound_session`, which
 consumes the key.
@@ -62,7 +62,7 @@ prekey total. The pool only drains when *new sessions* are established.
 
 The pool is finite (we upload 100) and it only shrinks. It drains when peers
 legitimately start new sessions, when a peer clears its local store and has
-to re-handshake — or maliciously: anyone holding a valid broker token can
+to re-handshake — or maliciously: anyone able to reach the broker can
 call `claim_key("b")` 100 times and pour B's envelopes down the drain.
 Without countermeasures, an empty pool would mean **nobody can start a new
 conversation with B** until B published again. Existing sessions keep
@@ -74,7 +74,7 @@ Two countermeasures close this gap (both implemented):
   user's keys remain unclaimed (the `count_keys` tool) and uploads a fresh
   batch of `batch` keys (default 100) whenever the count drops below
   `min_otks` (default 20). Cheap, since generating them is just
-  `generate_one_time_keys(n)`. The `runner.py` poll loop calls
+  `generate_one_time_keys(n)`. The `agent-talk` poll loop calls
   `maintain()` every `MAINTAIN_INTERVAL` seconds (default 60).
 - **Fallback key.** One special *reusable* prekey
   (`generate_fallback_key()`), published on first `publish()` and stored in
@@ -89,7 +89,7 @@ Because the fallback key is reusable, it must not live forever: the longer
 it sits, the more session-starts a future compromise of it would expose.
 `maintain()` therefore auto-rotates it once it is older than
 `fallback_max_age` seconds (default 86400, i.e. daily; `FALLBACK_MAX_AGE`
-in the run scripts). Rotation is just `generate_fallback_key()` plus a
+for the `agent-talk` command). Rotation is just `generate_fallback_key()` plus a
 re-publish; the user records the rotation time locally in its `meta`
 table.
 

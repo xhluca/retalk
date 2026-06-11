@@ -8,7 +8,7 @@ broker's mechanics and the reasoning behind them.
 
 ## What the broker stores and sees
 
-Stores (see the schema in `broker.py`):
+Stores (see the schema in `src/agent_talk/broker.py`):
 
 - `users` — user ID, nickname, public keys (identity, signing,
   fallback). All public material; there are no accounts and no

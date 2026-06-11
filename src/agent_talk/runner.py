@@ -27,7 +27,7 @@ import asyncio
 import os
 import time
 
-from user import User
+from .user import User
 
 
 async def run(nickname_default: str, store_default: str,
@@ -86,5 +86,9 @@ def main(nickname_default: str = "user", store_default: str = "user.db",
     asyncio.run(run(nickname_default, store_default, auto_reply))
 
 
-if __name__ == "__main__":
+def cli():
     main(auto_reply=os.environ.get("AUTO_REPLY", "").lower() in ("1", "true", "yes"))
+
+
+if __name__ == "__main__":
+    cli()
