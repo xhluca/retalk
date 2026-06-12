@@ -20,7 +20,8 @@ Stores (see the schema in `src/retalk/server.py`):
   each has been claimed.
 - `messages` — opaque base64 ciphertext, sender/recipient IDs, timestamps.
 - `cursors` — how far each user has read its mailbox.
-- `nonces` — recently seen request nonces (replay defense, self-purging).
+- `nonces` — random one-use numbers from recent requests, kept to block
+  replays (explained below).
 
 Sees: **metadata**. Who messages whom, when, how often, how big. This is
 the accepted leak of the design — E2EE protects content, not the social
@@ -73,6 +74,28 @@ The worst a hostile server can do with this table is refuse to hand keys
 out or drain them — denial of service, never reading or forging. That is
 the design's general rule: everything the server stores is public
 material, ciphertext, or bookkeeping.
+
+## Nonces (the `nonces` table)
+
+**The attack this stops.** Every request to the server is signed, and a
+signature proves the request is genuine — but a *copy* of a genuine
+request is still genuine. Someone who captures one of your requests (say,
+from a proxy log on a no-TLS setup) could submit the copy again. Example:
+resubmitting your captured `read_messages` would make the server mark
+your new mail as already delivered, so you'd never see it.
+
+**How it works.** Each request includes a nonce — a large random number
+the client generates fresh every time ("number used once") — and the
+nonce is covered by the signature, so it can't be swapped out. The server
+keeps each nonce it has seen; if the same one ever arrives again, that is
+by definition a replayed copy, and it is rejected ("replay detected").
+
+**Why the table stays small.** Signatures also include a timestamp, and
+the server rejects anything older than ~2.5 minutes outright. So a nonce
+only needs to be remembered for that window — replays older than the
+window already die on the timestamp check. The server deletes expired
+nonces on every request; the table never grows beyond a few minutes of
+traffic.
 
 ## Why calls are authenticated at all
 
