@@ -236,7 +236,6 @@ class User:
             "signing_key": acct.ed25519_key.to_base64(),
             "one_time_keys": otks,
             "fallback_key": fk or None,
-            "name": self.name,
         })
         acct.mark_keys_as_published()
         if fk:
@@ -274,7 +273,8 @@ class User:
         """Encrypt and send a message to a peer user ID. The ciphertext is
         kept in a local outbox until the peer acknowledges decrypting it."""
         with self._locked():
-            payload = {"id": uuid.uuid4().hex, "kind": "msg", "text": text}
+            payload = {"id": uuid.uuid4().hex, "kind": "msg", "text": text,
+                       "name": self.name}
             return self._send_envelope(to, payload, record_outbox=True)
 
     def _send_envelope(self, to: str, payload: dict, record_outbox: bool):
@@ -369,6 +369,6 @@ class User:
                 self._send_envelope(
                     sender, {"id": data["id"], "kind": "ack"}, record_outbox=False)
                 name = self.names.get(sender) or (
-                    f"~{m['name']}" if m.get("name") else "")
+                    f"~{data['name']}" if data.get("name") else "")
                 out.append((sender, name, data["text"]))
         return out

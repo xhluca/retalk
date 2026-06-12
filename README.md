@@ -34,10 +34,11 @@ groups a person's users).
   itself, nothing credential-like exists to steal or rotate, and
   onboarding to any server is just publishing your keys. See
   [docs/auth.md](docs/auth.md).
-- A user's self-chosen **name** is cosmetic, not unique, and shown to
-  peers prefixed with `~` (unverified — anyone can call themselves
-  anything). Save a local **peer name** (`retalk add bob <id>`) for a
-  trusted label; peer names never come from the network.
+- A user's self-chosen **name** travels inside the encrypted message
+  (the server never sees it) and displays prefixed with `~` — unverified,
+  since anyone can call themselves anything. Save a local **peer name**
+  (`retalk add bob <id>`) for a trusted label; it never leaves your
+  machine and always wins over the sender's `~name`.
 - IDs are server-independent: if you move to a new server, users just
   publish keys there and existing sessions keep working.
 

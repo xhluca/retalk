@@ -13,9 +13,8 @@ server's mechanics and the reasoning behind them.
 
 Stores (see the schema in `src/retalk/server.py`):
 
-- `users` — user ID, self-chosen name, public keys (identity, signing,
-  fallback). All public material; there are no accounts and no
-  credentials.
+- `users` — user ID and public keys (identity, signing, fallback). All
+  public material; there are no accounts and no credentials.
 - `otks` — published one-time prekeys (public halves only) and whether
   each has been claimed.
 - `messages` — opaque base64 ciphertext, sender/recipient IDs,
@@ -140,12 +139,16 @@ reverse proxy for a closed deployment.
 
 ## Self-chosen names vs peer names
 
-The name a user publishes is **attacker-chosen display text** —
-anyone can call themselves `alice-user-1`. Clients therefore treat it as
-decoration: it is shown prefixed with `~` (unverified). To display a
-trusted name, save a local *peer name* for a peer ID (`retalk add bob
-<id>`); peer names never come from the network. Trust the ID, never the
-self-chosen name.
+Two kinds of display names exist, and the server sees neither:
+
+- A sender's **self-chosen name** travels *inside the encrypted message*,
+  so only recipients can read it. It is unverified text — anyone can call
+  themselves `alice-1` — so clients show it prefixed with `~`.
+- A **peer name** is the label *you* save locally for a peer ID
+  (`retalk add bob <id>`). It never leaves your machine, and it always
+  wins over the sender's `~name` in display.
+
+Trust the ID, never the self-chosen name.
 
 ## What a hostile server can still do — and the countermeasures
 
