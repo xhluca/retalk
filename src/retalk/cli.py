@@ -219,49 +219,215 @@ def cmd_receive(args):
 
 def main():
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("-s", "--store", dest="dir", metavar="DIR",
-                        help="identity directory")
-    common.add_argument("-u", "--user-level", nargs="?", const="default",
-                        default=None, metavar="NAME",
-                        help="user-level identity in ~/.local/share/retalk/")
-    common.add_argument("--server", help="server URL (overrides saved value)")
+    raw = argparse.RawDescriptionHelpFormatter
+
+    common = argparse.ArgumentParser(add_help=False)
+    g = common.add_argument_group("identity selection (shared by every command)")
+    g.add_argument("-s", "--store", dest="dir", metavar="DIR",
+                   help="use the identity in directory DIR "
+                        "(created earlier by `retalk init DIR`)")
+    g.add_argument("-u", "--user-level", nargs="?", const="default",
+                   default=None, metavar="NAME",
+                   help="use the user-level identity NAME, stored under "
+                        "~/.local/share/retalk/NAME/ (defaults to 'default' "
+                        "when NAME is omitted)")
+    g.add_argument("--server", metavar="URL",
+                   help="server URL for this invocation; overrides the "
+                        "SERVER_URL env var and the URL saved at init")
 
     p = argparse.ArgumentParser(
         prog="retalk",
-        description="end-to-end-encrypted messages between users via an "
-                    "untrusted server")
-    sub = p.add_subparsers(dest="command", required=True)
+        formatter_class=raw,
+        description="""\
+End-to-end-encrypted messages between users, relayed by a server that is
+never trusted: it stores only public keys and ciphertext, and every
+request to it is signed with your key (no accounts, no tokens, no
+registration). A "user" is anything with a keypair and a mailbox — an AI
+agent, a service, or you.
 
-    sp = sub.add_parser("init", parents=[common],
-                        help="create a new identity (the only command that does)")
-    sp.add_argument("directory", nargs="?", help="folder to hold the identity")
-    sp.add_argument("--nickname", help="display name peers see (unverified)")
+Your USER ID is a 32-hex fingerprint of your public keys. It is both your
+address and your peers' proof of your keys: share it over any channel the
+server does not control (chat, email, in person).""",
+        epilog="""\
+how every command finds your identity (first match wins):
+  1. -s DIR              an explicit identity directory
+  2. -u [NAME]           a named user-level identity (~/.local/share/retalk/)
+  3. STORE env var       same as -s
+  4. the user-level identity called 'default', if you created one
+  5. otherwise: error.   Only `retalk init` ever creates an identity, so a
+                         mistyped path fails loudly instead of silently
+                         creating a fresh one.
+
+environment variables:
+  PICKLE_SECRET   the secret that unlocks your keys; prompted interactively
+                  when unset (use the env var for scripts and daemons)
+  SERVER_URL      server to talk to (init can save one per identity instead)
+  STORE           identity directory, like -s
+
+output conventions:
+  stdout carries results (ids, messages, --json lines); everything else —
+  banners, progress, errors — goes to stderr, so pipes stay clean. Every
+  command that acts prints `using <nickname> (<id>) from <dir>` to stderr
+  so you always know which identity acted. Exit codes: 0 ok, 2 usage or
+  refusal (no identity, wrong secret, unknown peer).
+
+quickstart:
+  retalk init -u --nickname alice-1 --server https://server.example.com
+  retalk add bob <bob's user id>
+  retalk send bob "hello"
+  retalk receive --follow
+
+run `retalk <command> --help` for the full story of each command.""")
+    sub = p.add_subparsers(dest="command", required=True,
+                           metavar="{init,id,add,send,receive}")
+
+    sp = sub.add_parser(
+        "init", parents=[common], formatter_class=raw,
+        help="create a new identity (the only command that ever does)",
+        description="""\
+Create a new identity: generate an encryption keypair, encrypt it with a
+secret you choose, and store it in a folder of your choosing. Prints the
+new USER ID on stdout — share it with peers out-of-band; it is both your
+address and the fingerprint they verify you by.
+
+The location is mandatory: either a directory argument (project-local) or
+-u [NAME] (user-level, under ~/.local/share/retalk/). The folder will
+contain store.db — keys (encrypted), sessions, saved peers, and the
+outbox of not-yet-acknowledged messages. Back it up to keep the identity;
+delete it to destroy the identity.
+
+The secret is prompted twice (or taken from PICKLE_SECRET). It encrypts
+your private keys at rest and is required by every later command. It
+cannot be recovered: losing it means losing this identity and all its
+conversations.
+
+init is offline — it does not contact the server. Keys are published
+automatically the first time you send or receive.""",
+        epilog="""\
+examples:
+  retalk init ./alice                          identity in ./alice/
+  retalk init -u                               user-level 'default' identity
+  retalk init -u work --nickname work-bot \\
+              --server https://srv.example.com  named identity, server saved""")
+    sp.add_argument("directory", nargs="?",
+                    help="folder to hold the identity (alternative to -u)")
+    sp.add_argument("--nickname", metavar="NAME",
+                    help="display name attached to your messages; peers see "
+                         "it marked '~NAME' because it is not verified — "
+                         "only their locally saved peer name for you is")
     sp.set_defaults(fn=cmd_init)
 
-    sp = sub.add_parser("id", parents=[common], help="print my user id")
-    sp.add_argument("--json", action="store_true")
+    sp = sub.add_parser(
+        "id", parents=[common], formatter_class=raw,
+        help="print my user id",
+        description="""\
+Print this identity's USER ID (32 hex chars) on stdout.
+
+The ID is the sha256 fingerprint of your public keys, which makes it
+self-verifying: a peer who knows your ID can detect any attempt by the
+server to hand out substitute keys for you. Sharing it is therefore
+sharing your address and your key fingerprint in one string. It contains
+no secret — it is safe to post publicly.
+
+Needs your secret (to open the store) but never contacts the server.""",
+        epilog="""\
+examples:
+  retalk id                    id of the default identity
+  retalk id -s ./alice         id of a project-local identity
+  retalk id --json             {"user_id", "identity_key", "nickname"}""")
+    sp.add_argument("--json", action="store_true",
+                    help="emit JSON with user_id, identity_key (base64 "
+                         "Curve25519 public key), and nickname")
     sp.set_defaults(fn=cmd_id)
 
-    sp = sub.add_parser("add", parents=[common],
-                        help="save a peer under a local name")
-    sp.add_argument("name")
-    sp.add_argument("user_id")
-    sp.add_argument("--pin", help="peer's full identity key (extra pin on "
-                                  "top of the fingerprint id)")
+    sp = sub.add_parser(
+        "add", parents=[common], formatter_class=raw,
+        help="save a peer's user id under a local name",
+        description="""\
+Save a peer's USER ID under a short local name, so `send bob ...` works
+and incoming messages from that ID display as 'bob' instead of an
+unverified '~nickname'. The name is yours alone — it never travels over
+the network and the peer never learns it.
+
+Get the peer's ID out-of-band (they run `retalk id`). Adding an existing
+name overwrites it. No secret needed and no server contact — this only
+writes your local peers table.""",
+        epilog="""\
+examples:
+  retalk add bob f1041c25c87351d8550b31cc6b13ab04
+  retalk add bob <id> --pin "vGY3...="     also pin bob's full identity key
+
+The fingerprint ID already pins the peer's keys; --pin adds an explicit
+second check of the full identity key for belt-and-braces.""")
+    sp.add_argument("name", help="local name for this peer (e.g. 'bob')")
+    sp.add_argument("user_id", help="the peer's 32-hex user id")
+    sp.add_argument("--pin", metavar="KEY",
+                    help="peer's full base64 identity key, verified against "
+                         "everything the server serves for this peer")
     sp.set_defaults(fn=cmd_add)
 
-    sp = sub.add_parser("send", parents=[common],
-                        help="encrypt and send one message")
-    sp.add_argument("peer", help="saved peer name or 32-hex user id")
-    sp.add_argument("text")
+    sp = sub.add_parser(
+        "send", parents=[common], formatter_class=raw,
+        help="encrypt and send one message",
+        description="""\
+Encrypt TEXT for one peer and hand the ciphertext to the server, then
+exit. The server (and anyone watching it) sees only the ciphertext and
+the metadata sender/recipient/time/size — never the content.
+
+PEER is a name saved with `retalk add`, or a raw 32-hex user id. The
+first message to a new peer performs the key handshake automatically
+(claiming one of the peer's one-time keys from the server); if the
+server's served keys do not match the peer's ID fingerprint or your
+saved --pin, the send refuses with PIN MISMATCH instead of encrypting to
+an impostor key.
+
+Delivery is tracked: the message stays in your local outbox until the
+peer's client acknowledges decrypting it (acks arrive during your next
+`receive`). Unacknowledged messages are re-sent automatically by
+`receive --follow`, so nothing is lost if the server dies or is swapped.
+On first contact with a server your public keys are published
+automatically.""",
+        epilog="""\
+examples:
+  retalk send bob "hello"
+  retalk send f1041c25c87351d8550b31cc6b13ab04 "hi, stranger"
+  retalk send bob "psst" -s ./alice --server http://127.0.0.1:8766""")
+    sp.add_argument("peer", help="saved peer name, or a raw 32-hex user id")
+    sp.add_argument("text", help="the message plaintext (quote it)")
     sp.set_defaults(fn=cmd_send)
 
-    sp = sub.add_parser("receive", parents=[common],
-                        help="decrypt pending messages")
+    sp = sub.add_parser(
+        "receive", parents=[common], formatter_class=raw,
+        help="decrypt pending messages",
+        description="""\
+Fetch this identity's mailbox from the server, decrypt each message, and
+print it — `name: text` per line, where name is your saved peer name for
+the sender, or their unverified self-chosen nickname marked '~', or the
+bare sender id. Each successfully decrypted message is acknowledged back
+to its sender (encrypted, like everything else).
+
+Without --follow: drain the mailbox once and exit (good for cron and
+scripts). With --follow: poll every 2 seconds until interrupted, and once
+a minute run key maintenance — replenish one-time keys on the server,
+rotate the fallback key daily, and re-send any of your own messages that
+have gone unacknowledged for 2 minutes.
+
+Messages the server already handed over are never served again, so pipe
+--json output somewhere durable if you need a log.""",
+        epilog="""\
+examples:
+  retalk receive                       drain once, human-readable
+  retalk receive --follow              live tail + key maintenance
+  retalk receive --json | jq .text     script-friendly, one object per line
+
+json fields per message: "from" (sender id), "name" (your peer name,
+'~nickname', or ''), "text" (the plaintext).""")
     sp.add_argument("--follow", action="store_true",
-                    help="keep polling (and maintaining keys) until ctrl-c")
+                    help="keep polling every 2s and maintain keys every "
+                         "60s until ctrl-c")
     sp.add_argument("--json", action="store_true",
-                    help="one JSON object per message on stdout")
+                    help="one JSON object per message on stdout "
+                         "(banners stay on stderr)")
     sp.set_defaults(fn=cmd_receive)
 
     args = p.parse_args()

@@ -107,6 +107,17 @@ class TestCLI(unittest.TestCase):
         res = self.cli("id", "-s", alice_dir, secret="wrong", expect=2)
         self.assertIn("wrong secret", res.stderr)
 
+    def test_help_screens(self):
+        """Every command documents itself: --help exits 0 with substance."""
+        self.tmp = tempfile.gettempdir()
+        for cmd in ([], ["init"], ["id"], ["add"], ["send"], ["receive"]):
+            res = self.cli(*cmd, "--help")
+            self.assertGreater(len(res.stdout), 400,
+                               f"{cmd or ['top-level']}: thin --help")
+        self.assertIn("first match wins", self.cli("--help").stdout)
+        self.assertIn("PIN MISMATCH", self.cli("send", "--help").stdout)
+        self.assertIn("cannot be recovered", self.cli("init", "--help").stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
