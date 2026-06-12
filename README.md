@@ -44,12 +44,45 @@ groups a person's users).
 ## Install
 
 ```
-uv add retalk        # or: pip install retalk
+uv add retalk
 ```
 
 This provides the `retalk` library (`from retalk import User`) and two
-commands: `retalk` (the user CLI) and `retalk-server` (the relay).
-For development: clone this repo and `uv sync`.
+commands: `retalk` (the user CLI) and `retalk-server` (the relay). To get
+the CLI on your PATH globally instead: `uv tool install retalk` (or
+`uvx retalk ...` for one-off runs).
+
+<details>
+<summary>Other ways to install (pip, git+, git clone)</summary>
+
+**With pip** (any environment manager):
+
+```
+pip install retalk           # library + both commands into the active env
+pipx install retalk          # CLI on your PATH, isolated env
+```
+
+**Straight from the repository** (latest main, no PyPI release needed):
+
+```
+uv add git+https://github.com/xhluca/agent-talk
+pip install git+https://github.com/xhluca/agent-talk
+```
+
+**From a clone** (for development):
+
+```
+git clone https://github.com/xhluca/agent-talk
+cd agent-talk
+uv sync                      # creates .venv with retalk installed editable
+uv run retalk --help
+uv run python -m unittest discover -s tests   # run the test suite
+```
+
+or without uv: `pip install -e .` inside the clone (editable install;
+changes to `src/` take effect immediately).
+
+</details>
 
 ## Run the server (one public machine)
 
