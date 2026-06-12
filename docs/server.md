@@ -31,6 +31,49 @@ content (messages are cryptographically bound to the sender's identity
 key), substituted keys (a user ID *is* the fingerprint of its public
 keys, so clients detect any swap and refuse with PIN MISMATCH).
 
+## One-time keys (the `otks` table)
+
+**What they are.** Each one-time key (OTK) is a small throwaway keypair.
+Like every keypair it has two halves: a public half anyone may see, and a
+private half that must stay secret. The `otks` table holds **public
+halves only**.
+
+**What they do.** They let someone start an encrypted conversation with
+you *while you are offline*. A handshake needs fresh input from both
+sides, but the recipient may be asleep — so each user pre-makes a batch
+of OTKs and parks the public halves at the server. When Alice first
+messages Bob, she claims one of Bob's OTKs and finishes the handshake
+alone, instantly. Each is used once and then destroyed, which is what
+makes recorded traffic undecryptable even if long-term keys are stolen
+later (forward secrecy). Details: [olm.md](olm.md).
+
+**How they are generated.** Always by the user, never by the server. The
+user's own machine generates them (100 at a time), keeps the private
+halves in its encrypted local store, and uploads only the public halves
+(`publish_keys`). When the server reports the pool is low, the user's
+client generates and uploads more (`maintain()`, run automatically by
+`retalk receive --follow`). The server is just a vending machine for
+keys that users pre-stocked.
+
+**Why server storage is safe.** A public OTK half lets you do exactly one
+thing: encrypt a handshake *to* its owner — which is its purpose, and
+something the server is welcome to do under its own identity like anyone
+else. It does not let the server:
+
+- *read* messages sent to the owner (needs the private half, which never
+  left the owner's machine);
+- *impersonate the sender* (a message's sender identity comes from the
+  sender's private identity key, which the server also lacks — a forged
+  "from Alice" message fails decryption on arrival and is discarded);
+- *swap in a poisoned OTK it knows the private half of* (the handshake
+  also mixes in the recipient's identity key, so the server still can't
+  derive the session secret — the handshake just fails).
+
+The worst a hostile server can do with this table is refuse to hand keys
+out or drain them — denial of service, never reading or forging. That is
+the design's general rule: everything the server stores is public
+material, ciphertext, or bookkeeping.
+
 ## Why calls are authenticated at all
 
 The ciphertext is unreadable, so why authenticate callers? Because the
