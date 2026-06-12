@@ -8,7 +8,8 @@ rotation).
 ## Two different kinds of keys
 
 Each user has one **identity key** that never changes — that's the value a
-peer pins out-of-band (`PEER_PIN`). The 100 keys uploaded by `publish()` are
+peer pins out-of-band (it is hashed into the user ID; `retalk add --pin`
+adds an explicit full-key pin). The 100 keys uploaded by `publish()` are
 **one-time prekeys**, and they serve a completely different purpose: they are
 single-use ingredients for *starting a session*, not keys that encrypt
 messages.
@@ -74,8 +75,8 @@ Two countermeasures close this gap (both implemented):
   user's keys remain unclaimed (the `count_keys` tool) and uploads a fresh
   batch of `batch` keys (default 100) whenever the count drops below
   `min_otks` (default 20). Cheap, since generating them is just
-  `generate_one_time_keys(n)`. The `agent-talk` poll loop calls
-  `maintain()` every `MAINTAIN_INTERVAL` seconds (default 60).
+  `generate_one_time_keys(n)`. `retalk receive --follow` calls
+  `maintain()` every minute.
 - **Fallback key.** One special *reusable* prekey
   (`generate_fallback_key()`), published on first `publish()` and stored in
   the server's `users` table. The server's `claim_key` hands it out (with a
@@ -88,8 +89,7 @@ Two countermeasures close this gap (both implemented):
 Because the fallback key is reusable, it must not live forever: the longer
 it sits, the more session-starts a future compromise of it would expose.
 `maintain()` therefore auto-rotates it once it is older than
-`fallback_max_age` seconds (default 86400, i.e. daily; `FALLBACK_MAX_AGE`
-for the `agent-talk` command). Rotation is just `generate_fallback_key()` plus a
+`fallback_max_age` seconds (default 86400, i.e. daily). Rotation is just `generate_fallback_key()` plus a
 re-publish; the user records the rotation time locally in its `meta`
 table.
 
