@@ -14,8 +14,5 @@ retalk = "retalk.cli:main"
 retalk-server = "retalk.server:main"
 
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-[tool.hatch.build.targets.wheel]
-packages = ["src/retalk"]
+requires = ["uv_build>=0.9,<0.10"]
+build-backend = "uv_build"
