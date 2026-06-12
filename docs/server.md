@@ -9,6 +9,10 @@ hands out the public keys users publish). Everything interesting —
 encryption, identity, trust — happens at the edges. This doc explains the
 server's mechanics and the reasoning behind them.
 
+The snippets below are runnable: they assume the two-minute demo from the
+README (server on `http://127.0.0.1:8766`, an identity in `./alice`,
+`SERVER_URL` exported, `PICKLE_SECRET=alice-secret`).
+
 ## What the server stores and sees
 
 Stores (see the schema in `src/retalk/server.py`):
@@ -31,6 +35,17 @@ Cannot see or do: plaintext (no keys), private keys (never sent), forged
 content (messages are cryptographically bound to the sender's identity
 key), substituted keys (a user ID *is* the fingerprint of its public
 keys, so clients detect any swap and refuse with PIN MISMATCH).
+
+See for yourself — open the server's database while the demo runs:
+
+```sh
+sqlite3 server.db '.tables'
+# messages  nonces  otks  users
+sqlite3 server.db 'SELECT id, substr(identity_key,1,16) FROM users'
+# public keys only — no passwords, no tokens, no names
+sqlite3 server.db 'SELECT sender, recipient, substr(body,1,32) FROM messages'
+# base64 ciphertext; rows vanish once the recipient receives
+```
 
 ## One-time keys (the `otks` table)
 
@@ -75,6 +90,21 @@ out or drain them — denial of service, never reading or forging. That is
 the design's general rule: everything the server stores is public
 material, ciphertext, or bookkeeping.
 
+The two halves, in code (`uv run python`):
+
+```python
+import vodozemac as v
+
+acct = v.Account()                    # this is what lives on a user's machine
+acct.generate_one_time_keys(2)
+print({k: p.to_base64() for k, p in acct.one_time_keys.items()})
+# {'AAAAAAAAAAE': 'fkF/kOCL...', ...}   <- public halves: uploaded to the server
+
+# the private halves never leave `acct`; the only way out is encrypted:
+print(acct.pickle(b"0" * 32)[:24], "...")
+# 'P1OFSAID0+ULXj4m...'                 <- what store.db actually contains
+```
+
 ## Nonces (the `nonces` table)
 
 **The attack this stops.** Every request to the server is signed, and a
@@ -97,6 +127,18 @@ window already die on the timestamp check. The server deletes expired
 nonces on every request; the table never grows beyond a few minutes of
 traffic.
 
+Watch a replay get caught (`uv run python`):
+
+```python
+from retalk import User
+
+u = User("http://127.0.0.1:8766", "alice-secret", store="alice/store.db")
+wire = {"auth": u._auth_fields("read_messages", {})}   # one signed request
+print(u._call_raw("read_messages", wire))              # first copy: works -> []
+u._call_raw("read_messages", wire)                     # identical copy:
+# RuntimeError: server error from read_messages: replay detected: nonce already used
+```
+
 ## Why calls are authenticated at all
 
 The ciphertext is unreadable, so why authenticate callers? Because the
@@ -113,6 +155,13 @@ mailbox itself needs an owner. Without authentication:
   failing to decrypt forgeries, and real delivery problems would be
   indistinguishable from spam.
 
+An unauthenticated request is refused at the door:
+
+```sh
+curl -s -X POST http://127.0.0.1:8766 -d '{"tool":"read_messages","args":{}}'
+# {"error": "read_messages() missing 1 required positional argument: 'auth'"}
+```
+
 ## How callers are authenticated
 
 Every request is **self-signed**: it carries the caller's public keys, a
@@ -128,6 +177,27 @@ The user ID is the sha256 fingerprint of the user's public keys, so the
 binding is enforced twice: the server rejects published keys that do not
 hash to the caller's ID, and every *client* re-checks the fingerprint of
 any keys the server serves.
+
+What one auth object looks like (`uv run python`):
+
+```python
+import json
+from retalk import User
+
+u = User("http://127.0.0.1:8766", "alice-secret", store="alice/store.db")
+print(json.dumps(u._auth_fields("read_messages", {}), indent=2))
+# {
+#   "user_id":      "1247d297...",   <- sha256(public keys), 32 hex chars
+#   "identity_key": "fkF/kOCL...",   <- public, anyone may see
+#   "signing_key":  "Kcx2OupV...",   <- public
+#   "ts":           "1781731882",    <- request expires ~2.5 min later
+#   "nonce":        "c0ffee...",     <- random, single-use (see above)
+#   "sig":          "mF90aaQz..."    <- ed25519 over all of it + the tool + URL
+# }
+```
+
+Nothing in it is secret — the signature can only be *produced* with the
+private key, but anyone may look at it.
 
 **ID squatting** is impossible by construction: there is nothing to
 squat — using an ID at all requires producing signatures from keys that
@@ -149,6 +219,17 @@ Two kinds of display names exist, and the server sees neither:
   wins over the sender's `~name` in display.
 
 Trust the ID, never the self-chosen name.
+
+```sh
+# bob hasn't saved alice -> sees her unverified self-chosen name:
+retalk receive -s ./bob
+# ~alice: hello
+
+# after saving a peer name, his label wins:
+retalk add boss "$ALICE_ID" -s ./bob
+retalk receive -s ./bob
+# boss: are we still on for tomorrow?
+```
 
 ## What a hostile server can still do — and the countermeasures
 
