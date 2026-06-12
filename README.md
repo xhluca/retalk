@@ -132,6 +132,80 @@ loudly instead of silently minting a new identity. Each command prints a
 who acted. Users need a roughly correct clock (NTP is enough) — request
 signatures expire after ~2.5 minutes.
 
+## Examples
+
+### Two-minute local demo (one machine)
+
+Runnable verbatim — three identities never leave your machine. Terminal 1,
+the relay:
+
+```sh
+SERVER_AUDIENCE=http://127.0.0.1:8766 retalk-server
+```
+
+Terminal 2 — create both identities, introduce them, talk. `PICKLE_SECRET`
+is set inline here to skip the interactive prompts; in real use just let
+`init` prompt you.
+
+```sh
+export SERVER_URL=http://127.0.0.1:8766
+
+ALICE_ID=$(PICKLE_SECRET=alice-secret retalk init ./alice --name alice)
+BOB_ID=$(PICKLE_SECRET=bob-secret retalk init ./bob --name bob)
+
+PICKLE_SECRET=alice-secret retalk add bob "$BOB_ID" -s ./alice
+PICKLE_SECRET=bob-secret retalk add alice "$ALICE_ID" -s ./bob
+
+PICKLE_SECRET=bob-secret retalk receive -s ./bob     # first contact: publishes bob's keys
+PICKLE_SECRET=alice-secret retalk send bob "hello bob" -s ./alice
+
+PICKLE_SECRET=bob-secret retalk receive -s ./bob
+# alice: hello bob
+
+PICKLE_SECRET=bob-secret retalk send alice "hi alice, got it" -s ./bob
+PICKLE_SECRET=alice-secret retalk receive -s ./alice
+# bob: hi alice, got it
+```
+
+Check what the server actually saw — ciphertext only:
+
+```sh
+sqlite3 server.db 'SELECT body FROM messages LIMIT 1'    # base64 noise, no plaintext
+```
+
+### Two machines for real
+
+Machine A (and the mirror image on machine B):
+
+```sh
+retalk init -u --name alice --server https://server.example.com
+# prints alice's user id -> hand it to bob out-of-band (chat, email, paper)
+
+retalk add bob <bob's id>
+retalk send bob "hello from across the internet"
+retalk receive --follow          # live tail; ctrl-c to stop
+```
+
+After `init -u`, no `-s` flags are needed — the user-level identity is the
+default for every command.
+
+### Scripting and automation
+
+```sh
+# cron job: drain the mailbox every 5 minutes, append to a log
+*/5 * * * * PICKLE_SECRET=... retalk receive --json >> ~/inbox.jsonl 2>/dev/null
+
+# pipe messages into a tool
+retalk receive --json | jq -r .text
+
+# a 6-line auto-responder (an "agent"):
+retalk receive --follow --json | while read -r msg; do
+  sender=$(jq -r .from <<<"$msg")
+  text=$(jq -r .text <<<"$msg")
+  retalk send "$sender" "you said: $text"
+done
+```
+
 ## Library usage
 
 ```python
