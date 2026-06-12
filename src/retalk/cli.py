@@ -15,7 +15,6 @@ init. Identity banners go to stderr so stdout stays clean for --json.
 """
 
 import argparse
-import asyncio
 import getpass
 import json
 import os
@@ -115,11 +114,11 @@ def _open_user(args, need_server: bool = True, banner: bool = True) -> User:
     return u
 
 
-async def _ensure_published(u: User):
+def _ensure_published(u: User):
     """Publish keys once per server (this also creates our mailbox there)."""
     flag = f"published:{u.server_url}"
     if u._meta_get(flag) is None:
-        await u.publish()
+        u.publish()
         u._meta_set(flag, str(time.time()))
 
 
@@ -186,11 +185,8 @@ def cmd_send(args):
     u = _open_user(args)
     to = _peer_to_id(args.peer, _resolve_store(args) / STORE_FILE)
 
-    async def go():
-        await _ensure_published(u)
-        await u.send(to, args.text)
-
-    asyncio.run(go())
+    _ensure_published(u)
+    u.send(to, args.text)
     print(f"sent to {args.peer}", file=sys.stderr)
 
 
@@ -205,21 +201,18 @@ def cmd_receive(args):
             else:
                 print(f"{name or sender}: {text}", flush=True)
 
-    async def go():
-        await _ensure_published(u)
-        emit(await u.receive())
+    try:
+        _ensure_published(u)
+        emit(u.receive())
         if not args.follow:
             return
         last_maintain = time.monotonic()
         while True:
-            await asyncio.sleep(2)
-            emit(await u.receive())
+            time.sleep(2)
+            emit(u.receive())
             if time.monotonic() - last_maintain > 60:
-                await u.maintain()
+                u.maintain()
                 last_maintain = time.monotonic()
-
-    try:
-        asyncio.run(go())
     except KeyboardInterrupt:
         pass
 

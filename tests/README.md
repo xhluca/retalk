@@ -36,7 +36,7 @@ once the repo is pushed there.
 ## Adding a test file
 
 Name it `tests/test_<topic>.py` with a `unittest.TestCase` (or
-`IsolatedAsyncioTestCase` for async) and both discovery and CI pick it up
+plain `TestCase`) and both discovery and CI pick it up
 automatically. Conventions: keep all state in a
 `tempfile.TemporaryDirectory()`, and if it starts servers, give them
 ports not used by other test files (test_e2ee.py uses **8767-8768**) —

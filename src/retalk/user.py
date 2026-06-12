@@ -29,12 +29,12 @@ import json
 import secrets
 import sqlite3
 import time
+import urllib.error
+import urllib.request
 import uuid
 from contextlib import contextmanager
 
 import vodozemac as v
-from mcp import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
 
 
 def fingerprint(identity_key_b64: str, signing_key_b64: str) -> str:
@@ -154,24 +154,27 @@ class User:
         return {"user_id": aid, "identity_key": ident, "signing_key": signk,
                 "ts": ts, "nonce": nonce, "sig": sig.to_base64()}
 
-    async def _call(self, tool: str, args: dict | None = None):
+    def _call(self, tool: str, args: dict | None = None):
         args = args or {}
         wire = dict(args)
         wire["auth"] = self._auth_fields(tool, args)
-        return await self._call_raw(tool, wire)
+        return self._call_raw(tool, wire)
 
-    async def _call_raw(self, tool: str, wire: dict):
-        async with streamablehttp_client(self.server_url) as (r, w, _):
-            async with ClientSession(r, w) as session:
-                await session.initialize()
-                res = await session.call_tool(tool, wire)
-                text = res.content[0].text
-                is_error = res.isError
-        # raise outside the context managers so callers see a plain
-        # RuntimeError, not an anyio ExceptionGroup
-        if is_error:
-            raise RuntimeError(f"server error from {tool}: {text}")
-        return json.loads(text)
+    def _call_raw(self, tool: str, wire: dict):
+        req = urllib.request.Request(
+            self.server_url,
+            data=json.dumps({"tool": tool, "args": wire}).encode(),
+            headers={"content-type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode(errors="replace")
+            try:
+                detail = json.loads(detail)["error"]
+            except Exception:
+                pass
+            raise RuntimeError(f"server error from {tool}: {detail}") from None
 
     # ---------- identity verification ----------
 
@@ -207,7 +210,7 @@ class User:
         return fingerprint(acct.curve25519_key.to_base64(),
                            acct.ed25519_key.to_base64())
 
-    async def publish(self, n: int = 100, rotate_fallback: bool = False):
+    def publish(self, n: int = 100, rotate_fallback: bool = False):
         """Publish identity, signing, and n fresh one-time keys to the
         server. This is also all the onboarding a server needs — there is no
         separate registration.
@@ -218,9 +221,9 @@ class User:
         old key still decrypt.
         """
         with self._locked():
-            await self._publish(n, rotate_fallback)
+            self._publish(n, rotate_fallback)
 
-    async def _publish(self, n: int, rotate_fallback: bool):
+    def _publish(self, n: int, rotate_fallback: bool):
         acct = self._load_account()
         if n:
             acct.generate_one_time_keys(n)
@@ -228,7 +231,7 @@ class User:
             acct.generate_fallback_key()
         otks = {kid: key.to_base64() for kid, key in acct.one_time_keys.items()}
         fk = {kid: key.to_base64() for kid, key in acct.fallback_key.items()}
-        await self._call("publish_keys", {
+        self._call("publish_keys", {
             "identity_key": acct.curve25519_key.to_base64(),
             "signing_key": acct.ed25519_key.to_base64(),
             "one_time_keys": otks,
@@ -240,7 +243,7 @@ class User:
             self._meta_set("fallback_ts", str(time.time()))
         self._save_account(acct)
 
-    async def maintain(self, min_otks: int = 20, batch: int = 100,
+    def maintain(self, min_otks: int = 20, batch: int = 100,
                        fallback_max_age: float = 86400.0,
                        resend_after: float = 120.0) -> dict:
         """Keep server-side key material healthy. Call periodically.
@@ -251,7 +254,7 @@ class User:
         and re-sends outbox messages unacknowledged for resend_after seconds.
         """
         with self._locked():
-            counts = await self._call("count_keys")
+            counts = self._call("count_keys")
             need_otks = counts["unclaimed"] < min_otks
             ts = self._meta_get("fallback_ts")
             need_rotate = (
@@ -260,24 +263,24 @@ class User:
                 or time.time() - float(ts) > fallback_max_age
             )
             if need_otks or need_rotate:
-                await self._publish(batch if need_otks else 0, need_rotate)
-            resent = await self._flush_outbox(resend_after)
+                self._publish(batch if need_otks else 0, need_rotate)
+            resent = self._flush_outbox(resend_after)
             return {"unclaimed": counts["unclaimed"],
                     "replenished": need_otks,
                     "fallback_rotated": need_rotate,
                     "resent": resent}
 
-    async def send(self, to: str, text: str):
+    def send(self, to: str, text: str):
         """Encrypt and send a message to a peer user ID. The ciphertext is
         kept in a local outbox until the peer acknowledges decrypting it."""
         with self._locked():
             payload = {"id": uuid.uuid4().hex, "kind": "msg", "text": text}
-            return await self._send_envelope(to, payload, record_outbox=True)
+            return self._send_envelope(to, payload, record_outbox=True)
 
-    async def _send_envelope(self, to: str, payload: dict, record_outbox: bool):
+    def _send_envelope(self, to: str, payload: dict, record_outbox: bool):
         session = self._load_session(to)
         if session is None:
-            claimed = await self._call("claim_key", {"peer": to})
+            claimed = self._call("claim_key", {"peer": to})
             self._verify_identity(to, claimed["identity_key"],
                                   claimed["signing_key"])
             session = self._load_account().create_outbound_session(
@@ -290,33 +293,33 @@ class User:
         if record_outbox:
             self._exec("INSERT INTO outbox(id, peer, mtype, body, ts) VALUES(?,?,?,?,?)",
                        payload["id"], to, mtype, body_b64, time.time())
-        result = await self._call("send_message",
+        result = self._call("send_message",
                                   {"to": to, "mtype": mtype, "body": body_b64})
         self._save_session(to, session)
         return result
 
-    async def flush_outbox(self, older_than: float = 0.0) -> int:
+    def flush_outbox(self, older_than: float = 0.0) -> int:
         """Re-upload sent-but-unacknowledged ciphertext (e.g. after moving to
         a new server). Safe against duplicates: a peer that already decrypted
         a copy re-acks and drops it. Returns the number re-sent."""
         with self._locked():
-            return await self._flush_outbox(older_than)
+            return self._flush_outbox(older_than)
 
-    async def _flush_outbox(self, older_than: float) -> int:
+    def _flush_outbox(self, older_than: float) -> int:
         rows = self._fetchall(
             "SELECT peer, mtype, body FROM outbox WHERE ts<=?",
             time.time() - older_than)
         for peer, mtype, body in rows:
-            await self._call("send_message",
+            self._call("send_message",
                              {"to": peer, "mtype": mtype, "body": body})
         return len(rows)
 
-    async def receive(self) -> list[tuple[str, str, str]]:
+    def receive(self) -> list[tuple[str, str, str]]:
         """Fetch and decrypt pending messages, acknowledging each to its
         sender. Returns [(sender_id, sender_name, plaintext), ...]."""
         out = []
         with self._locked():
-            for m in await self._call("read_messages"):
+            for m in self._call("read_messages"):
                 sender = m["from"]
                 body_hash = hashlib.sha256(m["body"].encode()).hexdigest()
                 anymsg = v.AnyOlmMessage.from_parts(m["mtype"], base64.b64decode(m["body"]))
@@ -327,7 +330,7 @@ class User:
                         if session is not None and session.session_matches(prekey):
                             plaintext = session.decrypt(anymsg)
                         else:
-                            keys = await self._call("get_keys", {"peer": sender})
+                            keys = self._call("get_keys", {"peer": sender})
                             self._verify_identity(sender, keys["identity_key"],
                                                   keys["signing_key"])
                             acct = self._load_account()
@@ -353,7 +356,7 @@ class User:
                         "SELECT msg_id FROM processed WHERE hash=?", body_hash)
                     if dup_id is None:
                         raise
-                    await self._send_envelope(
+                    self._send_envelope(
                         sender, {"id": dup_id, "kind": "ack"}, record_outbox=False)
                     continue
                 self._save_session(sender, session)
@@ -363,7 +366,7 @@ class User:
                     continue
                 self._exec("INSERT OR IGNORE INTO processed(hash, msg_id) VALUES(?,?)",
                            body_hash, data["id"])
-                await self._send_envelope(
+                self._send_envelope(
                     sender, {"id": data["id"], "kind": "ack"}, record_outbox=False)
                 name = self.names.get(sender) or (
                     f"~{m['nickname']}" if m.get("nickname") else "")

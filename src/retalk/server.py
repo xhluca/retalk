@@ -2,8 +2,10 @@
 
 Stores only public key material and opaque (client-encrypted) ciphertext.
 Sees metadata (sender, recipient, timing, sizes) but never plaintext or
-private keys. MCP server over Streamable HTTP; put a TLS reverse proxy
-in front for internet exposure.
+private keys. Plain HTTP+JSON, standard library only: every request is a
+POST of {"tool": name, "args": {...}} and the response is the tool's JSON
+result (HTTP 400 + {"error": ...} on failure). Put a TLS reverse proxy in
+front for internet exposure.
 
 Authentication: there are no accounts, tokens, or registration. Every tool
 call carries an `auth` object self-signed with the user's ed25519 key; the
@@ -17,9 +19,9 @@ Env config:
   SERVER_HOST      bind host (default 0.0.0.0)
   SERVER_PORT      bind port (default 8766)
   SERVER_AUDIENCE  the public URL users connect to, e.g.
-                   https://server.example.com/mcp — REQUIRED for any
+                   https://server.example.com — REQUIRED for any
                    non-local deployment; signatures verify against it
-                   (default http://127.0.0.1:<port>/mcp)
+                   (default http://127.0.0.1:<port>)
 """
 
 import hashlib
@@ -27,14 +29,14 @@ import json
 import os
 import sqlite3
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import vodozemac as v
-from mcp.server.fastmcp import FastMCP
 
 DB_PATH = os.environ.get("SERVER_DB", "server.db")
 HOST = os.environ.get("SERVER_HOST", "0.0.0.0")
 PORT = int(os.environ.get("SERVER_PORT", "8766"))
-AUDIENCE = os.environ.get("SERVER_AUDIENCE", f"http://127.0.0.1:{PORT}/mcp")
+AUDIENCE = os.environ.get("SERVER_AUDIENCE", f"http://127.0.0.1:{PORT}")
 WINDOW = 150  # seconds of allowed clock skew, each direction
 
 SCHEMA = """
@@ -124,10 +126,6 @@ def _caller(tool: str, args: dict, auth: dict) -> str:
     return user_id
 
 
-mcp = FastMCP("retalk-server", host=HOST, port=PORT)
-
-
-@mcp.tool()
 def publish_keys(identity_key: str, signing_key: str, one_time_keys: dict,
                  fallback_key: dict | None, nickname: str, auth: dict) -> str:
     """Set the caller's public keys, add one-time keys, and optionally
@@ -166,7 +164,6 @@ def publish_keys(identity_key: str, signing_key: str, one_time_keys: dict,
         conn.close()
 
 
-@mcp.tool()
 def count_keys(auth: dict) -> str:
     """Return the caller's unclaimed one-time-key count and fallback-key
     status, so the caller can decide to replenish or rotate."""
@@ -184,7 +181,6 @@ def count_keys(auth: dict) -> str:
         conn.close()
 
 
-@mcp.tool()
 def get_keys(peer: str, auth: dict) -> str:
     """Return a peer's public identity and signing keys and nickname
     (no one-time key consumed)."""
@@ -203,7 +199,6 @@ def get_keys(peer: str, auth: dict) -> str:
         conn.close()
 
 
-@mcp.tool()
 def claim_key(peer: str, auth: dict) -> str:
     """Atomically claim one unclaimed one-time key for a peer. If the peer's
     one-time keys are exhausted, serve their reusable fallback key instead
@@ -240,7 +235,6 @@ def claim_key(peer: str, auth: dict) -> str:
         conn.close()
 
 
-@mcp.tool()
 def send_message(to: str, mtype: int, body: str, auth: dict) -> str:
     """Store an opaque ciphertext message for a recipient (a user id)."""
     sender = _caller("send_message", {"to": to, "mtype": mtype, "body": body},
@@ -261,7 +255,6 @@ def send_message(to: str, mtype: int, body: str, auth: dict) -> str:
         conn.close()
 
 
-@mcp.tool()
 def read_messages(auth: dict) -> str:
     """Return all unread messages for the caller and advance their cursor."""
     user_id = _caller("read_messages", {}, auth)
@@ -294,8 +287,34 @@ def read_messages(auth: dict) -> str:
         conn.close()
 
 
+TOOLS = {fn.__name__: fn for fn in
+         (publish_keys, count_keys, get_keys, claim_key,
+          send_message, read_messages)}
+
+
+class _Handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        try:
+            length = int(self.headers.get("content-length", 0))
+            req = json.loads(self.rfile.read(length))
+            result = TOOLS[req["tool"]](**req.get("args", {}))
+            self._reply(200, result.encode())
+        except Exception as e:
+            self._reply(400, json.dumps({"error": str(e)}).encode())
+
+    def _reply(self, status: int, body: bytes):
+        self.send_response(status)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass  # no request logging (metadata hygiene)
+
+
 def main():
-    mcp.run(transport="streamable-http")
+    ThreadingHTTPServer((HOST, PORT), _Handler).serve_forever()
 
 
 if __name__ == "__main__":

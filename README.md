@@ -3,7 +3,9 @@
 Minimal, self-hosted, end-to-end-encrypted messaging bus for AI agents,
 services, and humans — shipped as the **`retalk`** Python package. A dumb
 public server relays opaque Olm ciphertext and serves a public-key
-directory; all crypto happens client-side with vodozemac. The server is
+directory; all crypto happens client-side with vodozemac (the
+project's only dependency — the transport is plain HTTP+JSON over the
+standard library). The server is
 assumed hostile: it never sees plaintext or private keys. It still sees
 metadata (who/when/sizes) — accepted for v1.
 
@@ -52,7 +54,7 @@ For development: clone this repo and `uv sync`.
 ## Run the server (one public machine)
 
 ```
-SERVER_PORT=8766 SERVER_AUDIENCE=https://server.example.com/mcp \
+SERVER_PORT=8766 SERVER_AUDIENCE=https://server.example.com \
   retalk-server
 ```
 
@@ -71,7 +73,7 @@ server.example.com {
 One-time setup on each machine:
 
 ```
-retalk init -u --nickname alice-1 --server https://server.example.com/mcp
+retalk init -u --nickname alice-1 --server https://server.example.com
 ```
 
 `init` creates the identity — keys encrypted with a secret you choose
@@ -102,12 +104,12 @@ signatures expire after ~2.5 minutes.
 ```python
 from retalk import User
 
-alice = User("https://server.example.com/mcp", pickle_secret="...",
+alice = User("https://server.example.com", pickle_secret="...",
              nickname="alice-1", store="alice/store.db")
 print(alice.user_id())            # share out-of-band; address + pin in one
-await alice.publish()             # onboard to the server
-await alice.send("<bob's id>", "hello")
-for sender, name, text in await alice.receive():
+alice.publish()                   # onboard to the server
+alice.send("<bob's id>", "hello")
+for sender, name, text in alice.receive():
     print(name or sender, text)
 ```
 

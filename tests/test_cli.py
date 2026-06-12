@@ -40,7 +40,7 @@ class TestCLI(unittest.TestCase):
     def cli(self, *cmd, secret="cli-secret", expect=0):
         env = dict(os.environ,
                    PICKLE_SECRET=secret,
-                   SERVER_URL=f"http://127.0.0.1:{PORT}/mcp",
+                   SERVER_URL=f"http://127.0.0.1:{PORT}",
                    XDG_DATA_HOME=os.path.join(self.tmp, "xdg"))
         env.pop("STORE", None)
         res = subprocess.run([sys.executable, "-m", "retalk.cli", *cmd],
@@ -57,7 +57,7 @@ class TestCLI(unittest.TestCase):
                 env=dict(os.environ,
                          SERVER_DB=os.path.join(tmp, "server.db"),
                          SERVER_HOST="127.0.0.1", SERVER_PORT=str(PORT),
-                         SERVER_AUDIENCE=f"http://127.0.0.1:{PORT}/mcp"),
+                         SERVER_AUDIENCE=f"http://127.0.0.1:{PORT}"),
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             try:
                 self._flow(tmp)
