@@ -94,13 +94,13 @@ def main(tmp: str):
     try:
         url = f"http://127.0.0.1:{PORT}"
 
-        a = User(url, "pickle-secret-a", nickname="alice-user-1", store=store_a)
-        b = User(url, "pickle-secret-b", nickname="bob-user-1", store=store_b)
+        a = User(url, "pickle-secret-a", name="alice-user-1", store=store_a)
+        b = User(url, "pickle-secret-b", name="bob-user-1", store=store_b)
         aid, bid = a.user_id(), b.user_id()
         # the IDs are self-verifying fingerprints; explicit pins on top
         a.pins = {bid: b.identity_key()}
         b.pins = {aid: a.identity_key()}
-        # A assigns B a local peer name; B relies on the ~unverified nickname
+        # A assigns B a local peer name; B relies on the ~unverified name
         a.names = {bid: "bob"}
 
         # onboarding is publish_keys alone — no registration call exists
@@ -206,8 +206,8 @@ def main(tmp: str):
         server2_db = os.path.join(tmp, "server2.db")
         servers.append(start_server(server2_db, PORT2))
         url2 = f"http://127.0.0.1:{PORT2}"
-        a2 = User(url2, "pickle-secret-a", nickname="alice-user-1", store=store_a)
-        b2 = User(url2, "pickle-secret-b", nickname="bob-user-1", store=store_b)
+        a2 = User(url2, "pickle-secret-a", name="alice-user-1", store=store_a)
+        b2 = User(url2, "pickle-secret-b", name="bob-user-1", store=store_b)
         assert (a2.user_id(), b2.user_id()) == (aid, bid), "IDs not server-independent"
         # publishing keys is the only onboarding the new server needs (both
         # sides: a mailbox must exist before it can receive even an ack)

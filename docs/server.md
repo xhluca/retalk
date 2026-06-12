@@ -13,7 +13,7 @@ server's mechanics and the reasoning behind them.
 
 Stores (see the schema in `src/retalk/server.py`):
 
-- `users` — user ID, nickname, public keys (identity, signing,
+- `users` — user ID, self-chosen name, public keys (identity, signing,
   fallback). All public material; there are no accounts and no
   credentials.
 - `otks` — published one-time prekeys (public halves only) and whether
@@ -72,14 +72,14 @@ hash to it, which only the keys' owner can do.
 publish keys and get a mailbox. Firewall the server or add auth at the
 reverse proxy for a closed deployment.
 
-## Nicknames vs peer names
+## Self-chosen names vs peer names
 
-The nickname a user publishes is **attacker-chosen display text** —
+The name a user publishes is **attacker-chosen display text** —
 anyone can call themselves `alice-user-1`. Clients therefore treat it as
 decoration: it is shown prefixed with `~` (unverified). To display a
 trusted name, assign a local *peer name* for a peer ID (`names={peer_id:
 "bob"}` / `PEER_NAME`); peer names never come from the network. Trust the
-ID, never the nickname.
+ID, never the self-chosen name.
 
 ## What a hostile server can still do — and the countermeasures
 

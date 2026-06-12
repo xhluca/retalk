@@ -42,7 +42,7 @@ WINDOW = 150  # seconds of allowed clock skew, each direction
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users(
     id TEXT PRIMARY KEY,
-    nickname TEXT,
+    name TEXT,
     identity_key TEXT,
     signing_key TEXT,
     fallback_key_id TEXT,
@@ -127,13 +127,13 @@ def _caller(tool: str, args: dict, auth: dict) -> str:
 
 
 def publish_keys(identity_key: str, signing_key: str, one_time_keys: dict,
-                 fallback_key: dict | None, nickname: str, auth: dict) -> str:
+                 fallback_key: dict | None, name: str, auth: dict) -> str:
     """Set the caller's public keys, add one-time keys, and optionally
     replace the fallback key. Implicitly creates the user's mailbox."""
     user_id = _caller("publish_keys", {
         "identity_key": identity_key, "signing_key": signing_key,
         "one_time_keys": one_time_keys, "fallback_key": fallback_key,
-        "nickname": nickname,
+        "name": name,
     }, auth)
     if _fingerprint(identity_key, signing_key) != user_id:
         raise ValueError("published keys do not match user id")
@@ -141,11 +141,11 @@ def publish_keys(identity_key: str, signing_key: str, one_time_keys: dict,
     try:
         with conn:
             conn.execute(
-                "INSERT INTO users(id, nickname, identity_key, signing_key) "
+                "INSERT INTO users(id, name, identity_key, signing_key) "
                 "VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET "
-                "nickname=excluded.nickname, identity_key=excluded.identity_key, "
+                "name=excluded.name, identity_key=excluded.identity_key, "
                 "signing_key=excluded.signing_key",
-                (user_id, nickname, identity_key, signing_key),
+                (user_id, name, identity_key, signing_key),
             )
             if fallback_key:
                 fk_id, fk = next(iter(fallback_key.items()))
@@ -182,19 +182,19 @@ def count_keys(auth: dict) -> str:
 
 
 def get_keys(peer: str, auth: dict) -> str:
-    """Return a peer's public identity and signing keys and nickname
+    """Return a peer's public identity and signing keys and name
     (no one-time key consumed)."""
     _caller("get_keys", {"peer": peer}, auth)
     conn = _db()
     try:
         row = conn.execute(
-            "SELECT identity_key, signing_key, nickname FROM users WHERE id=?",
+            "SELECT identity_key, signing_key, name FROM users WHERE id=?",
             (peer,),
         ).fetchone()
         if row is None or row[0] is None:
             raise ValueError(f"unknown peer or no published keys: {peer}")
         return json.dumps({"identity_key": row[0], "signing_key": row[1],
-                           "nickname": row[2]})
+                           "name": row[2]})
     finally:
         conn.close()
 
@@ -266,7 +266,7 @@ def read_messages(auth: dict) -> str:
         ).fetchone()
         last_read = cur_row[0] if cur_row else 0
         rows = conn.execute(
-            "SELECT m.id, m.ts, m.sender, a.nickname, m.mtype, m.body "
+            "SELECT m.id, m.ts, m.sender, a.name, m.mtype, m.body "
             "FROM messages m LEFT JOIN users a ON a.id = m.sender "
             "WHERE m.recipient=? AND m.id>? ORDER BY m.id",
             (user_id, last_read),
@@ -279,7 +279,7 @@ def read_messages(auth: dict) -> str:
             )
         conn.execute("COMMIT")
         return json.dumps([
-            {"message_id": r[0], "ts": r[1], "from": r[2], "nickname": r[3],
+            {"message_id": r[0], "ts": r[1], "from": r[2], "name": r[3],
              "mtype": r[4], "body": r[5]}
             for r in rows
         ])

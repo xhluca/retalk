@@ -56,13 +56,13 @@ class PinMismatchError(Exception):
 
 
 class User:
-    def __init__(self, server_url: str, pickle_secret: str, nickname: str = "",
+    def __init__(self, server_url: str, pickle_secret: str, name: str = "",
                  store: str = "user.db", pins: dict | None = None,
                  names: dict | None = None):
         self.server_url = server_url
-        self.nickname = nickname
+        self.name = name
         self.pins = pins or {}
-        # local peer names {peer_id: name}; server-supplied nicknames are
+        # local peer names {peer_id: name}; server-supplied names are
         # attacker-chosen text and are only ever shown marked with "~"
         self.names = names or {}
         self._pickle_key = hashlib.sha256(pickle_secret.encode()).digest()
@@ -236,7 +236,7 @@ class User:
             "signing_key": acct.ed25519_key.to_base64(),
             "one_time_keys": otks,
             "fallback_key": fk or None,
-            "nickname": self.nickname,
+            "name": self.name,
         })
         acct.mark_keys_as_published()
         if fk:
@@ -369,6 +369,6 @@ class User:
                 self._send_envelope(
                     sender, {"id": data["id"], "kind": "ack"}, record_outbox=False)
                 name = self.names.get(sender) or (
-                    f"~{m['nickname']}" if m.get("nickname") else "")
+                    f"~{m['name']}" if m.get("name") else "")
                 out.append((sender, name, data["text"]))
         return out

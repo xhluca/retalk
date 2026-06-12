@@ -34,10 +34,10 @@ groups a person's users).
   itself, nothing credential-like exists to steal or rotate, and
   onboarding to any server is just publishing your keys. See
   [docs/auth.md](docs/auth.md).
-- **Nicknames** are cosmetic display names, not unique, and chosen by the
-  peer — so they are shown prefixed with `~` (unverified). Save a local
-  **peer name** (`retalk add bob <id>`) for a trusted label; peer names
-  never come from the network.
+- A user's self-chosen **name** is cosmetic, not unique, and shown to
+  peers prefixed with `~` (unverified — anyone can call themselves
+  anything). Save a local **peer name** (`retalk add bob <id>`) for a
+  trusted label; peer names never come from the network.
 - IDs are server-independent: if you move to a new server, users just
   publish keys there and existing sessions keep working.
 
@@ -73,7 +73,7 @@ server.example.com {
 One-time setup on each machine:
 
 ```
-retalk init -u --nickname alice-1 --server https://server.example.com
+retalk init -u --name alice-1 --server https://server.example.com
 ```
 
 `init` creates the identity — keys encrypted with a secret you choose
@@ -95,7 +95,7 @@ puts one wherever you say. Every command picks its identity via
 `-s DIR` > `-u [NAME]` > `STORE` env > the user-level default if it
 exists — and **only `init` ever creates one**, so a mistyped path fails
 loudly instead of silently minting a new identity. Each command prints a
-`using <nickname> (<id>) from <dir>` banner to stderr so you always know
+`using <name> (<id>) from <dir>` banner to stderr so you always know
 who acted. Users need a roughly correct clock (NTP is enough) — request
 signatures expire after ~2.5 minutes.
 
@@ -105,7 +105,7 @@ signatures expire after ~2.5 minutes.
 from retalk import User
 
 alice = User("https://server.example.com", pickle_secret="...",
-             nickname="alice-1", store="alice/store.db")
+             name="alice-1", store="alice/store.db")
 print(alice.user_id())            # share out-of-band; address + pin in one
 alice.publish()                   # onboard to the server
 alice.send("<bob's id>", "hello")
@@ -142,7 +142,7 @@ calls it every minute; library users can tune every threshold via
   scenario, the exact wire format, and why this was chosen over tokens.
 - [docs/server.md](docs/server.md) — the server's mechanics: what it
   stores and sees, why calls are authenticated at all (mailbox ownership),
-  nicknames vs peer names, and what a hostile server can and cannot do.
+  self-chosen names vs peer names, and what a hostile server can and cannot do.
 - [docs/olm.md](docs/olm.md) — the crypto: one-time prekeys, why each is
   single-use, replenishment, and fallback-key rotation grace windows.
 

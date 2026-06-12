@@ -104,12 +104,12 @@ def _open_user(args, need_server: bool = True, banner: bool = True) -> User:
     pins = {pid: pin for _, (pid, pin) in peers.items() if pin}
     names = {pid: name for name, (pid, _) in peers.items()}
     try:
-        u = User(server, _secret(), nickname=_meta(store_db, "nickname") or "",
+        u = User(server, _secret(), name=_meta(store_db, "name") or "",
                  store=str(store_db), pins=pins, names=names)
     except Exception:
         _die(f"could not unlock the identity at {d} (wrong secret?)")
     if banner:
-        print(f"using {u.nickname or 'user'} ({u.user_id()}) from {d}",
+        print(f"using {u.name or 'user'} ({u.user_id()}) from {d}",
               file=sys.stderr)
     return u
 
@@ -143,10 +143,10 @@ def cmd_init(args):
     d.mkdir(parents=True, exist_ok=True)
     secret = _secret(confirm=True)
     server = args.server or os.environ.get("SERVER_URL") or ""
-    u = User(server, secret, nickname=args.nickname or "",
+    u = User(server, secret, name=args.name or "",
              store=str(d / STORE_FILE))
-    if args.nickname:
-        u._meta_set("nickname", args.nickname)
+    if args.name:
+        u._meta_set("name", args.name)
     if server:
         u._meta_set("server_url", server)
     print(f"created identity at {d}", file=sys.stderr)
@@ -160,7 +160,7 @@ def cmd_id(args):
     if args.json:
         print(json.dumps({"user_id": u.user_id(),
                           "identity_key": u.identity_key(),
-                          "nickname": u.nickname}))
+                          "name": u.name}))
     else:
         print(u.user_id())
 
@@ -267,12 +267,12 @@ environment variables:
 output conventions:
   stdout carries results (ids, messages, --json lines); everything else —
   banners, progress, errors — goes to stderr, so pipes stay clean. Every
-  command that acts prints `using <nickname> (<id>) from <dir>` to stderr
+  command that acts prints `using <name> (<id>) from <dir>` to stderr
   so you always know which identity acted. Exit codes: 0 ok, 2 usage or
   refusal (no identity, wrong secret, unknown peer).
 
 quickstart:
-  retalk init -u --nickname alice-1 --server https://server.example.com
+  retalk init -u --name alice-1 --server https://server.example.com
   retalk add bob <bob's user id>
   retalk send bob "hello"
   retalk receive --follow
@@ -307,11 +307,11 @@ automatically the first time you send or receive.""",
 examples:
   retalk init ./alice                          identity in ./alice/
   retalk init -u                               user-level 'default' identity
-  retalk init -u work --nickname work-bot \\
+  retalk init -u work --name work-bot \\
               --server https://srv.example.com  named identity, server saved""")
     sp.add_argument("directory", nargs="?",
                     help="folder to hold the identity (alternative to -u)")
-    sp.add_argument("--nickname", metavar="NAME",
+    sp.add_argument("--name", metavar="NAME",
                     help="display name attached to your messages; peers see "
                          "it marked '~NAME' because it is not verified — "
                          "only their locally saved peer name for you is")
@@ -334,10 +334,10 @@ Needs your secret (to open the store) but never contacts the server.""",
 examples:
   retalk id                    id of the default identity
   retalk id -s ./alice         id of a project-local identity
-  retalk id --json             {"user_id", "identity_key", "nickname"}""")
+  retalk id --json             {"user_id", "identity_key", "name"}""")
     sp.add_argument("--json", action="store_true",
                     help="emit JSON with user_id, identity_key (base64 "
-                         "Curve25519 public key), and nickname")
+                         "Curve25519 public key), and name")
     sp.set_defaults(fn=cmd_id)
 
     sp = sub.add_parser(
@@ -346,7 +346,7 @@ examples:
         description="""\
 Save a peer's USER ID under a short local name, so `send bob ...` works
 and incoming messages from that ID display as 'bob' instead of an
-unverified '~nickname'. The name is yours alone — it never travels over
+unverified '~name'. The name is yours alone — it never travels over
 the network and the peer never learns it.
 
 Get the peer's ID out-of-band (they run `retalk id`). Adding an existing
@@ -402,7 +402,7 @@ examples:
         description="""\
 Fetch this identity's mailbox from the server, decrypt each message, and
 print it — `name: text` per line, where name is your saved peer name for
-the sender, or their unverified self-chosen nickname marked '~', or the
+the sender, or their unverified self-chosen name marked '~', or the
 bare sender id. Each successfully decrypted message is acknowledged back
 to its sender (encrypted, like everything else).
 
@@ -421,7 +421,7 @@ examples:
   retalk receive --json | jq .text     script-friendly, one object per line
 
 json fields per message: "from" (sender id), "name" (your peer name,
-'~nickname', or ''), "text" (the plaintext).""")
+'~name', or ''), "text" (the plaintext).""")
     sp.add_argument("--follow", action="store_true",
                     help="keep polling every 2s and maintain keys every "
                          "60s until ctrl-c")

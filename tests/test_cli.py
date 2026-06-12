@@ -73,14 +73,14 @@ class TestCLI(unittest.TestCase):
         self.assertIn("no identity", res.stderr)
 
         # 1. init (explicit dir for alice, user-level for bob)
-        res = self.cli("init", alice_dir, "--nickname", "alice-1")
+        res = self.cli("init", alice_dir, "--name", "alice-1")
         aid = res.stdout.strip()
         self.assertRegex(aid, r"^[0-9a-f]{32}$")
         self.assertTrue(os.path.exists(os.path.join(alice_dir, "store.db")))
         res = self.cli("init", alice_dir, expect=2)
         self.assertIn("already exists", res.stderr)
 
-        res = self.cli("init", "-u", "--nickname", "bob-1", secret="bob-secret")
+        res = self.cli("init", "-u", "--name", "bob-1", secret="bob-secret")
         bid = res.stdout.strip()
         self.assertRegex(bid, r"^[0-9a-f]{32}$")
 
