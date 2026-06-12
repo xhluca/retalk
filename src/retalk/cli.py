@@ -115,11 +115,12 @@ def _open_user(args, need_server: bool = True, banner: bool = True) -> User:
 
 
 def _ensure_published(u: User):
-    """Publish keys once per server (this also creates our mailbox there)."""
-    flag = f"published:{u.server_url}"
-    if u._meta_get(flag) is None:
+    """Make sure our keys exist on this server before acting.
+
+    Asks the server rather than trusting a local flag, so a wiped or
+    replaced server database heals automatically on the next command."""
+    if not u._call("count_keys")["has_fallback"]:
         u.publish()
-        u._meta_set(flag, str(time.time()))
 
 
 def _peer_to_id(peer: str, store_db: Path) -> str:

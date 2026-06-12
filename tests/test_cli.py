@@ -8,6 +8,8 @@ Asserts:
   4. add + send + receive --json: a full encrypted exchange through a live
      server, peer names resolving on the sender side.
   5. A wrong PICKLE_SECRET fails with a friendly error.
+  6. A wiped server database heals: clients republish keys on their next
+     command and the conversation continues.
 
 Uses port 8769 (see tests/README.md for the port registry).
 Run from the repo root: uv run python -m unittest discover -s tests
@@ -15,6 +17,7 @@ Run from the repo root: uv run python -m unittest discover -s tests
 
 import json
 import os
+import sqlite3
 import socket
 import subprocess
 import sys
@@ -106,6 +109,19 @@ class TestCLI(unittest.TestCase):
         # 5. wrong secret -> friendly refusal
         res = self.cli("id", "-s", alice_dir, secret="wrong", expect=2)
         self.assertIn("wrong secret", res.stderr)
+
+        # 6. server database wiped -> clients notice and republish; the
+        # conversation continues (sessions and outbox live client-side)
+        conn = sqlite3.connect(os.path.join(tmp, "server.db"))
+        with conn:
+            for table in ("users", "otks", "messages"):
+                conn.execute(f"DELETE FROM {table}")
+        conn.close()
+        self.cli("receive", secret="bob-secret")          # bob heals himself
+        self.cli("send", "bob", "after the wipe", "-s", alice_dir)  # alice too
+        res = self.cli("receive", "--json", secret="bob-secret")
+        texts = [json.loads(l)["text"] for l in res.stdout.splitlines()]
+        self.assertIn("after the wipe", texts)
 
     def test_help_screens(self):
         """Every command documents itself: --help exits 0 with substance."""

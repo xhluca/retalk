@@ -27,6 +27,12 @@ Stores (see the schema in `src/retalk/server.py`):
 - `nonces` — random one-use numbers from recent requests, kept to block
   replays (explained below).
 
+The whole database is **disposable**. State that matters lives on the
+clients: sessions and contacts in each user's store, unacknowledged mail
+in senders' outboxes. If the server's disk is lost, clients notice their
+keys are missing on the next command, republish them, and re-send
+anything undelivered — the conversation continues.
+
 Sees: **metadata**. Who messages whom, when, how often, how big. This is
 the accepted leak of the design — E2EE protects content, not the social
 graph.
