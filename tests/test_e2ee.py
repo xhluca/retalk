@@ -5,7 +5,8 @@ Asserts:
      plaintext — with zero registration calls; publishing keys is the only
      onboarding.
   2. B can reply and A decrypts the exact plaintext.
-  3. The server's stored message bodies contain no plaintext.
+  3. Message bodies at the server contain no plaintext, and delivered
+     mail is deleted from the server entirely.
   4. After tampering with B's identity key in the server DB (and clearing A's
      cached session), A's next send raises a PIN MISMATCH error — even
      without an explicit pin, because the user ID is the keys' fingerprint.
@@ -110,6 +111,7 @@ def main(tmp: str):
         # 1. A -> B
         msg_ab = "hello from A: the launch code is swordfish-7741"
         a.send(bid, msg_ab)
+        in_flight = [r[0] for r in sql(server_db, "SELECT body FROM messages")]
         got = b.receive()
         assert got == [(aid, "~alice-user-1", msg_ab)], f"B received {got!r}"
         print("PASS 1: A -> B decrypted exact plaintext (no registration)")
@@ -121,13 +123,14 @@ def main(tmp: str):
         assert got == [(bid, "bob", msg_ba)], f"A received {got!r}"
         print("PASS 2: B -> A decrypted exact plaintext")
 
-        # 3. server stores no plaintext (2 messages + 2 acks, all ciphertext)
-        bodies = [r[0] for r in sql(server_db, "SELECT body FROM messages")]
-        assert len(bodies) == 4, len(bodies)
-        for body in bodies:
+        # 3. no plaintext at the server, and delivered mail is deleted
+        assert len(in_flight) == 1, in_flight  # captured before delivery
+        pending = [r[0] for r in sql(server_db, "SELECT body FROM messages")]
+        assert len(pending) == 1, pending  # only A's undelivered ack remains
+        for body in in_flight + pending:
             for needle in (msg_ab, msg_ba, "swordfish", "hello from A", "reply from B"):
                 assert needle not in body, f"plaintext leaked to server: {needle!r}"
-        print("PASS 3: server-stored bodies contain no plaintext")
+        print("PASS 3: no plaintext at the server; delivered mail deleted")
 
         # 4. tampered identity key -> PIN MISMATCH on next send
         evil_key = vz.Account().curve25519_key.to_base64()

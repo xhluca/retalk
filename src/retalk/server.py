@@ -63,10 +63,6 @@ CREATE TABLE IF NOT EXISTS messages(
     mtype INT,
     body TEXT
 );
-CREATE TABLE IF NOT EXISTS cursors(
-    user TEXT PRIMARY KEY,
-    last_read_id INTEGER NOT NULL DEFAULT 0
-);
 CREATE TABLE IF NOT EXISTS nonces(
     nonce TEXT PRIMARY KEY,
     ts REAL
@@ -256,27 +252,21 @@ def send_message(to: str, mtype: int, body: str, auth: dict) -> str:
 
 
 def read_messages(auth: dict) -> str:
-    """Return all unread messages for the caller and advance their cursor."""
+    """Hand over and delete all pending messages for the caller. Delivered
+    mail leaves the server entirely (content and metadata)."""
     user_id = _caller("read_messages", {}, auth)
     conn = _db()
     try:
         conn.execute("BEGIN IMMEDIATE")
-        cur_row = conn.execute(
-            "SELECT last_read_id FROM cursors WHERE user=?", (user_id,)
-        ).fetchone()
-        last_read = cur_row[0] if cur_row else 0
         rows = conn.execute(
             "SELECT m.id, m.ts, m.sender, a.name, m.mtype, m.body "
             "FROM messages m LEFT JOIN users a ON a.id = m.sender "
-            "WHERE m.recipient=? AND m.id>? ORDER BY m.id",
-            (user_id, last_read),
+            "WHERE m.recipient=? ORDER BY m.id",
+            (user_id,),
         ).fetchall()
         if rows:
-            conn.execute(
-                "INSERT INTO cursors(user, last_read_id) VALUES(?,?) "
-                "ON CONFLICT(user) DO UPDATE SET last_read_id=excluded.last_read_id",
-                (user_id, rows[-1][0]),
-            )
+            conn.execute("DELETE FROM messages WHERE recipient=? AND id<=?",
+                         (user_id, rows[-1][0]))
         conn.execute("COMMIT")
         return json.dumps([
             {"message_id": r[0], "ts": r[1], "from": r[2], "name": r[3],

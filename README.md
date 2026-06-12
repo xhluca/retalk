@@ -267,7 +267,7 @@ stores. CI runs the same discovery on every push/PR via GitHub Actions
 [tests/README.md](tests/README.md).
 
 `tests/test_e2ee.py` proves 14 criteria: round-trip decryption both ways,
-no plaintext in the server DB, PIN MISMATCH refusal when the server's
+no plaintext in the server DB (and delivered mail deleted), PIN MISMATCH refusal when the server's
 stored key is tampered with (via the fingerprint ID alone), fallback-key
 session establishment when the one-time pool is drained, replenishment
 and fallback rotation via `maintain()`, decryption of in-flight messages

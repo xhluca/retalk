@@ -18,8 +18,9 @@ Stores (see the schema in `src/retalk/server.py`):
   credentials.
 - `otks` — published one-time prekeys (public halves only) and whether
   each has been claimed.
-- `messages` — opaque base64 ciphertext, sender/recipient IDs, timestamps.
-- `cursors` — how far each user has read its mailbox.
+- `messages` — opaque base64 ciphertext, sender/recipient IDs,
+  timestamps. A message is **deleted the moment it is delivered**, so the
+  server holds only mail in flight.
 - `nonces` — random one-use numbers from recent requests, kept to block
   replays (explained below).
 
