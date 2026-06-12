@@ -1,12 +1,12 @@
 # How users prove who they are (signed requests)
 
-This page explains how a user convinces the broker "this request really
+This page explains how a user convinces the server "this request really
 comes from me" — without accounts, passwords, tokens, or registration. It
 assumes no security background.
 
 ## The problem
 
-The broker keeps a mailbox per user. Mail is encrypted, so a thief can't
+The server keeps a mailbox per user. Mail is encrypted, so a thief can't
 *read* it — but `read_messages` also marks mail as delivered. If anyone
 could call it while claiming to be you, they could make your messages
 vanish before you ever poll for them. So every request must prove who is
@@ -42,31 +42,31 @@ outside can be swapped by an attacker while the signature stays valid. So
 the signed text packs together everything that defines "this request":
 
 ```
-tool | broker URL | user ID | timestamp | nonce | hash of the arguments
+tool | server URL | user ID | timestamp | nonce | hash of the arguments
 ```
 
 Each piece slams a specific door:
 
 - **tool** — a signature made for the harmless `count_keys` can't be
   re-submitted as authorization for `read_messages`.
-- **broker URL** — a request captured at one broker is rejected at every
-  other broker. (This is why the broker's `BROKER_AUDIENCE` setting must
+- **server URL** — a request captured at one server is rejected at every
+  other server. (This is why the server's `SERVER_AUDIENCE` setting must
   exactly match the URL users connect to.)
 - **user ID** — says who is calling. The ID is itself the *fingerprint*
-  (a hash — a one-way scramble) of the user's public keys, so the broker
+  (a hash — a one-way scramble) of the user's public keys, so the server
   can check "do the keys in this request really belong to this ID?"
   without keeping any user table.
 - **timestamp** — a captured request expires after ~2.5 minutes instead
   of being valid forever.
 - **nonce** (a random number used once) — closes the remaining gap: the
-  broker remembers recently seen nonces and rejects an exact re-submission
+  server remembers recently seen nonces and rejects an exact re-submission
   even inside the time window.
 - **hash of the arguments** — your signed "send to Bob" can't be replayed
   as "send to Charlie".
 
-## What the broker checks, step by step
+## What the server checks, step by step
 
-For every call the broker: (1) hashes the keys in the request and compares
+For every call the server: (1) hashes the keys in the request and compares
 with the claimed user ID; (2) checks the timestamp is within ±150
 seconds; (3) rebuilds the signed text from its own copy of each piece and
 verifies the signature against the caller's public key; (4) checks the
@@ -79,13 +79,13 @@ request.
 - **Sniffing traffic (operator skipped TLS):** they see ciphertext and
   signatures. Nothing they capture lets them issue new requests — there is
   no token to steal. (Use TLS anyway; it also hides metadata in transit.)
-- **A fully compromised broker:** it could always mess with its own
+- **A fully compromised server:** it could always mess with its own
   database (drop your mail, refuse service) — no auth scheme prevents
   that. What it *cannot* do is impersonate you elsewhere: it never sees
-  anything reusable at another broker.
+  anything reusable at another server.
 - **Your store file stolen (without your `PICKLE_SECRET`):** the signing
   key is encrypted at rest, and no other credential exists in the file. The
-  thief cannot call the broker as you at all.
+  thief cannot call the server as you at all.
 
 ## Requirements and limits
 
@@ -93,10 +93,10 @@ request.
   ~2.5 minutes are rejected ("stale or future timestamp"). Any machine
   running NTP is fine; a badly wrong clock is the one new failure mode of
   this design.
-- **`BROKER_AUDIENCE` must be configured** on the broker to the exact URL
+- **`SERVER_AUDIENCE` must be configured** on the server to the exact URL
   users use. If they disagree, every request fails signature verification
   (loudly, so misconfiguration is obvious).
-- The broker keeps a small self-purging table of recent nonces.
+- The server keeps a small self-purging table of recent nonces.
 
 ## For reimplementers: the exact wire format
 
@@ -109,7 +109,7 @@ fails.
   `,` and `:` (no spaces), and every parameter present explicitly —
   optional parameters are included as `null`, never omitted.
 - Signed text: the six fields joined with `|` (pipe), encoded as UTF-8:
-  `tool|broker_url|user_id|ts|nonce|args_hash`. `ts` is integer seconds
+  `tool|server_url|user_id|ts|nonce|args_hash`. `ts` is integer seconds
   since epoch, as a decimal string. `nonce` is 32 hex characters.
 - Signature: ed25519 over those bytes, base64. The `auth` object sent with
   each call is `{user_id, identity_key, signing_key, ts, nonce, sig}`.
@@ -122,10 +122,10 @@ We built and tested both. Tokens are the industry default and simpler to
 reason about — but measurement flipped the call for this project: the
 signed version is *fewer* lines (deleting registration and token plumbing
 outweighed the signing code), costs ~4 ms per request, and all three
-attack defenses (replay, stale timestamp, wrong broker) are covered by
+attack defenses (replay, stale timestamp, wrong server) are covered by
 permanent tests. The deciding security wins: self-hosters who skip TLS
 don't collapse to total mailbox takeover, a stolen store file contains no
 usable credential, and identity becomes one mechanism (the keys) instead
 of two (keys + token lifecycle). The accepted costs: users need a working
-clock, the broker needs the vodozemac library, and the byte format above
+clock, the server needs the vodozemac library, and the byte format above
 is a contract that reimplementations must follow exactly.

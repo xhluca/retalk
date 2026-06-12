@@ -19,14 +19,14 @@ Imagine A wants to start an encrypted conversation with B, but B is offline
 (B is just a poll loop that might not run for an hour). A handshake normally
 requires both parties to be live and exchange fresh randomness. The
 Olm/Signal trick: B pre-generates a batch of throwaway keypairs, keeps the
-private halves locally, and parks the public halves at the broker — like
+private halves locally, and parks the public halves at the server — like
 leaving a stack of pre-addressed envelopes at the post office. When A wants
 to talk, A calls `claim_key`, takes one envelope, and can complete the
 handshake alone, immediately, while B is asleep. When B wakes up and reads
 the pre-key message, B finds the matching private half and finishes its
 side.
 
-That is exactly what happens in `agent_talk/user.py`: A's first `send` to a peer
+That is exactly what happens in `retalk/user.py`: A's first `send` to a peer
 claims one prekey and calls `create_outbound_session`; B's `receive` sees
 the pre-key message (`mtype == 0`) and calls `create_inbound_session`, which
 consumes the key.
@@ -41,13 +41,13 @@ Two reasons:
    session — the ingredient no longer exists. If the same prekey were reused
    for every session, it would become a long-lived secret whose theft
    retroactively breaks every session that used it.
-2. **Replay protection.** The broker is hostile in our trust model. If
-   prekeys were reusable, the broker could replay an old handshake message
+2. **Replay protection.** The server is hostile in our trust model. If
+   prekeys were reusable, the server could replay an old handshake message
    back at B and trick B into creating duplicate sessions or re-processing
    old traffic. Single-use means a replayed handshake simply fails — the
    private half is already gone.
 
-This is also why the broker's `claim_key` marks the key claimed inside a
+This is also why the server's `claim_key` marks the key claimed inside a
 `BEGIN IMMEDIATE` transaction: each key must be handed out at most once,
 even under concurrent claims.
 
@@ -62,7 +62,7 @@ prekey total. The pool only drains when *new sessions* are established.
 
 The pool is finite (we upload 100) and it only shrinks. It drains when peers
 legitimately start new sessions, when a peer clears its local store and has
-to re-handshake — or maliciously: anyone able to reach the broker can
+to re-handshake — or maliciously: anyone able to reach the server can
 call `claim_key("b")` 100 times and pour B's envelopes down the drain.
 Without countermeasures, an empty pool would mean **nobody can start a new
 conversation with B** until B published again. Existing sessions keep
@@ -70,7 +70,7 @@ working; new ones could not form.
 
 Two countermeasures close this gap (both implemented):
 
-- **Replenishment.** `User.maintain()` asks the broker how many of the
+- **Replenishment.** `User.maintain()` asks the server how many of the
   user's keys remain unclaimed (the `count_keys` tool) and uploads a fresh
   batch of `batch` keys (default 100) whenever the count drops below
   `min_otks` (default 20). Cheap, since generating them is just
@@ -78,7 +78,7 @@ Two countermeasures close this gap (both implemented):
   `maintain()` every `MAINTAIN_INTERVAL` seconds (default 60).
 - **Fallback key.** One special *reusable* prekey
   (`generate_fallback_key()`), published on first `publish()` and stored in
-  the broker's `users` table. The broker's `claim_key` hands it out (with a
+  the server's `users` table. The server's `claim_key` hands it out (with a
   `"fallback": true` flag) only when the one-time pool is empty. It trades a
   little forward secrecy — it is reusable until rotated — for availability:
   the drain attack stops being a denial of service.

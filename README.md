@@ -1,11 +1,14 @@
 # agent-talk
 
 Minimal, self-hosted, end-to-end-encrypted messaging bus for AI agents,
-services, and humans. A dumb public broker relays opaque Olm ciphertext
-and serves a public-key directory; all crypto happens client-side with
-vodozemac. The broker is assumed hostile: it never sees plaintext or
-private keys. The broker still sees metadata (who/when/sizes) — accepted
-for v1.
+services, and humans — shipped as the **`retalk`** Python package. A dumb
+public server relays opaque Olm ciphertext and serves a public-key
+directory; all crypto happens client-side with vodozemac. The server is
+assumed hostile: it never sees plaintext or private keys. It still sees
+metadata (who/when/sizes) — accepted for v1.
+
+(Architecturally the server is a *message broker*: an intermediary that
+only stores and forwards sealed messages. The docs just say "server.")
 
 Terminology: a **user** is any participant — a keypair plus a mailbox
 (an AI agent, a bot, a person at a terminal). The human or organization
@@ -17,167 +20,152 @@ groups a person's users).
 ## Identity model
 
 - A user's **ID** is the sha256 fingerprint (32 hex chars) of its
-  self-generated public keys. The broker enforces this at publish time,
+  self-generated public keys. The server enforces this at publish time,
   and clients re-check it on every key lookup — so an ID is
-  **self-verifying**: a malicious broker cannot serve substitute keys for
+  **self-verifying**: a malicious server cannot serve substitute keys for
   an ID without every client refusing (`PIN MISMATCH`). Sharing your ID
-  with a peer over any channel the broker doesn't control (chat, email, in
+  with a peer over any channel the server doesn't control (chat, email, in
   person — "out-of-band") is simultaneously sharing your address *and*
   your pin.
-- **There are no accounts, tokens, or registration.** Every broker call is
+- **There are no accounts, tokens, or registration.** Every server call is
   signed with the user's own key — each request proves its origin by
   itself, nothing credential-like exists to steal or rotate, and
-  onboarding to any broker is just publishing your keys. See
+  onboarding to any server is just publishing your keys. See
   [docs/auth.md](docs/auth.md).
 - **Nicknames** are cosmetic display names, not unique, and chosen by the
-  peer — so they are shown prefixed with `~` (unverified). Assign a local
-  **peer name** (`PEER_NAME` / `names={peer_id: name}`) for a trusted
-  label; peer names never come from the network.
-- IDs are broker-independent: if you move to a new broker, users just
+  peer — so they are shown prefixed with `~` (unverified). Save a local
+  **peer name** (`retalk add bob <id>`) for a trusted label; peer names
+  never come from the network.
+- IDs are server-independent: if you move to a new server, users just
   publish keys there and existing sessions keep working.
 
 ## Install
 
-agent-talk is a Python package (dependencies: `mcp`, `vodozemac`). As a
-dependency of your project:
-
 ```
-uv add git+https://github.com/xhluca/agent-talk      # or: pip install git+...
+uv add retalk        # or: pip install retalk
 ```
 
-For development, clone the repo and let [uv](https://docs.astral.sh/uv/)
-set up the environment:
+This provides the `retalk` library (`from retalk import User`) and two
+commands: `retalk` (the user CLI) and `retalk-server` (the relay).
+For development: clone this repo and `uv sync`.
+
+## Run the server (one public machine)
 
 ```
-uv sync
+SERVER_PORT=8766 SERVER_AUDIENCE=https://server.example.com/mcp \
+  retalk-server
 ```
 
-Installing provides the `agent_talk` library (`from agent_talk import
-User`) and two commands: `agent-talk` (a user poll loop) and
-`agent-talk-broker` (the relay).
-
-## Run the broker (one public machine)
-
-```
-BROKER_PORT=8766 BROKER_AUDIENCE=https://broker.example.com/mcp \
-  uv run agent-talk-broker
-```
-
-No user setup needed — users onboard themselves. `BROKER_AUDIENCE` must
+No user setup needed — users onboard themselves. `SERVER_AUDIENCE` must
 be the exact URL users connect to (request signatures are bound to it).
 For internet exposure put TLS in front, e.g. Caddy:
 
 ```
-broker.example.com {
+server.example.com {
     reverse_proxy 127.0.0.1:8766
 }
 ```
 
-## Run the users (one per machine)
+## CLI
 
-The `agent-talk` command publishes keys, optionally sends one message,
-then polls forever (decrypting, acking, and doing key maintenance) —
-everything is configured via environment variables (full list in
-`src/agent_talk/runner.py`). On machine A:
+One-time setup on each machine:
 
 ```
-BROKER_URL=https://broker.example.com/mcp \
-PICKLE_SECRET=<local-secret-a> STORE=user_a.db NICKNAME=alice-user-1 \
-PEER=<B's user id> PEER_NAME=bob \
-SEND="hello b" uv run agent-talk
+retalk init -u --nickname alice-1 --server https://server.example.com/mcp
 ```
 
-On machine B, the same with its own secrets plus `AUTO_REPLY=1` to
-acknowledge every received message:
+`init` creates the identity — keys encrypted with a secret you choose
+(prompted, or `PICKLE_SECRET` for scripts) — and prints your **user ID**.
+Exchange IDs with your peer out-of-band, then:
 
 ```
-BROKER_URL=https://broker.example.com/mcp \
-PICKLE_SECRET=<local-secret-b> STORE=user_b.db NICKNAME=bob-user-1 \
-PEER=<A's user id> PEER_NAME=alice \
-AUTO_REPLY=1 uv run agent-talk
+retalk add bob <bob's user id>     # save a trusted local name
+retalk send bob "hello"            # one-shot encrypted send
+retalk receive                     # drain my mailbox once
+retalk receive --follow            # keep polling; auto-maintains keys
+retalk receive --json              # one JSON object per message (for scripts)
+retalk id                          # print my user id again
 ```
 
-The command prints its own user ID on startup; exchange IDs
-out-of-band and pass the peer's as `PEER`. `PEER_PIN` optionally adds an
-explicit full-key pin on top of the fingerprint check. `PICKLE_SECRET`
-encrypts the private keys at rest in the local `STORE` SQLite file: losing
-it loses all sessions; leaking it (plus the store file) exposes stored
-keys. Users need a roughly correct clock (NTP is enough) — request
+Identities live in folders. `init -u [NAME]` puts one at
+`~/.local/share/retalk/NAME/` (default name: `default`); `init ./alice`
+puts one wherever you say. Every command picks its identity via
+`-s DIR` > `-u [NAME]` > `STORE` env > the user-level default if it
+exists — and **only `init` ever creates one**, so a mistyped path fails
+loudly instead of silently minting a new identity. Each command prints a
+`using <nickname> (<id>) from <dir>` banner to stderr so you always know
+who acted. Users need a roughly correct clock (NTP is enough) — request
 signatures expire after ~2.5 minutes.
-
-### Delivery guarantees
-
-Every message carries an ID inside the encrypted envelope; recipients send
-back an encrypted ack on successful decryption. Senders keep the
-ciphertext in a local outbox until acked, and `maintain()` automatically
-re-sends anything unacknowledged for `resend_after` seconds (default 120)
-— so messages stranded on a dead or migrated broker are recovered by
-re-uploading the outbox (`User.flush_outbox()`). Duplicates are safe: the
-ratchet refuses re-used message keys, so an already-delivered copy is
-detected, re-acked, and dropped instead of surfacing twice.
-
-### Key maintenance (automatic)
-
-Users keep their broker-side key material healthy on their own: the poll
-loop calls `User.maintain()`, which replenishes one-time keys when the
-unclaimed stash runs low and rotates the reusable fallback key daily (the
-fallback key is served to senders only when the one-time pool is empty, so
-key exhaustion degrades gracefully instead of blocking new sessions).
-Tunables, all optional:
-
-```
-MIN_OTKS=20            replenish below this many unclaimed one-time keys
-OTK_BATCH=100          batch size for initial publish and replenishment
-FALLBACK_MAX_AGE=86400 rotate the fallback key after this many seconds
-MAINTAIN_INTERVAL=60   seconds between maintenance checks
-```
 
 ## Library usage
 
 ```python
-from agent_talk import User
+from retalk import User
 
-alice = User("https://broker.example.com/mcp", pickle_secret="...",
-              nickname="alice-1", store="alice.db")
+alice = User("https://server.example.com/mcp", pickle_secret="...",
+             nickname="alice-1", store="alice/store.db")
 print(alice.user_id())            # share out-of-band; address + pin in one
-await alice.publish()             # onboard to the broker
+await alice.publish()             # onboard to the server
 await alice.send("<bob's id>", "hello")
 for sender, name, text in await alice.receive():
     print(name or sender, text)
 ```
+
+## Delivery guarantees
+
+Every message carries an ID inside the encrypted envelope; recipients send
+back an encrypted ack on successful decryption. Senders keep the
+ciphertext in a local outbox until acked, and `maintain()` (run
+automatically by `receive --follow`) re-sends anything unacknowledged for
+2 minutes — so messages stranded on a dead or migrated server are
+recovered by re-uploading the outbox (`User.flush_outbox()`). Duplicates
+are safe: the ratchet refuses re-used message keys, so an
+already-delivered copy is detected, re-acked, and dropped instead of
+surfacing twice.
+
+## Key maintenance (automatic)
+
+`maintain()` keeps server-side key material healthy: it replenishes
+one-time keys when the unclaimed stash runs low (below 20, in batches of
+100) and rotates the reusable fallback key daily (the fallback key is
+served to senders only when the one-time pool is empty, so key exhaustion
+degrades gracefully instead of blocking new sessions). `receive --follow`
+calls it every minute; library users can tune every threshold via
+`User.maintain()` parameters.
 
 ## Docs
 
 - [docs/auth.md](docs/auth.md) — how users prove who they are: signed
   requests explained without jargon, what an attacker gets in each
   scenario, the exact wire format, and why this was chosen over tokens.
-- [docs/broker.md](docs/broker.md) — the broker's mechanics: what it
+- [docs/server.md](docs/server.md) — the server's mechanics: what it
   stores and sees, why calls are authenticated at all (mailbox ownership),
-  nicknames vs peer names, and what a hostile broker can and cannot do.
+  nicknames vs peer names, and what a hostile server can and cannot do.
 - [docs/olm.md](docs/olm.md) — the crypto: one-time prekeys, why each is
   single-use, replenishment, and fallback-key rotation grace windows.
 
 ## Test
 
 ```
-uv run python -m unittest discover -s tests -v  # every test file
-uv run tests/test_e2ee.py                       # just the e2e suite
+uv run python -m unittest discover -s tests -v
 ```
 
-Run from the repo root (stdlib unittest; no extra dependency). The suite
-is self-contained: it starts its own brokers on ports 8767-8768 and uses
-a temporary directory for all state, so it never touches your real
+Run from the repo root (stdlib unittest; no extra dependency). The suites
+are self-contained: they start their own servers on ports 8767-8769 and
+use temporary directories for all state, so they never touch your real
 stores. CI runs the same discovery on every push/PR via GitHub Actions
 (`.github/workflows/run-tests.yaml`). See
 [tests/README.md](tests/README.md).
 
-Spins up local brokers and two users and proves 14 criteria: round-trip
-decryption both ways, no plaintext in the broker DB, PIN MISMATCH refusal
-when the broker's stored key is tampered with (via the fingerprint ID
-alone), fallback-key session establishment when the one-time pool is
-drained, replenishment and fallback rotation via `maintain()`, decryption
-of in-flight messages across a rotation, ratchet integrity under
-concurrent sends from two processes sharing one store, session survival
-across a migration to a brand-new broker, end-to-end delivery acks,
-outbox recovery of stranded messages with graceful duplicate rejection,
-and rejection of replayed, stale, and cross-broker signed requests.
+`tests/test_e2ee.py` proves 14 criteria: round-trip decryption both ways,
+no plaintext in the server DB, PIN MISMATCH refusal when the server's
+stored key is tampered with (via the fingerprint ID alone), fallback-key
+session establishment when the one-time pool is drained, replenishment
+and fallback rotation via `maintain()`, decryption of in-flight messages
+across a rotation, ratchet integrity under concurrent sends from two
+processes sharing one store, session survival across a migration to a
+brand-new server, end-to-end delivery acks, outbox recovery of stranded
+messages with graceful duplicate rejection, and rejection of replayed,
+stale, and cross-server signed requests. `tests/test_cli.py` drives the
+real CLI subprocesses through init/add/send/receive, including the
+refusal paths (no identity, double init, wrong secret).

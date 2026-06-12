@@ -4,3 +4,4 @@ __pycache__/
 *.db.lock
 *.log
 dist/
+dist/

@@ -1,12 +1,12 @@
-"""End-to-end test: local broker + two users using signed-request auth.
+"""End-to-end test: local server + two users using signed-request auth.
 
 Asserts:
   1. A can send to B (addressed by fingerprint ID) and B decrypts the exact
      plaintext — with zero registration calls; publishing keys is the only
      onboarding.
   2. B can reply and A decrypts the exact plaintext.
-  3. The broker's stored message bodies contain no plaintext.
-  4. After tampering with B's identity key in the broker DB (and clearing A's
+  3. The server's stored message bodies contain no plaintext.
+  4. After tampering with B's identity key in the server DB (and clearing A's
      cached session), A's next send raises a PIN MISMATCH error — even
      without an explicit pin, because the user ID is the keys' fingerprint.
   5. With B's one-time keys drained, a new session is established via B's
@@ -17,17 +17,17 @@ Asserts:
      rotation (grace window).
   8. Two OS processes sharing one user store send concurrently without
      corrupting the ratchet (the per-store lock serializes operations).
-  9. Migrating to a brand-new broker keeps existing sessions working:
+  9. Migrating to a brand-new server keeps existing sessions working:
      publish keys, send, decrypt — no other onboarding, no new handshake.
  10. Every delivered message is acknowledged end-to-end, emptying the
      senders' outboxes.
- 11. A message stranded on a dead broker is recovered by flushing the
-     outbox to the new broker; the late duplicate from the old broker is
+ 11. A message stranded on a dead server is recovered by flushing the
+     outbox to the new server; the late duplicate from the old server is
      rejected by the ratchet and dropped gracefully (re-acked, not surfaced).
  12. A captured signed request, submitted again, is rejected (nonce cache).
  13. A request with an hour-old timestamp is rejected.
- 14. A request signed for broker 1 is rejected at broker 2 (signatures are
-     bound to the broker URL).
+ 14. A request signed for server 1 is rejected at server 2 (signatures are
+     bound to the server URL).
 
 Run from the repo root:
   .venv/bin/python -m unittest discover -s tests   (all test files)
@@ -68,15 +68,15 @@ def wait_for_port(port: int, timeout: float = 15.0):
                 return
         except OSError:
             time.sleep(0.1)
-    raise TimeoutError(f"broker did not start on port {port}")
+    raise TimeoutError(f"server did not start on port {port}")
 
 
-def start_broker(db: str, port: int) -> subprocess.Popen:
-    env = dict(os.environ, BROKER_DB=db, BROKER_HOST="127.0.0.1",
-               BROKER_PORT=str(port),
-               BROKER_AUDIENCE=f"http://127.0.0.1:{port}/mcp")
+def start_server(db: str, port: int) -> subprocess.Popen:
+    env = dict(os.environ, SERVER_DB=db, SERVER_HOST="127.0.0.1",
+               SERVER_PORT=str(port),
+               SERVER_AUDIENCE=f"http://127.0.0.1:{port}/mcp")
     proc = subprocess.Popen(
-        [sys.executable, "-m", "agent_talk.broker"],
+        [sys.executable, "-m", "retalk.server"],
         env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     wait_for_port(port)
@@ -86,12 +86,12 @@ def start_broker(db: str, port: int) -> subprocess.Popen:
 async def main(tmp: str):
     import vodozemac as vz
 
-    from agent_talk import User, PinMismatchError
+    from retalk import User, PinMismatchError
 
-    broker_db = os.path.join(tmp, "broker.db")
+    server_db = os.path.join(tmp, "server.db")
     store_a = os.path.join(tmp, "user_a.db")
     store_b = os.path.join(tmp, "user_b.db")
-    brokers = [start_broker(broker_db, PORT)]
+    servers = [start_server(server_db, PORT)]
     try:
         url = f"http://127.0.0.1:{PORT}/mcp"
 
@@ -122,33 +122,33 @@ async def main(tmp: str):
         assert got == [(bid, "bob", msg_ba)], f"A received {got!r}"
         print("PASS 2: B -> A decrypted exact plaintext")
 
-        # 3. broker stores no plaintext (2 messages + 2 acks, all ciphertext)
-        bodies = [r[0] for r in sql(broker_db, "SELECT body FROM messages")]
+        # 3. server stores no plaintext (2 messages + 2 acks, all ciphertext)
+        bodies = [r[0] for r in sql(server_db, "SELECT body FROM messages")]
         assert len(bodies) == 4, len(bodies)
         for body in bodies:
             for needle in (msg_ab, msg_ba, "swordfish", "hello from A", "reply from B"):
-                assert needle not in body, f"plaintext leaked to broker: {needle!r}"
-        print("PASS 3: broker-stored bodies contain no plaintext")
+                assert needle not in body, f"plaintext leaked to server: {needle!r}"
+        print("PASS 3: server-stored bodies contain no plaintext")
 
         # 4. tampered identity key -> PIN MISMATCH on next send
         evil_key = vz.Account().curve25519_key.to_base64()
-        sql(broker_db, "UPDATE users SET identity_key=? WHERE id=?", evil_key, bid)
+        sql(server_db, "UPDATE users SET identity_key=? WHERE id=?", evil_key, bid)
         sql(store_a, "DELETE FROM sessions WHERE peer=?", bid)
         a.pins = {}  # the fingerprint ID alone must catch the tamper
         try:
             await a.send(bid, "this must never be encrypted to the evil key")
         except PinMismatchError as e:
             assert "PIN MISMATCH" in str(e)
-            print("PASS 4: tampered broker key triggered PIN MISMATCH refusal")
+            print("PASS 4: tampered server key triggered PIN MISMATCH refusal")
         else:
             raise AssertionError("send succeeded despite tampered identity key")
 
         # restore B's real identity key for the remaining tests
-        sql(broker_db, "UPDATE users SET identity_key=? WHERE id=?",
+        sql(server_db, "UPDATE users SET identity_key=? WHERE id=?",
             b.identity_key(), bid)
 
         # 5. drained one-time keys -> session established via fallback key
-        sql(broker_db, "UPDATE otks SET claimed=1 WHERE owner=?", bid)
+        sql(server_db, "UPDATE otks SET claimed=1 WHERE owner=?", bid)
         counts = await b._call("count_keys")
         assert counts == {"unclaimed": 0, "has_fallback": True}, counts
         claimed = await a._call("claim_key", {"peer": bid})
@@ -157,7 +157,7 @@ async def main(tmp: str):
         # handshake, necessarily via the fallback key
         msg_fb = "session via fallback key: tango-19"
         await a.send(bid, msg_fb)  # left in flight; B reads it in test 7
-        old_fb = sql(broker_db,
+        old_fb = sql(server_db,
                      "SELECT fallback_key FROM users WHERE id=?", bid)[0][0]
         print("PASS 5: drained pool served the fallback key")
 
@@ -167,7 +167,7 @@ async def main(tmp: str):
         assert status["replenished"] and status["fallback_rotated"], status
         counts = await b._call("count_keys")
         assert counts["unclaimed"] >= 60, counts
-        new_fb = sql(broker_db,
+        new_fb = sql(server_db,
                      "SELECT fallback_key FROM users WHERE id=?", bid)[0][0]
         assert new_fb != old_fb, "fallback key was not rotated"
         status = await b.maintain(min_otks=20, batch=60, fallback_max_age=3600)
@@ -183,7 +183,7 @@ async def main(tmp: str):
         # 8. concurrent sends from two processes sharing A's store
         sender_src = (
             "import asyncio, sys\n"
-            "from agent_talk import User\n"
+            "from retalk import User\n"
             "async def main():\n"
             "    a = User(sys.argv[1], 'pickle-secret-a', store=sys.argv[2])\n"
             "    for i in range(5):\n"
@@ -200,31 +200,31 @@ async def main(tmp: str):
         assert got == expected, f"B received {got!r}"
         print("PASS 8: concurrent senders sharing one store stayed in sync")
 
-        # 9. broker migration: fresh broker, same stores -> sessions continue
+        # 9. server migration: fresh server, same stores -> sessions continue
         # first complete a round-trip so A's session leaves the pre-key phase
         # (Olm sends handshake-type messages until a reply is received)
         await b.send(aid, "establishing reply")
         got = await a.receive()
         assert got == [(bid, "bob", "establishing reply")], got
-        broker2_db = os.path.join(tmp, "broker2.db")
-        brokers.append(start_broker(broker2_db, PORT2))
+        server2_db = os.path.join(tmp, "server2.db")
+        servers.append(start_server(server2_db, PORT2))
         url2 = f"http://127.0.0.1:{PORT2}/mcp"
         a2 = User(url2, "pickle-secret-a", nickname="alice-user-1", store=store_a)
         b2 = User(url2, "pickle-secret-b", nickname="bob-user-1", store=store_b)
-        assert (a2.user_id(), b2.user_id()) == (aid, bid), "IDs not broker-independent"
-        # publishing keys is the only onboarding the new broker needs (both
+        assert (a2.user_id(), b2.user_id()) == (aid, bid), "IDs not server-independent"
+        # publishing keys is the only onboarding the new server needs (both
         # sides: a mailbox must exist before it can receive even an ack)
         await a2.publish()
         await b2.publish()
-        msg_mig = "still here after the broker moved"
+        msg_mig = "still here after the server moved"
         await a2.send(bid, msg_mig)
-        mtypes = [r[0] for r in sql(broker2_db, "SELECT mtype FROM messages")]
+        mtypes = [r[0] for r in sql(server2_db, "SELECT mtype FROM messages")]
         assert mtypes == [1], f"expected an existing-session message, got {mtypes}"
         got = await b2.receive()
         assert got == [(aid, "~alice-user-1", msg_mig)], f"B received {got!r}"
-        print("PASS 9: session survived migration to a brand-new broker")
+        print("PASS 9: session survived migration to a brand-new server")
 
-        # 10. ack lifecycle: drain everything on both brokers; every sent
+        # 10. ack lifecycle: drain everything on both servers; every sent
         # message must end up acknowledged, leaving both outboxes empty
         for _ in range(6):
             rounds = [await x.receive() for x in (a, b, a2, b2)]
@@ -235,17 +235,17 @@ async def main(tmp: str):
             assert n == 0, f"{store} still has {n} unacked outbox entries"
         print("PASS 10: every message acked end-to-end; outboxes empty")
 
-        # 11. lost-message recovery: send via the old broker, never read it
-        # there, then flush the outbox to the new broker
-        msg_lost = "message stranded on the dying broker"
-        await a.send(bid, msg_lost)  # broker 1; B will not poll broker 1 yet
+        # 11. lost-message recovery: send via the old server, never read it
+        # there, then flush the outbox to the new server
+        msg_lost = "message stranded on the dying server"
+        await a.send(bid, msg_lost)  # server 1; B will not poll server 1 yet
         assert sql(store_a, "SELECT COUNT(*) FROM outbox")[0][0] == 1
-        assert await b2.receive() == []  # nothing on broker 2 yet
+        assert await b2.receive() == []  # nothing on server 2 yet
         n = await a2.flush_outbox()
         assert n == 1, n
         got = await b2.receive()
         assert got == [(aid, "~alice-user-1", msg_lost)], f"B received {got!r}"
-        # the stranded copy now arrives via broker 1 too: the ratchet refuses
+        # the stranded copy now arrives via server 1 too: the ratchet refuses
         # the re-used message key, and the client re-acks and drops it
         # instead of surfacing a duplicate or crashing
         got = await b.receive()
@@ -283,19 +283,19 @@ async def main(tmp: str):
         else:
             raise AssertionError("stale timestamp was accepted")
 
-        # 14. cross-broker replay: a signature for broker 1 fails at broker 2
+        # 14. cross-server replay: a signature for server 1 fails at server 2
         wire1 = {"auth": a._auth_fields("read_messages", {})}  # bound to url
         try:
             await a2._call_raw("read_messages", wire1)
         except RuntimeError as e:
             assert "signature" in str(e), e
-            print("PASS 14: broker-1 signature rejected at broker 2 (audience)")
+            print("PASS 14: server-1 signature rejected at server 2 (audience)")
         else:
-            raise AssertionError("cross-broker replay was accepted")
+            raise AssertionError("cross-server replay was accepted")
 
         print("\nALL 14 ACCEPTANCE CRITERIA PASSED")
     finally:
-        for proc in brokers:
+        for proc in servers:
             proc.terminate()
             proc.wait(timeout=10)
 

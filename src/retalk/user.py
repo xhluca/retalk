@@ -4,15 +4,15 @@ A "user" is anything with a keypair and a mailbox — an AI agent, a human at
 a terminal, a service. The human or organization who runs one or more users
 is their "owner" (the protocol itself does not model owners).
 
-All encryption/decryption happens here with vodozemac (Olm). The broker is
+All encryption/decryption happens here with vodozemac (Olm). The server (a message server: it only stores and forwards sealed envelopes) is
 untrusted: it only ever receives public keys and ciphertext.
 
 Identity and auth are one mechanism: a user's ID is the fingerprint
-(sha256 hex, 32 chars) of its public keys, and every broker call is signed
+(sha256 hex, 32 chars) of its public keys, and every server call is signed
 with the user's ed25519 key — no tokens, no registration, no credential
 at rest. An ID shared out-of-band is simultaneously address and pin: any
-keys the broker serves for an ID must hash to that ID or the client
-refuses. IDs are broker-independent, so sessions survive a broker
+keys the server serves for an ID must hash to that ID or the client
+refuses. IDs are server-independent, so sessions survive a server
 migration. See docs/auth.md.
 
 Private keys are persisted locally in SQLite, encrypted at rest with a key
@@ -45,7 +45,7 @@ def fingerprint(identity_key_b64: str, signing_key_b64: str) -> str:
 
 def canonical_hash(args: dict) -> str:
     """Hash of the canonical JSON encoding of a tool's arguments. Part of
-    the signed-request wire spec — the broker rebuilds this byte-for-byte."""
+    the signed-request wire spec — the server rebuilds this byte-for-byte."""
     return hashlib.sha256(
         json.dumps(args, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
@@ -56,13 +56,13 @@ class PinMismatchError(Exception):
 
 
 class User:
-    def __init__(self, broker_url: str, pickle_secret: str, nickname: str = "",
+    def __init__(self, server_url: str, pickle_secret: str, nickname: str = "",
                  store: str = "user.db", pins: dict | None = None,
                  names: dict | None = None):
-        self.broker_url = broker_url
+        self.server_url = server_url
         self.nickname = nickname
         self.pins = pins or {}
-        # local peer names {peer_id: name}; broker-supplied nicknames are
+        # local peer names {peer_id: name}; server-supplied nicknames are
         # attacker-chosen text and are only ever shown marked with "~"
         self.names = names or {}
         self._pickle_key = hashlib.sha256(pickle_secret.encode()).digest()
@@ -82,7 +82,7 @@ class User:
     def _init_store(self):
         self._exec("CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT)")
         self._exec("CREATE TABLE IF NOT EXISTS sessions(peer TEXT PRIMARY KEY, blob TEXT)")
-        # sent-but-unacknowledged ciphertext, for re-delivery (broker loss/migration)
+        # sent-but-unacknowledged ciphertext, for re-delivery (server loss/migration)
         self._exec("CREATE TABLE IF NOT EXISTS outbox("
                    "id TEXT PRIMARY KEY, peer TEXT, mtype INT, body TEXT, ts REAL)")
         # hash of every processed ciphertext -> its message id, to re-ack duplicates
@@ -138,7 +138,7 @@ class User:
                    "ON CONFLICT(peer) DO UPDATE SET blob=excluded.blob",
                    peer, session.pickle(self._pickle_key))
 
-    # ---------- signed broker RPC ----------
+    # ---------- signed server RPC ----------
 
     def _auth_fields(self, tool: str, args: dict) -> dict:
         """Build the self-certifying auth object for one request."""
@@ -148,7 +148,7 @@ class User:
         aid = fingerprint(ident, signk)
         ts = str(int(time.time()))
         nonce = secrets.token_hex(16)
-        payload = (f"{tool}|{self.broker_url}|{aid}|{ts}|{nonce}|"
+        payload = (f"{tool}|{self.server_url}|{aid}|{ts}|{nonce}|"
                    f"{canonical_hash(args)}").encode()
         sig = acct.sign(payload)
         return {"user_id": aid, "identity_key": ident, "signing_key": signk,
@@ -161,7 +161,7 @@ class User:
         return await self._call_raw(tool, wire)
 
     async def _call_raw(self, tool: str, wire: dict):
-        async with streamablehttp_client(self.broker_url) as (r, w, _):
+        async with streamablehttp_client(self.server_url) as (r, w, _):
             async with ClientSession(r, w) as session:
                 await session.initialize()
                 res = await session.call_tool(tool, wire)
@@ -170,7 +170,7 @@ class User:
         # raise outside the context managers so callers see a plain
         # RuntimeError, not an anyio ExceptionGroup
         if is_error:
-            raise RuntimeError(f"broker error from {tool}: {text}")
+            raise RuntimeError(f"server error from {tool}: {text}")
         return json.loads(text)
 
     # ---------- identity verification ----------
@@ -181,17 +181,17 @@ class User:
         contradict an explicit pin."""
         if fingerprint(identity_key_b64, signing_key_b64) != peer_id:
             raise PinMismatchError(
-                f"PIN MISMATCH for peer '{peer_id}': broker served keys whose "
+                f"PIN MISMATCH for peer '{peer_id}': server served keys whose "
                 f"fingerprint is "
                 f"'{fingerprint(identity_key_b64, signing_key_b64)}'. "
-                "Possible MITM by the broker — refusing to establish a session."
+                "Possible MITM by the server — refusing to establish a session."
             )
         pinned = self.pins.get(peer_id)
         if pinned is not None and pinned != identity_key_b64:
             raise PinMismatchError(
-                f"PIN MISMATCH for peer '{peer_id}': broker served identity key "
+                f"PIN MISMATCH for peer '{peer_id}': server served identity key "
                 f"{identity_key_b64!r} but the pinned key is {pinned!r}. "
-                "Possible MITM by the broker — refusing to establish a session."
+                "Possible MITM by the server — refusing to establish a session."
             )
 
     # ---------- public API ----------
@@ -209,7 +209,7 @@ class User:
 
     async def publish(self, n: int = 100, rotate_fallback: bool = False):
         """Publish identity, signing, and n fresh one-time keys to the
-        broker. This is also all the onboarding a broker needs — there is no
+        server. This is also all the onboarding a server needs — there is no
         separate registration.
 
         Also publishes a fallback key — generated on first publish, or
@@ -243,11 +243,11 @@ class User:
     async def maintain(self, min_otks: int = 20, batch: int = 100,
                        fallback_max_age: float = 86400.0,
                        resend_after: float = 120.0) -> dict:
-        """Keep broker-side key material healthy. Call periodically.
+        """Keep server-side key material healthy. Call periodically.
 
-        Replenishes one-time keys when the broker's unclaimed stash drops
+        Replenishes one-time keys when the server's unclaimed stash drops
         below min_otks, rotates the fallback key when it is older than
-        fallback_max_age seconds (default: daily) or missing broker-side,
+        fallback_max_age seconds (default: daily) or missing server-side,
         and re-sends outbox messages unacknowledged for resend_after seconds.
         """
         with self._locked():
@@ -297,7 +297,7 @@ class User:
 
     async def flush_outbox(self, older_than: float = 0.0) -> int:
         """Re-upload sent-but-unacknowledged ciphertext (e.g. after moving to
-        a new broker). Safe against duplicates: a peer that already decrypted
+        a new server). Safe against duplicates: a peer that already decrypted
         a copy re-acks and drops it. Returns the number re-sent."""
         with self._locked():
             return await self._flush_outbox(older_than)

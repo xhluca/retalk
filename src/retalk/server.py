@@ -9,15 +9,15 @@ Authentication: there are no accounts, tokens, or registration. Every tool
 call carries an `auth` object self-signed with the user's ed25519 key; the
 user ID is the fingerprint of the user's public keys, so each request
 proves its own origin. Replay is blocked by a timestamp window plus a
-nonce cache, and signatures are bound to this broker's public URL so a
+nonce cache, and signatures are bound to this server's public URL so a
 request captured here is worthless anywhere else. See docs/auth.md.
 
 Env config:
-  BROKER_DB        SQLite path (default broker.db)
-  BROKER_HOST      bind host (default 0.0.0.0)
-  BROKER_PORT      bind port (default 8766)
-  BROKER_AUDIENCE  the public URL users connect to, e.g.
-                   https://broker.example.com/mcp — REQUIRED for any
+  SERVER_DB        SQLite path (default server.db)
+  SERVER_HOST      bind host (default 0.0.0.0)
+  SERVER_PORT      bind port (default 8766)
+  SERVER_AUDIENCE  the public URL users connect to, e.g.
+                   https://server.example.com/mcp — REQUIRED for any
                    non-local deployment; signatures verify against it
                    (default http://127.0.0.1:<port>/mcp)
 """
@@ -31,10 +31,10 @@ import time
 import vodozemac as v
 from mcp.server.fastmcp import FastMCP
 
-DB_PATH = os.environ.get("BROKER_DB", "broker.db")
-HOST = os.environ.get("BROKER_HOST", "0.0.0.0")
-PORT = int(os.environ.get("BROKER_PORT", "8766"))
-AUDIENCE = os.environ.get("BROKER_AUDIENCE", f"http://127.0.0.1:{PORT}/mcp")
+DB_PATH = os.environ.get("SERVER_DB", "server.db")
+HOST = os.environ.get("SERVER_HOST", "0.0.0.0")
+PORT = int(os.environ.get("SERVER_PORT", "8766"))
+AUDIENCE = os.environ.get("SERVER_AUDIENCE", f"http://127.0.0.1:{PORT}/mcp")
 WINDOW = 150  # seconds of allowed clock skew, each direction
 
 SCHEMA = """
@@ -82,7 +82,7 @@ _schema_conn.close()
 
 
 def _fingerprint(identity_key_b64: str, signing_key_b64: str) -> str:
-    # must match user.fingerprint(); duplicated so the broker stays standalone
+    # must match user.fingerprint(); duplicated so the server stays standalone
     return hashlib.sha256(
         f"{identity_key_b64}|{signing_key_b64}".encode()).hexdigest()[:32]
 
@@ -124,7 +124,7 @@ def _caller(tool: str, args: dict, auth: dict) -> str:
     return user_id
 
 
-mcp = FastMCP("agent-talk-broker", host=HOST, port=PORT)
+mcp = FastMCP("retalk-server", host=HOST, port=PORT)
 
 
 @mcp.tool()
