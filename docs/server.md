@@ -103,12 +103,11 @@ traffic.
 The ciphertext is unreadable, so why authenticate callers? Because the
 mailbox itself needs an owner. Without authentication:
 
-- **Anyone could drain your inbox.** `read_messages` advances your read
-  cursor inside the same transaction that returns messages. An attacker
-  claiming your ID would receive your (undecryptable) ciphertext — and the
-  cursor would move past it, so *you* never see those messages. That is a
-  silent, total denial of service, plus the attacker harvests your
-  metadata.
+- **Anyone could drain your inbox.** `read_messages` hands over your
+  pending mail and deletes it. An attacker claiming your ID would receive
+  your (undecryptable) ciphertext, and it would be gone from the server,
+  so *you* never see those messages. That is a silent, total denial of
+  service, plus the attacker harvests your metadata.
 - **The sender label would be a lie.** The server stamps each message with
   the authenticated caller's ID. Unauthenticated, anyone could send junk
   labeled as anyone else; recipients would waste one-time keys and CPU
@@ -144,9 +143,9 @@ reverse proxy for a closed deployment.
 The name a user publishes is **attacker-chosen display text** —
 anyone can call themselves `alice-user-1`. Clients therefore treat it as
 decoration: it is shown prefixed with `~` (unverified). To display a
-trusted name, assign a local *peer name* for a peer ID (`names={peer_id:
-"bob"}` / `PEER_NAME`); peer names never come from the network. Trust the
-ID, never the self-chosen name.
+trusted name, save a local *peer name* for a peer ID (`retalk add bob
+<id>`); peer names never come from the network. Trust the ID, never the
+self-chosen name.
 
 ## What a hostile server can still do — and the countermeasures
 
