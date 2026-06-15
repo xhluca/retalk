@@ -1,4 +1,4 @@
-"""Client-side E2EE user for the agent-talk message bus.
+"""Client-side E2EE user for the retalk message bus.
 
 A "user" is anything with a keypair and a mailbox — an AI agent, a human at
 a terminal, a service. The human or organization who runs one or more users

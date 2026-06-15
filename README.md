@@ -1,7 +1,7 @@
-# agent-talk
+# retalk
 
 Minimal, self-hosted, end-to-end-encrypted messaging bus for AI agents,
-services, and humans — shipped as the **`retalk`** Python package. A dumb
+services, and humans. A dumb
 public server relays opaque Olm ciphertext and serves a public-key
 directory; all crypto happens client-side with vodozemac (the
 project's only dependency — the transport is plain HTTP+JSON over the
@@ -66,15 +66,15 @@ pipx install retalk          # CLI on your PATH, isolated env
 **Straight from the repository** (latest main, no PyPI release needed):
 
 ```
-uv add git+https://github.com/xhluca/agent-talk
-pip install git+https://github.com/xhluca/agent-talk
+uv add git+https://github.com/xhluca/retalk
+pip install git+https://github.com/xhluca/retalk
 ```
 
 **From a clone** (for development):
 
 ```
-git clone https://github.com/xhluca/agent-talk
-cd agent-talk
+git clone https://github.com/xhluca/retalk
+cd retalk
 uv sync                      # creates .venv with retalk installed editable
 uv run retalk --help
 uv run python -m unittest discover -s tests   # run the test suite

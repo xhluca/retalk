@@ -1,4 +1,4 @@
-"""retalk: client library + CLI for agent-talk, a minimal self-hosted E2EE message bus."""
+"""retalk: a minimal, self-hosted, end-to-end-encrypted message bus (client library + CLI)."""
 
 from .user import PinMismatchError, User, canonical_hash, fingerprint
 
