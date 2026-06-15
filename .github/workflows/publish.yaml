@@ -1,0 +1,51 @@
+name: Publish to PyPI
+
+# Publishes retalk when a GitHub Release is published. Uses PyPI trusted
+# publishing (OIDC) — no API token is stored in the repo. One-time setup:
+# on PyPI, add a trusted publisher for project "retalk" pointing at this
+# repo, workflow "publish.yaml", environment "pypi".
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/retalk
+    permissions:
+      id-token: write   # mandatory for trusted publishing
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up uv
+      uses: astral-sh/setup-uv@v5
+
+    - name: Check the release tag matches the package version
+      env:
+        NO_COLOR: "1"
+      run: |
+        tag="${GITHUB_REF_NAME#v}"
+        pkg=$(uv version --short)
+        echo "release tag: $tag    pyproject version: $pkg"
+        if [ "$tag" != "$pkg" ]; then
+          echo "::error::tag '$tag' does not match pyproject version '$pkg' \
+        — bump the version in pyproject.toml and src/retalk/__init__.py first"
+          exit 1
+        fi
+
+    - name: Run the test suite
+      run: |
+        uv sync
+        uv run python -m unittest discover -s tests
+
+    - name: Build
+      run: uv build
+
+    - name: Publish to PyPI
+      uses: pypa/gh-action-pypi-publish@release/v1
+      with:
+        packages-dir: dist/

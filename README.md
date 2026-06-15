@@ -254,6 +254,28 @@ calls it every minute; library users can tune every threshold via
 - [docs/olm.md](docs/olm.md) — the crypto: one-time prekeys, why each is
   single-use, replenishment, and fallback-key rotation grace windows.
 
+## Releasing
+
+Publishing is automated: pushing a **GitHub Release** triggers
+`.github/workflows/publish.yaml`, which checks the tag matches the
+package version, runs the tests, builds with uv, and uploads to PyPI via
+trusted publishing (no stored token).
+
+To cut a release:
+
+1. Bump `version` in `pyproject.toml` **and** `src/retalk/__init__.py`
+   (keep them in sync — CI fails the release otherwise). Stay on `0.0.x`
+   during beta.
+2. Commit and push.
+3. Create a release whose tag is the version, optionally `v`-prefixed:
+   ```
+   gh release create v0.0.1 --title v0.0.1 --notes "first beta"
+   ```
+
+One-time PyPI setup (done once per project, by a maintainer): on
+pypi.org add a **trusted publisher** for project `retalk` -> this repo,
+workflow `publish.yaml`, environment `pypi`.
+
 ## Test
 
 ```
