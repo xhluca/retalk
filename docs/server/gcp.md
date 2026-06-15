@@ -42,13 +42,23 @@ increase, then retry.
 
 ## Lock down SSH
 
-Allow SSH only from Google's IAP range, not from the whole internet:
+A new project's default network opens SSH (and RDP) to the **entire
+internet** (`0.0.0.0/0`). Delete those default rules, then allow SSH only
+from Google's IAP range so you reach the VM over Identity-Aware Proxy:
 
 ```sh
+# remove the internet-facing defaults (RDP isn't used on Linux anyway)
+gcloud compute firewall-rules delete default-allow-ssh default-allow-rdp --quiet
+
+# allow SSH only from Google's IAP range
 gcloud compute firewall-rules create allow-iap-ssh \
   --direction=INGRESS --action=ALLOW \
   --rules=tcp:22 --source-ranges=35.235.240.0/20
 ```
+
+After this the VM has no inbound ports open to the public internet. Adding
+the IAP rule without deleting `default-allow-ssh` would leave SSH exposed,
+so don't skip the delete.
 
 ## Create the VM
 
