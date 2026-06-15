@@ -62,6 +62,26 @@ This needs a Cloudflare account with your domain added as a zone (its
 nameservers pointing at Cloudflare). Replace `retalk.example.com` with a
 hostname on your domain.
 
+**For a server, prefer a scoped token (more secure).** The `cloudflared
+tunnel login` flow below writes `~/.cloudflared/cert.pem`, which can create
+tunnels and change DNS across your *whole* Cloudflare zone. If that VM is
+compromised, so is your zone. A per-tunnel token avoids this:
+
+1. In the Cloudflare Zero Trust dashboard, go to **Networks -> Tunnels ->
+   Create a tunnel**, name it, and copy the token it shows.
+2. On the VM, run the tunnel with only that token (no login, no `cert.pem`):
+
+   ```sh
+   cloudflared tunnel run --token <TOKEN>
+   ```
+
+3. On the same dashboard page, add a **public hostname**
+   (`retalk.example.com`) routing to `http://localhost:8766`.
+
+The token controls only that one tunnel, so a compromised VM can't reach
+the rest of your Cloudflare account. The file-based steps below are the
+alternative if you prefer to manage the tunnel from the machine.
+
 1. Log in once. This opens a browser; pick the zone for your domain. It
    writes `~/.cloudflared/cert.pem`, scoped to that zone:
 

@@ -61,7 +61,8 @@ gcloud compute instances create retalk-server \
   --zone=us-central1-a \
   --machine-type=e2-micro \
   --image-family=debian-12 --image-project=debian-cloud \
-  --boot-disk-size=10GB --boot-disk-type=pd-standard
+  --boot-disk-size=10GB --boot-disk-type=pd-standard \
+  --no-service-account --no-scopes
 ```
 
 This gives the VM an ephemeral external IP, which it needs for outbound
@@ -69,6 +70,9 @@ internet (installing packages, and the outbound Cloudflare Tunnel). Don't
 use `--no-address` here: a VM with no external IP has no internet access at
 all unless you also set up Cloud NAT, which costs far more than the IP does
 for a single machine.
+
+`--no-service-account --no-scopes` is a deliberate security choice, not a
+default; see [Security](#security) below for why it matters.
 
 ## Connect and install retalk
 
@@ -101,6 +105,39 @@ To make the server reachable from other machines, run it behind a
 Cloudflare Tunnel and set `SERVER_AUDIENCE` to the public URL. Follow
 [cloudflare.md](cloudflare.md) on this same VM; nothing GCP-specific
 changes.
+
+## Security
+
+This server faces the internet, so assume the box can be probed and harden
+for the case where it is compromised.
+
+**Give the VM no cloud identity.** Every Compute Engine VM can read an
+OAuth token for its attached service account from the metadata server
+(`169.254.169.254`). By default that is the project's Compute service
+account, which often holds the broad `roles/editor` role — so anything that
+runs code on the VM could use that token to act on your whole GCP project
+(read storage, create resources, run up a bill). retalk needs no Google
+APIs at all, so the create command above uses `--no-service-account
+--no-scopes`. With no identity attached, a stolen metadata token is
+useless. (Project-wide, it is also worth removing `roles/editor` from the
+default Compute service account; Google
+[recommends this](https://cloud.google.com/iam/docs/best-practices-service-accounts#default-service-account).)
+
+**Keep SSH off the public internet.** The firewall rule above only allows
+SSH from Google's IAP range, and the VM has no other inbound ports open
+(the Cloudflare Tunnel is outbound-only). Do not add a `0.0.0.0/0` rule for
+port 22 or for retalk's port.
+
+**What a full compromise would expose.** Even if someone got root on the
+VM and copied the database, retalk stores only public key material and
+ciphertext (deleted on delivery). They could not read message content,
+recover anyone's private keys, or impersonate users (clients verify key
+fingerprints). They could see metadata - which user IDs talk to which, and
+when - and disrupt service. That is the design's accepted trade-off; the
+hardening above keeps a server compromise from spreading to your GCP or
+Cloudflare accounts.
+
+**Keep the OS patched** (`sudo apt-get update && sudo apt-get upgrade`).
 
 ## Cost
 
