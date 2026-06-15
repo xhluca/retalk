@@ -18,13 +18,15 @@ behind something that terminates TLS and forwards to that port:
 
 - [cloudflare.md](server/cloudflare.md) — Cloudflare Tunnel, free quick
   tunnels or a stable hostname on your own domain. No firewall changes.
+- [gcp.md](server/gcp.md) — running the server on a small Google Cloud
+  VM (free-tier sized), with stop/delete and cost notes.
 
 The examples assume the local demo from the README:
 
 - server at `http://127.0.0.1:8766`
 - Alice identity in `./alice`
-- `SERVER_URL=http://127.0.0.1:8766`
-- `PICKLE_SECRET=alice-secret`
+- `RETALK_SERVER=http://127.0.0.1:8766`
+- `RETALK_PASSPHRASE=alice-secret`
 
 ## Database tables
 
