@@ -11,6 +11,14 @@ to trust. Clients do that.
 This page explains what the server stores, what it can see, why requests are
 authenticated, and what a hostile server can still do.
 
+## Running it on the internet
+
+The server speaks plain HTTP on a local port. To expose it publicly, put it
+behind something that terminates TLS and forwards to that port:
+
+- [cloudflare.md](server/cloudflare.md) — Cloudflare Tunnel, free quick
+  tunnels or a stable hostname on your own domain. No firewall changes.
+
 The examples assume the local demo from the README:
 
 - server at `http://127.0.0.1:8766`
