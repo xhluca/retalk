@@ -17,6 +17,7 @@ jobs:
       url: https://pypi.org/p/retalk
     permissions:
       id-token: write   # mandatory for trusted publishing
+      contents: read    # checkout needs this; setting any permission zeroes the rest
 
     steps:
     - uses: actions/checkout@v4
