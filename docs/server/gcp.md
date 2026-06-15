@@ -104,17 +104,93 @@ changes.
 
 ## Cost
 
-In a free-tier region, running 24/7:
+All prices below are us-central1, on-demand, running 24/7 (730 hours per
+month). Sources:
+[VM instance pricing](https://cloud.google.com/compute/vm-instance-pricing),
+[disk pricing](https://cloud.google.com/compute/disks-image-pricing),
+[external IP pricing](https://cloud.google.com/vpc/network-pricing#ipaddress),
+[Always Free tier](https://cloud.google.com/free/docs/free-cloud-features#compute),
+[Spot VMs](https://cloud.google.com/spot-vms).
 
-- `e2-micro` compute: free (one per month), otherwise about $6-7/month.
-- 10 GB standard disk: free (under the 30 GB free tier), otherwise about
-  $0.40/month.
-- Ephemeral external IP: about $0.005/hour, roughly $3.65/month while the
-  VM is running. This is the one charge you can't avoid for a single
-  internet-connected VM.
+The monthly floor for this setup is one e2-micro, its external IP, and a
+10 GB disk:
 
-So expect roughly $4/month within the free tier, mostly the IP address. A
-short test costs cents.
+| Item | Rate | Per month (rate x 730 h) |
+|---|---|---|
+| e2-micro compute | $0.00837/hour | $6.11 |
+| External IPv4 (in use) | $0.005/hour | $3.65 |
+| 10 GB standard disk | $0.040/GB-month | $0.40 |
+| **Floor total** | | **$10.16/month** |
+
+How that floor changes:
+
+- **Free tier**: one e2-micro per month is free in us-west1, us-central1,
+  or us-east1, and the first 30 GB of standard disk is free. That zeroes
+  the compute and disk lines, leaving only the IP: **~$3.65/month**.
+- **Stopped**: a stopped VM bills no compute and releases its ephemeral
+  IP, so you pay only for the disk: **~$0.40/month** (10 GB x $0.040).
+- **Deleted**: $0.
+
+A short test (create, try it, delete within the hour) costs a few cents.
+
+This guide uses standard on-demand VMs for reliability. Spot VMs are about
+half the price, but Google can preempt (shut down) them at any time, so
+they are not suitable for a relay that needs to stay up.
+
+## Scaling up
+
+retalk is light. The server is a small Python process backed by SQLite: it
+stores public keys and one-time keys, holds messages only until they are
+delivered, then deletes them. For most setups the machine is not the
+limit, and an e2-micro comfortably handles dozens of users.
+
+What actually grows with usage:
+
+- **Request rate.** Each client polls (default every 2 seconds) and sends.
+  That is roughly N/2 requests per second for N users. Each request is one
+  signature check plus a small SQLite query.
+- **Storage.** A few KB per user for their published one-time keys, plus
+  any undelivered messages (deleted once received). Even hundreds of users
+  stay in the low megabytes, well under a 10 GB disk.
+- **Egress.** Ciphertext is small, so bandwidth cost is negligible at
+  these sizes.
+
+For **10-100 users you do not need to scale at all** - an e2-micro is
+plenty, so the cost stays at the floor above (~$10/month on-demand, or
+~$3.65/month if the compute is free-tier eligible). Move up only if you
+see sustained CPU saturation or memory pressure (check `top` over SSH).
+
+A rough on-demand ladder (us-central1, 24/7; each total adds the $3.65 IP
+and $0.40 disk to the compute price):
+
+| Users (rough) | Machine | vCPU / RAM | Compute/mo | Total/mo |
+|---|---|---|---|---|
+| 1-100 | e2-micro | shared / 1 GB | $6.11 | ~$10 |
+| 100-1,000 | e2-small | shared / 2 GB | $12.23 | ~$16 |
+| ~1,000+ | e2-medium | shared / 4 GB | $24.46 | ~$29 |
+| heavy | e2-standard-2 | 2 / 8 GB | $48.92 | ~$53 |
+
+These are generous upper bounds; retalk is unlikely to need more than an
+e2-micro for 10-100 users.
+
+The real ceiling is the software, not the VM. The built-in HTTP server and
+single-writer SQLite are simple by design. Long before a bigger machine
+helps, very high traffic would be better handled by running the server
+behind a production HTTP host and a database that allows concurrent
+writes - that is a code change, not a larger VM. For 10-100 users you are
+nowhere near this.
+
+Resizing an existing VM (it must be stopped first):
+
+```sh
+gcloud compute instances stop retalk-server --zone us-central1-a
+gcloud compute instances set-machine-type retalk-server \
+  --zone us-central1-a --machine-type=e2-small
+gcloud compute instances start retalk-server --zone us-central1-a
+```
+
+Machine types and their prices are listed under
+[VM instance pricing](https://cloud.google.com/compute/vm-instance-pricing).
 
 ## Stop and delete
 
