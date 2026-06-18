@@ -151,10 +151,13 @@ def _open_user(args, need_server: bool = True, banner: bool = True) -> User:
               if (getattr(args, "peers_only", False)
                   or _meta(store_db, "receive_policy") == "peers-only")
               else "open")
+    api_key = (getattr(args, "api_key", None) or os.environ.get("RETALK_API_KEY")
+               or _meta(store_db, "api_key"))
     try:
         u = User(server, secret, name=_meta(store_db, "name") or "",
                  store=str(store_db), identity_keys=identity_keys, names=names,
-                 blocked=blocked, receive_policy=policy, known=known)
+                 blocked=blocked, receive_policy=policy, known=known,
+                 api_key=api_key)
     except Exception:
         _die(f"could not unlock the identity at {d} (wrong passphrase?)")
     if banner:
@@ -203,6 +206,8 @@ def cmd_init(args):
         u._meta_set("name", display)
     if server:
         u._meta_set("server_url", server)
+    if args.api_key:
+        u._meta_set("api_key", args.api_key)
     # private keys live here; keep them owner-only whether or not encrypted
     try:
         (d / STORE_FILE).chmod(0o600)
@@ -385,6 +390,10 @@ def main():
     g.add_argument("--relay", metavar="URL",
                    help="relay URL for this invocation; overrides the "
                         "RETALK_RELAY env var and the URL saved at init")
+    g.add_argument("--api-key", metavar="KEY",
+                   help="relay access key, if the relay requires one; sent as "
+                        "an Authorization: Bearer header. Overrides "
+                        "RETALK_API_KEY and the value saved at init")
     g.add_argument("--passphrase", metavar="SECRET",
                    help="passphrase that unlocks this identity's keys; "
                         "overrides RETALK_PASSPHRASE. NOTE: a value passed "
@@ -426,6 +435,7 @@ environment variables:
   RETALK_USER        which user to act as (alternative to --user / -u)
   RETALK_PASSPHRASE  unlocks your keys (alternative to --passphrase)
   RETALK_RELAY       relay to talk to (init can save one per identity instead)
+  RETALK_API_KEY     relay access key, if the relay requires one (init can save it)
 
 output conventions:
   stdout carries results (ids, messages, --json lines); everything else —

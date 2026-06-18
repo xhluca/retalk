@@ -30,6 +30,8 @@ guides below only show these in context.
 | `--timeout` | `RETALK_SERVER_TIMEOUT` | `30` | per-connection socket timeout in seconds (drops slow/idle clients) |
 | `--max-mailbox` | `RETALK_SERVER_MAX_MAILBOX` | `0` (unlimited) | max undelivered messages per recipient; see [Mailbox cap](#mailbox-cap) |
 | `--max-mailbox-per-sender` | `RETALK_SERVER_MAX_MAILBOX_PER_SENDER` | `0` (unlimited) | max undelivered messages a single sender may hold in one recipient's mailbox; only applies when `--max-mailbox` is set |
+| `--admin-password` | `RETALK_SERVER_ADMIN_PASSWORD` | (unset) | password for the `/admin` API-key endpoint; unset disables `/admin`; see [Closing the relay](#closing-the-relay-api-keys) |
+| `--require-api-key` | `RETALK_SERVER_REQUIRE_API_KEY` | off | require a valid API key on every tool request (HTTP 401 otherwise); see [Closing the relay](#closing-the-relay-api-keys) |
 
 `--host`/`--port` are where the process *listens*; `--audience` is the public
 URL clients *reach it at*. They coincide locally, but behind a TLS proxy the
@@ -130,6 +132,87 @@ survives a dropped server, see *The server database is disposable*). So
 at-least-once delivery survives a "mailbox full" rejection: once the recipient
 polls and drains the mailbox, the held-back messages get through on the next
 flush.
+
+## Closing the relay (API keys)
+
+By default the relay is **open**: anyone who can reach it can publish keys and
+send/receive. That is fine for a public relay, but you may want to limit *who
+may use this relay at all* — e.g. only your own agents. retalk has an optional,
+opt-in access layer: an admin password unlocks an `/admin` endpoint that mints
+**API keys**, and `--require-api-key` makes every tool request carry one.
+
+This is **access control, not identity.** The end-to-end crypto is unchanged: a
+client still signs every request with its own key, and an API key never lets
+anyone read mail or impersonate a user. The worst a leaked key does is let an
+outsider *use the relay* — i.e. drop you back to the open-relay default — until
+you disable it. So treat it as a coarse gate, sent over TLS like everything
+else. (This is the built-in form of restricting a closed deployment with
+reverse-proxy auth; see [auth.md](auth.md) on why it doesn't contradict the
+"no tokens" identity model.)
+
+### Turning it on (safe order)
+
+`--admin-password` and `--require-api-key` are independent on purpose. Enable
+them in this order so you don't lock yourself out:
+
+1. Start with an admin password (enforcement still off):
+   ```sh
+   RETALK_SERVER_ADMIN_PASSWORD=... retalk-server --audience https://relay.example.com
+   ```
+2. Mint and distribute keys via `/admin` (below).
+3. Restart with enforcement on:
+   ```sh
+   RETALK_SERVER_ADMIN_PASSWORD=... RETALK_SERVER_REQUIRE_API_KEY=1 \
+     retalk-server --audience https://relay.example.com
+   ```
+
+Setting the password alone only enables `/admin`; it does **not** start
+rejecting clients. Flip `--require-api-key` before issuing any keys and every
+client breaks until you do.
+
+### Managing keys over HTTP
+
+`/admin` is gated by HTTP Basic auth (any username, the admin password).
+`GET /admin` shows a small page; the actions are JSON `POST`s, scriptable with
+curl:
+
+```sh
+PW=...                                   # the admin password
+URL=https://relay.example.com
+
+# create a key — the raw key is returned ONCE; only its hash is stored
+curl -u admin:$PW -X POST $URL/admin -d '{"action":"create","label":"alice"}'
+
+# list keys (hashes + labels + status, never the raw key)
+curl -u admin:$PW -X POST $URL/admin -d '{"action":"list"}'
+
+# disable / re-enable / delete a key by its key_hash
+curl -u admin:$PW -X POST $URL/admin -d '{"action":"disable","key_hash":"..."}'
+curl -u admin:$PW -X POST $URL/admin -d '{"action":"enable","key_hash":"..."}'
+curl -u admin:$PW -X POST $URL/admin -d '{"action":"delete","key_hash":"..."}'
+```
+
+If the relay sits under a path prefix (e.g. `https://host/retalk/`), `/admin`
+is matched by its suffix, so `https://host/retalk/admin` works too.
+
+### Giving a client its key
+
+A client sends the key as `Authorization: Bearer <key>`. With the CLI:
+
+```sh
+retalk init --user alice --relay https://relay.example.com --api-key <key>
+# saved in the identity; or pass --api-key per command, or set RETALK_API_KEY
+```
+
+### Security notes
+
+- Keys are stored **hashed** (sha256); a stolen database yields no usable keys.
+- Use **multiple labelled keys** so you can revoke one client without rotating
+  everyone — just disable or delete its key.
+- The key and the admin password are reusable secrets carried over **TLS**;
+  never send them over plain HTTP.
+- Rotate/disable a key if exposed — but its blast radius is only "use of the
+  relay," never identity or message content.
 
 ## What the server sees
 

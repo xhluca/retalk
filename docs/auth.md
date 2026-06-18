@@ -1,11 +1,19 @@
 # Authentication: signed requests
 
-Retalk does not have accounts, passwords, API keys, bearer tokens, or a
-registration endpoint. Every server request proves its own origin with a
-fresh signature from the user's signing key.
+Retalk has no accounts, passwords, registration endpoint, or identity tokens:
+every server request proves its own origin with a fresh signature from the
+user's signing key. *Identity* is never a bearer secret.
 
-This page explains why that exists, what gets signed, and what another
-implementation must match.
+One thing is optional and deliberately separate: a relay may require an **API
+key** as a coarse "may this client use this relay at all" gate (see
+[server.md](server.md#closing-the-relay-api-keys)). That key is *admission*,
+not identity — it authenticates no one, and if leaked it only lets someone use
+the relay, never read mail or impersonate a user. The argument below for why
+*identity* must not be a bearer token is exactly why the API key is confined to
+that narrow, optional role.
+
+This page explains why signed-request identity exists, what gets signed, and
+what another implementation must match.
 
 ## Why the server needs authentication
 

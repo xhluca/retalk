@@ -59,9 +59,13 @@ class User:
     def __init__(self, server_url: str, passphrase: str, name: str = "",
                  store: str = "user.db", identity_keys: dict | None = None,
                  names: dict | None = None, blocked: set | None = None,
-                 receive_policy: str = "open", known: set | None = None):
+                 receive_policy: str = "open", known: set | None = None,
+                 api_key: str | None = None):
         self.server_url = server_url
         self.name = name
+        # optional relay access key (admission only) sent as a Bearer header;
+        # it gates use of the relay, never identity (signatures do that)
+        self.api_key = api_key
         # {peer_id: full identity key} to pin, on top of the fingerprint ID
         self.identity_keys = identity_keys or {}
         # local peer names {peer_id: name}; server-supplied names are
@@ -171,10 +175,13 @@ class User:
         return self._call_raw(tool, wire)
 
     def _call_raw(self, tool: str, wire: dict):
+        headers = {"content-type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
         req = urllib.request.Request(
             self.server_url,
             data=json.dumps({"tool": tool, "args": wire}).encode(),
-            headers={"content-type": "application/json"})
+            headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 return json.loads(resp.read())

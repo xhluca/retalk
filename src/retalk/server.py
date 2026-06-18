@@ -35,20 +35,37 @@ Config (a CLI flag overrides the matching env var):
                 undelivered messages a single sender may hold in one recipient's
                 mailbox (default 0 = unlimited; ignored when the overall cap is
                 unlimited)
+  --admin-password / RETALK_SERVER_ADMIN_PASSWORD  password for the /admin
+                endpoint (HTTP Basic) that mints API keys; unset disables
+                /admin (404)
+  --require-api-key / RETALK_SERVER_REQUIRE_API_KEY  require a valid API key
+                (Authorization: Bearer <key>) on every tool request, else 401
+                (default off)
 
 A "mailbox full" rejection is safe for delivery: the sender keeps
 unacknowledged messages in its local outbox and resends them later, so
 at-least-once delivery survives the rejection (see docs/server.md).
+
+API keys gate *use of the relay* (admission), never identity: with
+--require-api-key, tool requests must carry one, but a leaked key only lets
+someone use the relay (the open-relay default) — it can't impersonate a user
+or read mail, which stay protected by the per-request signatures and E2E
+encryption. See docs/auth.md and docs/server.md.
 """
 
+import base64
 import hashlib
+import hmac
+import html
 import json
 import os
+import secrets
 import sqlite3
 import threading
 import time
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlsplit
 
 import vodozemac as v
 
@@ -71,6 +88,13 @@ MAX_MAILBOX = int(os.environ.get("RETALK_SERVER_MAX_MAILBOX", "0"))
 MAX_MAILBOX_PER_SENDER = int(
     os.environ.get("RETALK_SERVER_MAX_MAILBOX_PER_SENDER", "0"))
 RATE_WINDOW = 60  # seconds; the rate limit is "requests per this window"
+# Optional relay access control (admission, NOT identity — see docs/auth.md):
+#   ADMIN_PASSWORD   unlocks the /admin API-key endpoint (HTTP Basic); empty
+#                    string disables /admin entirely (404).
+#   REQUIRE_API_KEY  when true, every tool request must carry a valid API key.
+ADMIN_PASSWORD = os.environ.get("RETALK_SERVER_ADMIN_PASSWORD", "")
+REQUIRE_API_KEY = os.environ.get(
+    "RETALK_SERVER_REQUIRE_API_KEY", "").lower() in ("1", "true", "yes", "on")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users(
@@ -98,6 +122,12 @@ CREATE TABLE IF NOT EXISTS messages(
 CREATE TABLE IF NOT EXISTS nonces(
     nonce TEXT PRIMARY KEY,
     ts REAL
+);
+CREATE TABLE IF NOT EXISTS api_keys(
+    key_hash TEXT PRIMARY KEY,
+    label TEXT,
+    created REAL,
+    disabled INT DEFAULT 0
 );
 """
 
@@ -351,6 +381,102 @@ TOOLS = {fn.__name__: fn for fn in
           send_message, read_messages)}
 
 
+# ---------- relay access control: API keys (admission only, not identity) ----
+
+def _hash_key(raw: str) -> str:
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def _api_key_valid(raw: str | None) -> bool:
+    """True if `raw` matches a stored, non-disabled API key. Keys are stored
+    as hashes only, so a leaked database yields no usable keys."""
+    if not raw:
+        return False
+    conn = _db()
+    try:
+        return conn.execute(
+            "SELECT 1 FROM api_keys WHERE key_hash=? AND disabled=0",
+            (_hash_key(raw),)).fetchone() is not None
+    finally:
+        conn.close()
+
+
+def _api_key_create(label: str) -> dict:
+    """Mint a key; return the raw value ONCE (only its hash is persisted)."""
+    raw = secrets.token_urlsafe(32)
+    kh = _hash_key(raw)
+    conn = _db()
+    try:
+        with conn:
+            conn.execute(
+                "INSERT INTO api_keys(key_hash, label, created, disabled) "
+                "VALUES(?,?,?,0)", (kh, label, time.time()))
+    finally:
+        conn.close()
+    return {"key": raw, "key_hash": kh, "label": label}
+
+
+def _api_key_list() -> list:
+    conn = _db()
+    try:
+        rows = conn.execute(
+            "SELECT key_hash, label, created, disabled FROM api_keys "
+            "ORDER BY created").fetchall()
+        return [{"key_hash": r[0], "label": r[1], "created": r[2],
+                 "disabled": bool(r[3])} for r in rows]
+    finally:
+        conn.close()
+
+
+def _api_key_set_disabled(key_hash: str, disabled: bool) -> int:
+    conn = _db()
+    try:
+        with conn:
+            cur = conn.execute(
+                "UPDATE api_keys SET disabled=? WHERE key_hash=?",
+                (1 if disabled else 0, key_hash))
+        return cur.rowcount
+    finally:
+        conn.close()
+
+
+def _api_key_delete(key_hash: str) -> int:
+    conn = _db()
+    try:
+        with conn:
+            cur = conn.execute("DELETE FROM api_keys WHERE key_hash=?",
+                               (key_hash,))
+        return cur.rowcount
+    finally:
+        conn.close()
+
+
+def _admin_page() -> str:
+    rows = "".join(
+        f"<tr><td><code>{html.escape(k['key_hash'])}</code></td>"
+        f"<td>{html.escape(k['label'] or '')}</td>"
+        f"<td>{'disabled' if k['disabled'] else 'active'}</td></tr>"
+        for k in _api_key_list())
+    return (
+        "<!doctype html><meta charset=utf-8><title>retalk admin</title>"
+        "<h1>retalk relay &mdash; API keys</h1>"
+        "<p>API keys gate <em>use of this relay</em> only. They are stored "
+        "hashed and the raw key is shown just once, at creation.</p>"
+        "<table border=1 cellpadding=6><tr><th>key_hash</th><th>label</th>"
+        f"<th>status</th></tr>{rows or '<tr><td colspan=3>(no keys yet)</td></tr>'}"
+        "</table>"
+        "<h2>Manage (all over HTTP; Basic-auth with the admin password)</h2>"
+        "<pre>"
+        "# create a key (the response contains the raw key ONCE)\n"
+        "curl -u admin:PW -X POST URL/admin -d '{\"action\":\"create\",\"label\":\"alice\"}'\n"
+        "# list keys (hashes only, never raw)\n"
+        "curl -u admin:PW -X POST URL/admin -d '{\"action\":\"list\"}'\n"
+        "# disable / enable / delete by key_hash\n"
+        "curl -u admin:PW -X POST URL/admin -d '{\"action\":\"disable\",\"key_hash\":\"...\"}'\n"
+        "curl -u admin:PW -X POST URL/admin -d '{\"action\":\"delete\",\"key_hash\":\"...\"}'\n"
+        "</pre>")
+
+
 class _RateLimiter:
     """Thread-safe sliding-window request counter keyed by caller fingerprint.
 
@@ -395,7 +521,22 @@ class _Handler(BaseHTTPRequestHandler):
     # dropped if a client is too slow/idle (slowloris defence)
     timeout = TIMEOUT
 
+    def _is_admin(self) -> bool:
+        # match the "/admin" path suffix so it also works behind a path prefix
+        return urlsplit(self.path).path.rstrip("/").rsplit("/", 1)[-1] == "admin"
+
+    def do_GET(self):
+        if not self._is_admin():
+            self._reply(404, json.dumps({"error": "not found"}).encode())
+            return
+        if not self._require_admin():
+            return
+        self._reply(200, _admin_page().encode(), "text/html; charset=utf-8")
+
     def do_POST(self):
+        if self._is_admin():
+            self._admin_post()
+            return
         try:
             length = int(self.headers.get("content-length", 0))
             if length > MAX_BODY:
@@ -403,6 +544,13 @@ class _Handler(BaseHTTPRequestHandler):
                 self._reply(413, json.dumps(
                     {"error": f"request body too large: {length} bytes "
                               f"(max {MAX_BODY})"}).encode())
+                return
+            # API-key admission gate (cheap reject, before reading the body or
+            # verifying any signature). Off by default; see REQUIRE_API_KEY.
+            if REQUIRE_API_KEY and not _api_key_valid(self._bearer_key()):
+                self._reply(401, json.dumps(
+                    {"error": "valid API key required to use this relay"}
+                ).encode())
                 return
             req = json.loads(self.rfile.read(length))
             fp = (req.get("args", {}).get("auth") or {}).get("fingerprint")
@@ -416,9 +564,71 @@ class _Handler(BaseHTTPRequestHandler):
         except Exception as e:
             self._reply(400, json.dumps({"error": str(e)}).encode())
 
-    def _reply(self, status: int, body: bytes):
+    # ----- admin endpoint (API-key management over HTTP) -----
+    def _bearer_key(self) -> str | None:
+        hdr = self.headers.get("authorization", "")
+        if hdr.startswith("Bearer "):
+            return hdr[7:].strip()
+        return self.headers.get("x-retalk-key")
+
+    def _require_admin(self) -> bool:
+        """True if /admin is enabled and the Basic-auth password matches.
+        Otherwise replies 404 (disabled) or 401 (bad creds) and returns
+        False. The password is never stored or logged."""
+        if not ADMIN_PASSWORD:
+            self._reply(404, json.dumps({"error": "not found"}).encode())
+            return False
+        hdr = self.headers.get("authorization", "")
+        ok = False
+        if hdr.startswith("Basic "):
+            try:
+                _, _, pw = base64.b64decode(hdr[6:]).decode().partition(":")
+                ok = hmac.compare_digest(pw, ADMIN_PASSWORD)
+            except Exception:
+                ok = False
+        if not ok:
+            body = json.dumps({"error": "admin auth required"}).encode()
+            self.send_response(401)
+            self.send_header("WWW-Authenticate", 'Basic realm="retalk admin"')
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return False
+        return True
+
+    def _admin_post(self):
+        if not self._require_admin():
+            return
+        try:
+            length = int(self.headers.get("content-length", 0))
+            if length > MAX_BODY:
+                self._reply(413, json.dumps(
+                    {"error": "request body too large"}).encode())
+                return
+            req = json.loads(self.rfile.read(length)) if length else {}
+            action = req.get("action")
+            if action == "create":
+                out = _api_key_create(req.get("label", ""))
+            elif action == "list":
+                out = {"keys": _api_key_list()}
+            elif action in ("disable", "enable"):
+                out = {"updated": _api_key_set_disabled(
+                    req["key_hash"], action == "disable")}
+            elif action == "delete":
+                out = {"deleted": _api_key_delete(req["key_hash"])}
+            else:
+                raise ValueError(
+                    f"unknown admin action: {action!r} "
+                    "(create|list|disable|enable|delete)")
+            self._reply(200, json.dumps(out).encode())
+        except Exception as e:
+            self._reply(400, json.dumps({"error": str(e)}).encode())
+
+    def _reply(self, status: int, body: bytes,
+               content_type: str = "application/json"):
         self.send_response(status)
-        self.send_header("content-type", "application/json")
+        self.send_header("content-type", content_type)
         self.send_header("content-length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -430,6 +640,7 @@ class _Handler(BaseHTTPRequestHandler):
 def main():
     global DB_PATH, HOST, PORT, AUDIENCE
     global MAX_MAILBOX, MAX_MAILBOX_PER_SENDER, MAX_BODY, RATE_LIMIT, TIMEOUT
+    global ADMIN_PASSWORD, REQUIRE_API_KEY
     global _RATE_LIMITER
     import argparse
     ap = argparse.ArgumentParser(
@@ -449,7 +660,8 @@ def main():
                "https:// address. Each flag overrides the matching RETALK_*\n"
                "env var (RETALK_SERVER_HOST, RETALK_SERVER_PORT, RETALK_SERVER_AUDIENCE, RETALK_SERVER_DB,\n"
                "RETALK_SERVER_MAX_BODY, RETALK_SERVER_RATE_LIMIT, RETALK_SERVER_TIMEOUT,\n"
-               "RETALK_SERVER_MAX_MAILBOX, RETALK_SERVER_MAX_MAILBOX_PER_SENDER).")
+               "RETALK_SERVER_MAX_MAILBOX, RETALK_SERVER_MAX_MAILBOX_PER_SENDER,\n"
+               "RETALK_SERVER_ADMIN_PASSWORD, RETALK_SERVER_REQUIRE_API_KEY).")
     ap.add_argument("--host", metavar="HOST",
                     help="interface to bind: 0.0.0.0 for every interface or "
                          "127.0.0.1 for this machine only (overrides "
@@ -487,6 +699,14 @@ def main():
     ap.add_argument("--timeout", metavar="SECONDS", type=float,
                     help="per-connection socket timeout to drop slow/idle "
                          "clients (overrides RETALK_SERVER_TIMEOUT; default 30)")
+    ap.add_argument("--admin-password", metavar="PW",
+                    help="password for the /admin API-key endpoint (HTTP "
+                         "Basic); unset disables /admin (overrides "
+                         "RETALK_SERVER_ADMIN_PASSWORD)")
+    ap.add_argument("--require-api-key", action="store_true", default=False,
+                    help="require a valid API key (Authorization: Bearer "
+                         "<key>) on every tool request; mint keys at /admin "
+                         "(also via RETALK_SERVER_REQUIRE_API_KEY)")
     args = ap.parse_args()
 
     if args.db:
@@ -510,6 +730,10 @@ def main():
         RATE_LIMIT = args.rate_limit
     if args.timeout is not None:
         TIMEOUT = args.timeout
+    if args.admin_password is not None:
+        ADMIN_PASSWORD = args.admin_password
+    if args.require_api_key:
+        REQUIRE_API_KEY = True
 
     _RATE_LIMITER = _RateLimiter(RATE_LIMIT)
     _Handler.timeout = TIMEOUT
