@@ -203,7 +203,16 @@ retalk send --peer bob "hello"     # send one encrypted message
 retalk receive --all               # read every sender (one JSON line each)
 retalk receive --peer bob          # read only messages from bob
 retalk receive --all --follow      # keep polling all senders; maintain keys
+retalk block eve                   # drop a sender's mail before decryption
+retalk unblock eve                 # stop dropping that sender
+retalk blocked                     # list blocked senders
+retalk receive --all --peers-only  # accept only saved peers (drop strangers)
 ```
+
+`block`/`unblock`/`blocked` and `--peers-only` are local filters that drop a
+sender during `receive` *before* any decryption, so a blocked or unknown
+sender can never make you consume a one-time key. Nothing is sent to the
+server or the peer.
 
 ### Selecting the user
 
