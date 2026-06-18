@@ -22,21 +22,21 @@ encrypted local store.
 
 ## Why one-time prekeys exist
 
-Suppose Alice wants to message Bob while Bob is offline. A normal handshake
-needs fresh key material from both sides, but Bob is not there to answer.
+Suppose "Alice" wants to message "Bob" while "Bob" is offline. A normal handshake
+needs fresh key material from both sides, but "Bob" is not there to answer.
 
-Olm solves this by letting Bob prepare handshake material ahead of time:
+Olm solves this by letting "Bob" prepare handshake material ahead of time:
 
-1. Bob generates a batch of one-time keypairs.
-2. Bob keeps the private halves locally.
-3. Bob uploads the public halves to the server.
-4. Alice claims one public prekey when she sends the first message.
-5. Alice creates an outbound session immediately.
-6. Bob later receives the pre-key message and creates the matching inbound
+1. "Bob" generates a batch of one-time keypairs.
+2. "Bob" keeps the private halves locally.
+3. "Bob" uploads the public halves to the server.
+4. "Alice" claims one public prekey when she sends the first message.
+5. "Alice" creates an outbound session immediately.
+6. "Bob" later receives the pre-key message and creates the matching inbound
    session with the private half he kept.
 
-In code, Alice's first `send` calls `claim_key` and then
-`create_outbound_session`. Bob's `receive` sees a pre-key message
+In code, "Alice"'s first `send` calls `claim_key` and then
+`create_outbound_session`. "Bob"'s `receive` sees a pre-key message
 (`mtype == 0`) and calls `create_inbound_session`.
 
 ## Why each prekey is single-use
@@ -45,14 +45,14 @@ One-time prekeys are consumed once for two reasons.
 
 Forward secrecy:
 
-After Bob uses a prekey, Bob deletes the private half. If Bob's machine is
+After "Bob" uses a prekey, "Bob" deletes the private half. If "Bob"'s machine is
 stolen later, that deleted prekey cannot be recovered and used to reconstruct
 old session starts.
 
 Replay resistance:
 
 The server is not trusted. If prekeys were reusable, a hostile server could
-replay old handshake messages and make Bob create duplicate sessions or
+replay old handshake messages and make "Bob" create duplicate sessions or
 reprocess old traffic. With single-use keys, a replayed handshake refers to a
 private half that has already been deleted, so it fails.
 
@@ -64,7 +64,7 @@ That ensures two concurrent senders cannot receive the same prekey.
 Prekeys are used to start sessions, not to encrypt every message.
 
 After a session exists, Olm handles message ratcheting inside that session.
-Alice and Bob can exchange many messages while consuming only one one-time
+"Alice" and "Bob" can exchange many messages while consuming only one one-time
 prekey for the original handshake.
 
 The pool drains only when new sessions are created. That can happen when:
