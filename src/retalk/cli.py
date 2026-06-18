@@ -166,15 +166,6 @@ def _open_user(args, need_server: bool = True, banner: bool = True) -> User:
     return u
 
 
-def _ensure_published(u: User):
-    """Make sure our keys exist on this server before acting.
-
-    Asks the server rather than trusting a local flag, so a wiped or
-    replaced server database heals automatically on the next command."""
-    if not u._call("count_keys")["has_fallback"]:
-        u.publish()
-
-
 def _peer_to_id(peer: str, store_db: Path) -> str:
     peers = _saved_peers(store_db)
     if peer in peers:
@@ -339,7 +330,7 @@ def cmd_send(args):
     u = _open_user(args)
     to = _peer_to_id(args.peer, _resolve_store(args) / STORE_FILE)
 
-    _ensure_published(u)
+    u.sync(resend=False)           # reachable + fresh keys; retries are `retalk sync`'s job
     mid = u.send(to, args.text)
     print(json.dumps({"id": mid, "to": to}))
     print(f"sent to {args.peer}", file=sys.stderr)
@@ -360,19 +351,31 @@ def cmd_receive(args):
             print(json.dumps(m), flush=True)
 
     try:
-        _ensure_published(u)
+        u.sync(resend=False)          # reachable + fresh keys; reading never resends
         emit(u.receive(to))
         if not args.follow:
             return
-        last_maintain = time.monotonic()
+        last_sync = time.monotonic()
         while True:
             time.sleep(2)
             emit(u.receive(to))
-            if time.monotonic() - last_maintain > 60:
-                u.maintain()
-                last_maintain = time.monotonic()
+            if time.monotonic() - last_sync > 60:
+                u.sync(resend=False)  # key upkeep only; resends belong to send / `retalk sync`
+                last_sync = time.monotonic()
     except KeyboardInterrupt:
         pass
+
+
+def cmd_sync(args):
+    u = _open_user(args)
+    summary = u.sync()                # full pass: keys + flush outbox
+    print(json.dumps(summary))        # structured result on stdout
+    done = [k for k in ("republished", "replenished", "fallback_rotated")
+            if summary[k]]
+    if summary["resent"]:
+        done.append(f"resent={summary['resent']}")
+    print("synced" + (f" ({', '.join(done)})" if done else " (up to date)"),
+          file=sys.stderr)
 
 
 def main():
@@ -646,6 +649,24 @@ examples:
     sp.add_argument("--json", action="store_true",
                     help="emit one JSON object per blocked sender")
     sp.set_defaults(fn=cmd_blocked)
+
+    sp = sub.add_parser(
+        "sync", parents=[common], formatter_class=raw,
+        help="reconcile this identity with the relay (keys + outbox)",
+        description="""\
+Run one reconciliation pass against the relay — the same upkeep `send` does
+and `receive` does (minus resending): (re)publish your keys if the relay has
+forgotten them, replenish one-time keys, rotate the fallback key if stale,
+and re-send any unacknowledged outbox messages.
+
+Reading (`receive`) never resends; sending and `sync` do. So run `sync` from
+cron or a timer for a mostly-listening client, to retry stuck outgoing
+messages without relying on the next `send`.""",
+        epilog="""\
+examples:
+  retalk sync                 reconcile keys + flush the outbox
+  */5 * * * * retalk sync     retry pending sends every 5 minutes (cron)""")
+    sp.set_defaults(fn=cmd_sync)
 
     sp = sub.add_parser(
         "send", parents=[common], formatter_class=raw,

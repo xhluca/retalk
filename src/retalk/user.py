@@ -260,32 +260,48 @@ class User:
             self._meta_set("fallback_ts", str(time.time()))
         self._save_account(acct)
 
-    def maintain(self, min_otks: int = 20, batch: int = 100,
-                       fallback_max_age: float = 86400.0,
-                       resend_after: float = 120.0) -> dict:
-        """Keep server-side key material healthy. Call periodically.
+    def sync(self, *, publish: bool = True, replenish: bool = True,
+             rotate: bool = True, resend: bool = True,
+             min_otks: int = 20, batch: int = 100,
+             fallback_max_age: float = 86400.0,
+             resend_after: float = 0.0) -> dict:
+        """One reconciliation pass over a single `count_keys` round-trip. Each
+        flag turns its step off, so every caller shares this one routine:
 
-        Replenishes one-time keys when the server's unclaimed stash drops
-        below min_otks, rotates the fallback key when it is older than
-        fallback_max_age seconds (default: daily) or missing server-side,
-        and re-sends outbox messages unacknowledged for resend_after seconds.
+          publish   — (re)publish identity+signing keys (plus a key batch) when
+                      the relay has forgotten us, so we stay reachable and our
+                      messages stay verifiable.
+          replenish — upload a fresh batch of one-time keys when the unclaimed
+                      stash is low.
+          rotate    — rotate the reusable fallback key once it is stale.
+          resend    — re-upload unacknowledged outbox messages (loss recovery).
+
+        `send` and `sync` resend; `receive` passes resend=False (reading never
+        resends — retries belong to send and to an explicit sync). The default
+        resend_after=0 re-sends everything still unacknowledged.
         """
         with self._locked():
             counts = self._call("count_keys")
-            need_otks = counts["unclaimed"] < min_otks
+            forgotten = not counts["has_fallback"]
             ts = self._meta_get("fallback_ts")
-            need_rotate = (
-                not counts["has_fallback"]
-                or ts is None
-                or time.time() - float(ts) > fallback_max_age
-            )
+            stale = ts is None or time.time() - float(ts) > fallback_max_age
+            need_otks = replenish and counts["unclaimed"] < min_otks
+            need_rotate = (rotate and stale) or (publish and forgotten)
             if need_otks or need_rotate:
                 self._publish(batch if need_otks else 0, need_rotate)
-            resent = self._flush_outbox(resend_after)
-            return {"unclaimed": counts["unclaimed"],
-                    "replenished": need_otks,
-                    "fallback_rotated": need_rotate,
+            resent = self._flush_outbox(resend_after) if resend else 0
+            return {"unclaimed": counts["unclaimed"], "republished": forgotten,
+                    "replenished": need_otks, "fallback_rotated": need_rotate,
                     "resent": resent}
+
+    def maintain(self, min_otks: int = 20, batch: int = 100,
+                 fallback_max_age: float = 86400.0,
+                 resend_after: float = 120.0) -> dict:
+        """Backward-compatible periodic upkeep: a full `sync()` pass. Prefer
+        calling `sync()` directly for finer control (e.g. resend=False)."""
+        return self.sync(min_otks=min_otks, batch=batch,
+                         fallback_max_age=fallback_max_age,
+                         resend_after=resend_after)
 
     def send(self, to: str, text: str) -> str:
         """Encrypt and send a message to a peer user ID. The ciphertext is

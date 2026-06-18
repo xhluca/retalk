@@ -89,14 +89,15 @@ alice.send("<bob-user-id>", "hello")     # returns the message id
 for m in alice.receive():                # each m: {"id","from","name","text"}
     print(m["name"] or m["from"], m["text"])
 
-alice.maintain()                         # replenish one-time keys, rotate the
-                                         # fallback, resend unacked messages
+alice.sync()                             # reconcile keys (publish/replenish/
+                                         # rotate) + resend unacked messages
 ```
 
 `receive()` returns the same message objects the CLI prints — see
-[STANDARD.md](STANDARD.md). Call `maintain()` periodically to keep the
-server-side key pool healthy and to resend unacknowledged mail; the CLI's
-`retalk receive --all --follow` does this for you once a minute.
+[STANDARD.md](STANDARD.md). Call `sync()` periodically to keep your keys
+healthy on the relay and to resend unacknowledged mail (this is the `retalk
+sync` command). `send` and `receive` already run the key-upkeep half of it;
+only `sync` resends.
 
 ## Scripting the CLI
 
@@ -108,6 +109,13 @@ Drain the mailbox from cron:
 
 ```cron
 */5 * * * * RETALK_PASSPHRASE=... retalk receive --all >> ~/inbox.jsonl 2>/dev/null
+```
+
+Retry unacknowledged sends from cron (one-shot `send`/`receive` don't resend —
+only `sync` does):
+
+```cron
+*/5 * * * * RETALK_PASSPHRASE=... retalk sync >/dev/null 2>&1
 ```
 
 Pipe messages into another tool:
