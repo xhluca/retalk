@@ -25,6 +25,8 @@ guides below only show these in context.
 | `--port` | `RETALK_SERVER_PORT` | `8766` | TCP port to bind |
 | `--audience` | `RETALK_SERVER_AUDIENCE` | `http://HOST:PORT` | public URL clients connect to; request signatures are bound to it, so it must equal each client's relay URL exactly |
 | `--db` | `RETALK_SERVER_DB` | `server.db` | SQLite database path |
+| `--max-mailbox` | `RETALK_SERVER_MAX_MAILBOX` | `0` (unlimited) | max undelivered messages per recipient; see [Mailbox cap](#mailbox-cap) |
+| `--max-mailbox-per-sender` | `RETALK_SERVER_MAX_MAILBOX_PER_SENDER` | `0` (unlimited) | max undelivered messages a single sender may hold in one recipient's mailbox; only applies when `--max-mailbox` is set |
 
 `--host`/`--port` are where the process *listens*; `--audience` is the public
 URL clients *reach it at*. They coincide locally, but behind a TLS proxy the
@@ -95,6 +97,36 @@ Rows are deleted as soon as `read_messages` delivers them to the recipient.
 
 `nonces` stores recent request nonces so copied requests cannot be replayed.
 Old entries are purged automatically.
+
+## Mailbox cap
+
+By default a recipient's mailbox is unbounded, so an open relay can be filled
+by anyone who can reach it — a denial-of-service lever. The mailbox cap bounds
+how much undelivered mail a recipient can accumulate.
+
+| flag | env var | default | meaning |
+|------|---------|---------|---------|
+| `--max-mailbox` | `RETALK_SERVER_MAX_MAILBOX` | `0` (unlimited) | max undelivered messages per recipient |
+| `--max-mailbox-per-sender` | `RETALK_SERVER_MAX_MAILBOX_PER_SENDER` | `0` (unlimited) | max undelivered messages one sender may hold in a single recipient's mailbox |
+
+Behavior:
+
+- The default `0` is unlimited, so caps are off unless you set one.
+- `send_message` counts a recipient's undelivered messages *before* inserting.
+  At or over `--max-mailbox`, the send is **rejected** with HTTP 400 and
+  `{"error": "mailbox full: ..."}`. It is **reject-not-evict**: existing mail
+  is never dropped to make room.
+- `--max-mailbox-per-sender` is a smaller sub-cap on how many of those
+  messages may come from one sender, so a single sender cannot fill a mailbox
+  and crowd everyone else out. It only takes effect when `--max-mailbox` is
+  set, and produces a `mailbox full for sender: ...` error.
+
+A rejection is safe for delivery. The sender keeps every unacknowledged
+message in its local outbox and resends later (the same mechanism that
+survives a dropped server, see *The server database is disposable*). So
+at-least-once delivery survives a "mailbox full" rejection: once the recipient
+polls and drains the mailbox, the held-back messages get through on the next
+flush.
 
 ## What the server sees
 
