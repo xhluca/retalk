@@ -191,15 +191,24 @@ no passphrase, while an encrypted identity always requires one.
 Then exchange user IDs out-of-band and save your peer:
 
 ```sh
-retalk add bob <bob-user-id>
+retalk add bob <bob-user-id>   # an "incomplete" contact: just name + fingerprint
+retalk verify bob              # optional: fetch & record bob's keys now
 ```
+
+`add` stores only the name and fingerprint. The peer's actual keys are fetched
+from the relay and checked against that fingerprint automatically the first
+time you message them. `retalk verify` makes that step explicit — it fetches
+the keys now (or takes them via `--identity-key`/`--signing-key`), checks they
+hash to the fingerprint, and records them so they show up in `retalk contacts`.
+It is optional: messaging works on the fingerprint alone.
 
 Common commands (with `RETALK_USER=alice` exported):
 
 ```sh
 retalk id                          # print my user ID
-retalk add bob <bob-user-id>       # save a trusted local name
-retalk contacts                    # list saved peers (name + fingerprint)
+retalk add bob <bob-user-id>       # save a peer (name + fingerprint)
+retalk verify bob                  # fetch & record bob's keys (optional)
+retalk contacts                    # list saved peers and verified status
 retalk send --peer bob "hello"     # send one encrypted message
 retalk receive --all               # read every sender (one JSON line each)
 retalk receive --peer bob          # read only messages from bob

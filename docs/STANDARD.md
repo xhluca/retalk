@@ -56,18 +56,25 @@ as the `id` string.
 
 ### Contact
 
-Emitted by `retalk contacts --json` -- one object per saved peer (the peers you
-created with `retalk add`), sorted by name.
+Emitted by `retalk contacts --json` -- one object per saved peer (created with
+`retalk add`), sorted by name.
 
-| field          | type   | description |
-|----------------|--------|-------------|
-| `name`         | string | your local name for the peer; never leaves your machine. |
-| `fingerprint`  | string | the peer's user id (32-hex key fingerprint). |
-| `identity_key` | string | the peer's pinned base64 identity key (`retalk add --identity-key`), or `""` if none was pinned. |
+| field          | type    | description |
+|----------------|---------|-------------|
+| `name`         | string  | your local name for the peer; never leaves your machine. |
+| `fingerprint`  | string  | the peer's user id (32-hex key fingerprint). |
+| `identity_key` | string  | the peer's base64 identity key, recorded by `retalk verify`; `""` until verified. |
+| `signing_key`  | string  | the peer's base64 signing key, recorded by `retalk verify`; `""` until verified. |
+| `verified`     | boolean | `true` once the peer's keys have been recorded and checked against the fingerprint (via `retalk verify`); `false` for an add-only contact. |
 
 ```json
-{"name":"bob","fingerprint":"1041c25c...","identity_key":"vGY3...="}
+{"name":"bob","fingerprint":"1041c25c...","identity_key":"vGY3...=","signing_key":"Kcx2...=","verified":true}
 ```
+
+An unverified contact (added but not yet verified) has empty `identity_key` and
+`signing_key` and `"verified": false`. Messaging still works -- the keys are
+fetched and checked against the fingerprint on the fly; `retalk verify` just
+makes that explicit and records the result.
 
 ## Notes for consumers
 

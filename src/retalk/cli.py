@@ -24,7 +24,7 @@ import sys
 import time
 from pathlib import Path
 
-from .user import User
+from .user import User, fingerprint
 
 STORE_FILE = "store.db"
 ID_RE = re.compile(r"^[0-9a-f]{32}$")
@@ -100,9 +100,14 @@ def _meta(store_db: Path, key: str) -> str | None:
 
 
 def _saved_peers(store_db: Path) -> dict:
+    """Return {name: (fingerprint, identity_key, signing_key)} for saved peers.
+
+    A peer added with `retalk add` has only name + fingerprint; identity_key
+    and signing_key stay NULL until `retalk verify` records them, so a peer is
+    "verified" exactly when both keys are present."""
     _store_sql(store_db, "CREATE TABLE IF NOT EXISTS peers("
                          "name TEXT PRIMARY KEY, fingerprint TEXT, "
-                         "identity_key TEXT)")
+                         "identity_key TEXT, signing_key TEXT)")
     # migrate older stores that named these columns id / pin
     cols = [r[1] for r in _store_sql(store_db, "PRAGMA table_info(peers)")]
     if "id" in cols and "fingerprint" not in cols:
@@ -110,9 +115,14 @@ def _saved_peers(store_db: Path) -> dict:
     if "pin" in cols and "identity_key" not in cols:
         _store_sql(store_db,
                    "ALTER TABLE peers RENAME COLUMN pin TO identity_key")
-    return {name: (fp, ik) for name, fp, ik in
-            _store_sql(store_db, "SELECT name, fingerprint, identity_key "
-                                 "FROM peers")}
+    if "signing_key" not in cols:  # pre-verify stores lack the cached signing key
+        try:
+            _store_sql(store_db, "ALTER TABLE peers ADD COLUMN signing_key TEXT")
+        except sqlite3.OperationalError:
+            pass  # already present (added concurrently)
+    return {name: (fp, ik, sk) for name, fp, ik, sk in
+            _store_sql(store_db, "SELECT name, fingerprint, identity_key, "
+                                 "signing_key FROM peers")}
 
 
 def _blocked_set(store_db: Path) -> set:
@@ -132,9 +142,9 @@ def _open_user(args, need_server: bool = True, banner: bool = True) -> User:
         _die("no relay URL: pass --relay, set RETALK_RELAY, or save one "
              "at init time")
     peers = _saved_peers(store_db)
-    identity_keys = {fp: ik for _, (fp, ik) in peers.items() if ik}
-    names = {fp: name for name, (fp, _) in peers.items()}
-    known = {fp for _, (fp, _) in peers.items()}
+    identity_keys = {fp: ik for _, (fp, ik, _sk) in peers.items() if ik}
+    names = {fp: name for name, (fp, _ik, _sk) in peers.items()}
+    known = {fp for _, (fp, _ik, _sk) in peers.items()}
     blocked = _blocked_set(store_db)
     # --peers-only this run, or the setting persisted by an earlier flag
     policy = ("peers-only"
@@ -223,24 +233,71 @@ def cmd_add(args):
         _die("peer name looks like a user id — give it a human name")
     store_db = d / STORE_FILE
     _saved_peers(store_db)  # ensure the table exists
+    # store name + fingerprint only; keys are recorded later by `retalk verify`.
+    # re-adding a name resets any recorded keys, since the fingerprint may have
+    # changed and the old keys would no longer match it.
     _store_sql(store_db,
-               "INSERT INTO peers(name, fingerprint, identity_key) "
-               "VALUES(?,?,?) ON CONFLICT(name) DO UPDATE SET "
+               "INSERT INTO peers(name, fingerprint, identity_key, signing_key) "
+               "VALUES(?,?,NULL,NULL) ON CONFLICT(name) DO UPDATE SET "
                "fingerprint=excluded.fingerprint, "
-               "identity_key=excluded.identity_key",
-               args.name, args.fingerprint, args.identity_key)
+               "identity_key=NULL, signing_key=NULL",
+               args.name, args.fingerprint)
     print(f"added {args.name} -> {args.fingerprint}", file=sys.stderr)
 
 
 def cmd_contacts(args):
     d = _resolve_store(args)
     store_db = d / STORE_FILE
-    for name, (fp, ik) in sorted(_saved_peers(store_db).items()):
+    for name, (fp, ik, sk) in sorted(_saved_peers(store_db).items()):
+        verified = bool(ik and sk)
         if args.json:
             print(json.dumps({"name": name, "fingerprint": fp,
-                              "identity_key": ik or ""}))
+                              "identity_key": ik or "", "signing_key": sk or "",
+                              "verified": verified}))
         else:
-            print(f"{name}\t{fp}")
+            print(f"{name}\t{fp}\t{'verified' if verified else 'unverified'}")
+
+
+def cmd_verify(args):
+    d = _resolve_store(args)
+    store_db = d / STORE_FILE
+    peers = _saved_peers(store_db)
+    # the target must already be a saved contact (run `retalk add` first)
+    if args.peer in peers:
+        name, fp = args.peer, peers[args.peer][0]
+    else:
+        match = [n for n, (pfp, _ik, _sk) in peers.items() if pfp == args.peer]
+        if not match:
+            _die(f"no saved contact '{args.peer}': add it first with "
+                 "`retalk add <name> <fingerprint>`")
+        name, fp = match[0], args.peer
+
+    if args.identity_key or args.signing_key:
+        if not (args.identity_key and args.signing_key):
+            _die("manual verify needs both --identity-key and --signing-key: "
+                 "the fingerprint is the hash of the two together")
+        ik, sk = args.identity_key, args.signing_key
+        got = fingerprint(ik, sk)
+        if got != fp:
+            _die(f"PIN MISMATCH: the supplied keys hash to {got}, not {fp} -- "
+                 "refusing to record them")
+        source = "supplied keys"
+    else:
+        u = _open_user(args)  # fetching needs the relay and the passphrase
+        try:
+            keys = u._call("get_keys", {"peer": fp})
+        except Exception as e:
+            _die(f"could not fetch {name}'s keys from the relay: {e}")
+        ik, sk = keys["identity_key"], keys["signing_key"]
+        got = fingerprint(ik, sk)
+        if got != fp:
+            _die(f"PIN MISMATCH: the relay served keys hashing to {got}, not "
+                 f"{fp} -- possible MITM, refusing to record them")
+        source = "the relay"
+
+    _store_sql(store_db, "UPDATE peers SET identity_key=?, signing_key=? "
+                         "WHERE fingerprint=?", ik, sk, fp)
+    print(f"verified {name} ({fp}) from {source}", file=sys.stderr)
 
 
 def cmd_block(args):
@@ -264,7 +321,7 @@ def cmd_unblock(args):
 def cmd_blocked(args):
     d = _resolve_store(args)
     store_db = d / STORE_FILE
-    names = {fp: name for name, (fp, _) in _saved_peers(store_db).items()}
+    names = {fp: name for name, (fp, _ik, _sk) in _saved_peers(store_db).items()}
     for fp in sorted(_blocked_set(store_db)):
         if args.json:
             print(json.dumps({"fingerprint": fp, "name": names.get(fp, "")}))
@@ -386,7 +443,7 @@ quickstart:
 
 run `retalk <command> --help` for the full story of each command.""")
     sub = p.add_subparsers(dest="command", required=True,
-                           metavar="{init,id,add,contacts,block,unblock,blocked,send,receive}")
+                           metavar="{init,id,add,contacts,verify,block,unblock,blocked,send,receive}")
 
     sp = sub.add_parser(
         "init", parents=[common], formatter_class=raw,
@@ -462,39 +519,75 @@ writes your local peers table.""",
         epilog="""\
 examples:
   retalk add bob f1041c25c87351d8550b31cc6b13ab04
-  retalk add bob <id> --identity-key "vGY3...="   pin bob's full identity key
 
-The fingerprint ID already pins the peer's keys; --identity-key adds an
-explicit second check of the full identity key for belt-and-braces.""")
+This saves an incomplete contact -- just the name and fingerprint. The peer's
+keys are fetched and verified automatically the first time you message them;
+run `retalk verify bob` to do that explicitly now and record the keys (see
+`retalk verify --help`).""")
     sp.add_argument("name", help="local name for this peer (e.g. 'bob')")
     sp.add_argument("fingerprint", help="the peer's 32-hex fingerprint (user id)")
-    sp.add_argument("--identity-key", metavar="KEY",
-                    help="peer's full base64 identity key, verified against "
-                         "everything the server serves for this peer")
     sp.set_defaults(fn=cmd_add)
+
+    sp = sub.add_parser(
+        "verify", parents=[common], formatter_class=raw,
+        help="record a saved peer's keys (explicit first contact)",
+        description="""\
+Record a saved peer's public keys, turning an incomplete contact (name +
+fingerprint, from `retalk add`) into a verified one. This makes EXPLICIT the
+key exchange that otherwise happens implicitly the first time you send to or
+receive from that peer.
+
+By default the keys are fetched from the relay. Pass --identity-key and
+--signing-key together to supply them manually instead (e.g. obtained
+out-of-band). Either way they are checked against the saved fingerprint: if
+they do not hash to it, verify refuses with PIN MISMATCH and records nothing.
+
+On success the identity_key and signing_key are stored locally (shown by
+`retalk contacts`), and the identity key becomes a pin checked on every later
+exchange. Verifying is optional -- send and receive still work on the
+fingerprint alone, verifying keys on the fly. The peer must already exist
+(`retalk add`); fetching from the relay also needs your passphrase.""",
+        epilog="""\
+examples:
+  retalk verify bob                    fetch bob's keys from the relay, record them
+  retalk verify bob \\
+         --identity-key K --signing-key S    record keys you already hold
+  retalk verify f1041c25c87351d8550b31cc6b13ab04   target by raw fingerprint""")
+    sp.add_argument("peer", help="a saved peer name or 32-hex fingerprint; "
+                                 "must already exist via `retalk add`")
+    sp.add_argument("--identity-key", metavar="KEY",
+                    help="record this base64 identity key instead of fetching "
+                         "from the relay (requires --signing-key)")
+    sp.add_argument("--signing-key", metavar="KEY",
+                    help="record this base64 signing key instead of fetching "
+                         "from the relay (requires --identity-key)")
+    sp.set_defaults(fn=cmd_verify)
 
     sp = sub.add_parser(
         "contacts", parents=[common], formatter_class=raw,
         help="list saved peers (your contacts)",
         description="""\
 List the peers you have saved with `retalk add`, one per line as
-NAME<tab>FINGERPRINT, sorted by name. These local names never leave your
-machine, and the peer never learns them.
+NAME<tab>FINGERPRINT<tab>STATUS (verified or unverified), sorted by name. These
+local names never leave your machine, and the peer never learns them.
 
-With --json each line is a Contact object (see docs/STANDARD.md):
-{"name", "fingerprint", "identity_key"}, where identity_key is the pinned
-base64 key from `retalk add --identity-key`, or "" if none was pinned.
+A peer is "verified" once its keys have been recorded with `retalk verify`;
+until then it is an incomplete contact (just name + fingerprint). With --json
+each line is a Contact object (see docs/STANDARD.md): {"name", "fingerprint",
+"identity_key", "signing_key", "verified"}, where the key fields are "" until
+the peer is verified.
 
 No passphrase and no server contact -- this only reads your local peers
 table. Prints nothing when you have saved no peers.""",
         epilog="""\
 examples:
-  retalk contacts                list saved peers as NAME<tab>FINGERPRINT
-  retalk contacts --json         one {"name","fingerprint","identity_key"} line each
+  retalk contacts                list saved peers as NAME<tab>FINGERPRINT<tab>STATUS
+  retalk contacts --json         one Contact object (see docs/STANDARD.md) per line
   retalk contacts --json | jq .  pretty-print every contact""")
     sp.add_argument("--json", action="store_true",
-                    help="emit one JSON object per saved peer "
-                         "({\"name\", \"fingerprint\", \"identity_key\"})")
+                    help="emit one Contact object per saved peer (see "
+                         "docs/STANDARD.md): name, fingerprint, identity_key, "
+                         "signing_key, verified")
     sp.set_defaults(fn=cmd_contacts)
 
     sp = sub.add_parser(
@@ -555,9 +648,9 @@ the metadata sender/recipient/time/size — never the content.
 The `--peer` value is a name saved with `retalk add`, or a raw 32-hex id. The
 first message to a new peer performs the key handshake automatically
 (claiming one of the peer's one-time keys from the server); if the
-server's served keys do not match the peer's ID fingerprint or your
-saved --identity-key, the send refuses with PIN MISMATCH instead of encrypting
-an impostor key.
+server's served keys do not match the peer's ID fingerprint or the keys you
+recorded with `retalk verify`, the send refuses with PIN MISMATCH instead of
+encrypting an impostor key.
 
 Delivery is tracked: the message stays in your local outbox until the
 peer's client acknowledges decrypting it (acks arrive during your next
