@@ -34,6 +34,9 @@ import urllib.request
 PORT_DISABLED = 8790
 PORT_ADMIN = 8791
 PORT_ENFORCE = 8792
+PORT_PREFIX = 8793
+PORT_XKEY = 8794
+PORT_LOCKDOWN = 8795
 
 
 def wait_for_port(port: int, timeout: float = 15.0):
@@ -60,10 +63,11 @@ def start_server(db: str, port: int, **extra_env) -> subprocess.Popen:
 
 
 def http(method: str, url: str, *, basic: tuple | None = None,
-         body: dict | None = None):
+         body: dict | None = None, extra: dict | None = None):
     """Make an HTTP request; return (status, parsed-or-text). `basic` is an
-    optional (user, password) tuple for HTTP Basic auth."""
-    headers = {}
+    optional (user, password) tuple for HTTP Basic auth; `extra` adds raw
+    headers (e.g. an API-key header)."""
+    headers = dict(extra or {})
     data = None
     if body is not None:
         data = json.dumps(body).encode()
@@ -168,6 +172,39 @@ class TestAdminAuthAndKeyManagement(unittest.TestCase):
                 proc.terminate()
                 proc.wait(timeout=10)
 
+    def test_path_prefix_and_malformed_actions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "server.db")
+            pw = "pw"
+            proc = start_server(db, PORT_PREFIX, RETALK_SERVER_ADMIN_PASSWORD=pw)
+            url = f"http://127.0.0.1:{PORT_PREFIX}"
+            try:
+                # /admin is matched by its path suffix, so it also works behind
+                # a prefix (a proxy mounting the relay at /v1/relay)
+                st, payload = http("POST", url + "/v1/relay/admin",
+                                   basic=("admin", pw), body={"action": "list"})
+                self.assertEqual(st, 200, payload)
+                self.assertEqual(payload["keys"], [])
+
+                # unknown action -> 400 with a helpful error
+                st, payload = http("POST", url + "/admin", basic=("admin", pw),
+                                   body={"action": "frobnicate"})
+                self.assertEqual(st, 400, payload)
+                self.assertIn("unknown admin action", payload["error"])
+
+                # disable/delete of a non-existent key_hash -> 0 rows affected
+                st, payload = http("POST", url + "/admin", basic=("admin", pw),
+                                   body={"action": "disable",
+                                         "key_hash": "deadbeef"})
+                self.assertEqual((st, payload.get("updated")), (200, 0))
+                st, payload = http("POST", url + "/admin", basic=("admin", pw),
+                                   body={"action": "delete",
+                                         "key_hash": "deadbeef"})
+                self.assertEqual((st, payload.get("deleted")), (200, 0))
+            finally:
+                proc.terminate()
+                proc.wait(timeout=10)
+
 
 class TestApiKeyEnforcement(unittest.TestCase):
     def test_enforced_relay_requires_valid_key(self):
@@ -217,6 +254,86 @@ class TestApiKeyEnforcement(unittest.TestCase):
             finally:
                 proc.terminate()
                 proc.wait(timeout=10)
+
+    def test_xkey_header_and_delete_revokes(self):
+        from retalk import User
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "server.db")
+            pw = "pw"
+            proc = start_server(db, PORT_XKEY, RETALK_SERVER_ADMIN_PASSWORD=pw,
+                                RETALK_SERVER_REQUIRE_API_KEY="1")
+            url = f"http://127.0.0.1:{PORT_XKEY}"
+            try:
+                _, created = http("POST", url + "/admin", basic=("admin", pw),
+                                  body={"action": "create", "label": "x"})
+                key, kh = created["key"], created["key_hash"]
+
+                # the key is accepted via the X-Retalk-Key header (the Bearer
+                # alternative). Build a valid signed request and send it with
+                # that header only.
+                u = User(url, "s", name="a", store=os.path.join(tmp, "a.db"),
+                         api_key=key)
+                body = {"tool": "count_keys",
+                        "args": {"auth": u._auth_fields("count_keys", {})}}
+                st, payload = http("POST", url, body=body,
+                                   extra={"x-retalk-key": key})
+                self.assertEqual(st, 200, payload)
+                self.assertIn("unclaimed", payload)
+
+                # the same valid request with NO key header at all -> 401
+                body = {"tool": "count_keys",
+                        "args": {"auth": u._auth_fields("count_keys", {})}}
+                st, payload = http("POST", url, body=body)
+                self.assertEqual(st, 401, payload)
+
+                # deleting the key revokes a client that was using it (Bearer)
+                u.publish()
+                http("POST", url + "/admin", basic=("admin", pw),
+                     body={"action": "delete", "key_hash": kh})
+                with self.assertRaises(RuntimeError):
+                    u._call("count_keys")
+            finally:
+                proc.terminate()
+                proc.wait(timeout=10)
+
+
+class TestEnforceWithAdminDisabled(unittest.TestCase):
+    def test_minted_keys_work_after_admin_disabled(self):
+        from retalk import User
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "server.db")
+            pw = "pw"
+            # boot 1: /admin enabled (to mint a key), enforcement off
+            p1 = start_server(db, PORT_LOCKDOWN, RETALK_SERVER_ADMIN_PASSWORD=pw)
+            url = f"http://127.0.0.1:{PORT_LOCKDOWN}"
+            try:
+                _, created = http("POST", url + "/admin", basic=("admin", pw),
+                                  body={"action": "create", "label": "bot"})
+                key = created["key"]
+            finally:
+                p1.terminate()
+                p1.wait(timeout=10)
+
+            # boot 2: SAME db, enforcement ON, /admin DISABLED (no password)
+            p2 = start_server(db, PORT_LOCKDOWN,
+                              RETALK_SERVER_REQUIRE_API_KEY="1")
+            try:
+                # /admin is gone (404) — no admin surface exposed at all
+                self.assertEqual(http("GET", url + "/admin")[0], 404)
+                self.assertEqual(
+                    http("POST", url + "/admin", body={"action": "list"})[0], 404)
+                # but the previously-minted key still gates access correctly
+                u = User(url, "s", name="a", store=os.path.join(tmp, "a.db"),
+                         api_key=key)
+                u.publish()
+                self.assertIsInstance(u._call("count_keys"), dict)
+                # and a client with no key is still rejected
+                u2 = User(url, "s", name="a", store=os.path.join(tmp, "b.db"))
+                with self.assertRaises(RuntimeError):
+                    u2.publish()
+            finally:
+                p2.terminate()
+                p2.wait(timeout=10)
 
 
 if __name__ == "__main__":
