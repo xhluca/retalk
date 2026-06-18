@@ -23,6 +23,17 @@ AI agent, a bot, a service, or a person at a terminal.
 An **owner** is the person or organization that runs one or more users. The
 protocol does not model owners yet. Today, the protocol only knows users.
 
+An **identity** is a user as it exists locally: a folder (created by
+`retalk init`) holding that user's keypair and state — encrypted keys,
+sessions, saved peers, and the outbox. Each command acts as one identity.
+
+A **peer** is another user you exchange messages with. You save a peer's user
+ID under a local name with `retalk add`, then address it by that name.
+
+The **server** is the untrusted relay in the middle. It stores users' public
+keys and ciphertext and forwards messages between mailboxes; it never sees
+plaintext, private keys, or self-chosen names.
+
 A **user ID** is a 32-character sha256 fingerprint of the user's public keys.
 That ID is both:
 
@@ -71,24 +82,29 @@ For one-off runs:
 uvx retalk --help
 ```
 
+### Other install options
+
+With pip or pipx:
+
+```sh
+pip install retalk    # into the active environment, so `import retalk` works there
+pipx install retalk   # isolated global install of just the CLIs, onto your PATH
+```
+
+Use `pip` when you want the library available inside a project. Use `pipx` when
+you only want the `retalk` / `retalk-server` commands available everywhere: it
+keeps them in their own isolated environment (like `uv tool install`) instead
+of adding retalk to whatever environment happens to be active.
+
+Install the latest unreleased code straight from the repository:
+
+```sh
+uv add git+https://github.com/xhluca/retalk        # into a uv project
+pip install git+https://github.com/xhluca/retalk   # into the active environment
+```
+
 <details>
-<summary>Other install options</summary>
-
-With pip:
-
-```sh
-pip install retalk
-pipx install retalk
-```
-
-From the latest repository version:
-
-```sh
-uv add git+https://github.com/xhluca/retalk
-pip install git+https://github.com/xhluca/retalk
-```
-
-From a development clone:
+<summary>From a development clone</summary>
 
 ```sh
 git clone https://github.com/xhluca/retalk
@@ -107,16 +123,28 @@ Without uv, run `pip install -e .` inside the clone.
 Run the relay on a public machine:
 
 ```sh
-SERVER_PORT=8766 SERVER_AUDIENCE=https://server.example.com retalk-server
+retalk-server --host 127.0.0.1 --port 8766 --audience https://server.example.com
 ```
 
 There is no server-side user setup. Users publish their own public keys when
 they first send or receive.
 
-`SERVER_AUDIENCE` must exactly match the URL users connect to. Request
-signatures are bound to that URL, so a mismatch causes signature failures.
+The flags that configure it:
 
-For internet use, put TLS in front of the relay. Example Caddy config:
+- `--host` / `--port` are the local address the relay listens on. Keep `--host`
+  on `127.0.0.1` when a TLS proxy sits in front; use `0.0.0.0` to accept
+  connections from other machines directly.
+- `--audience` is the public URL users actually connect to. Request signatures
+  are bound to it, so it must match each client's `--relay` URL exactly — a
+  mismatch causes signature failures. Behind a proxy it is your public
+  `https://` address (as above) while `--host`/`--port` stay local. For a
+  purely local run the two coincide, so `--host`/`--port` alone is enough
+  (`--audience` then defaults to them).
+
+For internet use, put TLS in front of the relay.
+
+<details>
+<summary>Example Caddy config</summary>
 
 ```caddy
 server.example.com {
@@ -124,17 +152,41 @@ server.example.com {
 }
 ```
 
+</details>
+
 ## Create a user
 
-Run this once on each machine:
+A retalk identity is a **user**, selected by name with `--user NAME` (short:
+`-u`) and stored under `~/.local/share/retalk/NAME/`. Run this once on each
+machine, supplying a passphrase that encrypts the private keys at rest — via
+`--passphrase` or the `RETALK_PASSPHRASE` env var (preferred, since a flag
+value is visible in the process list):
 
 ```sh
-retalk init -u --name alice-1 --server https://server.example.com
+export RETALK_PASSPHRASE="correct horse battery staple"
+retalk init --user alice --display-name alice-1 --relay https://server.example.com
 ```
 
-`init` creates a local identity and prints the user ID. The private keys are
-encrypted with a secret you choose. In scripts, set that secret with
-`PICKLE_SECRET`; otherwise the CLI prompts for it.
+Every later command must say which user it acts as — retalk never guesses.
+Name it per command, or set it once in the environment:
+
+```sh
+retalk id --user alice           # name the user on the command, or...
+export RETALK_USER=alice          # ...set it once for the shell
+retalk id                         # now acts as alice
+```
+
+`init` prints the user ID. There is no interactive prompt — a command with no
+passphrase fails fast instead of blocking, so the CLI stays scriptable. For
+agents or throwaway identities, `--no-passphrase` skips encryption (the keys
+are then protected only by file permissions):
+
+```sh
+retalk init --user agent-1 --no-passphrase --relay https://server.example.com
+```
+
+The choice is remembered: later commands on a `--no-passphrase` identity need
+no passphrase, while an encrypted identity always requires one.
 
 Then exchange user IDs out-of-band and save your peer:
 
@@ -142,159 +194,189 @@ Then exchange user IDs out-of-band and save your peer:
 retalk add bob <bob-user-id>
 ```
 
-Common commands:
+Common commands (with `RETALK_USER=alice` exported):
 
 ```sh
 retalk id                          # print my user ID
 retalk add bob <bob-user-id>       # save a trusted local name
-retalk send bob "hello"            # send one encrypted message
-retalk receive                     # drain my mailbox once
-retalk receive --follow            # keep polling and maintain keys
-retalk receive --json              # one JSON object per message
+retalk send --peer bob "hello"     # send one encrypted message
+retalk receive --all               # read every sender (one JSON line each)
+retalk receive --peer bob          # read only messages from bob
+retalk receive --all --follow      # keep polling all senders; maintain keys
 ```
 
-### Identity locations
+### Selecting the user
 
-Each identity lives in its own folder.
+Each user's identity lives in its own folder (`~/.local/share/retalk/NAME/`).
+retalk never guesses which user you mean; every command resolves it in order:
 
-- `retalk init -u` creates `~/.local/share/retalk/default/`.
-- `retalk init -u work` creates `~/.local/share/retalk/work/`.
-- `retalk init ./alice` creates an identity at `./alice/`.
+1. `--dir DIR`               an explicit identity directory (wins if given)
+2. `--user NAME` / `-u NAME`   the user named NAME (~/.local/share/retalk/NAME/)
+3. `RETALK_USER` env var     the same, set once for the shell
+4. otherwise: an error — nothing is created or guessed.
 
-Every command finds its identity in this order:
+Identities are always stored locally on disk; the only question is *where*.
+`--user NAME` keeps them in the shared home location
+(`~/.local/share/retalk/NAME/`), good when one person has a few named users.
+`--dir ./somewhere` keeps an identity in a folder you choose — use it to keep
+one inside a project directory, on a removable disk, or anywhere you want it
+self-contained and easy to back up or delete as a unit.
 
-1. `-s DIR`
-2. `-u [NAME]`
-3. `STORE` environment variable
-4. user-level `default`, if it exists
-
-Only `retalk init` creates an identity. Other commands fail if the selected
-folder does not already contain one. Each acting command prints
-`using <name> (<id>) from <dir>` to stderr so stdout stays clean for messages
-and JSON.
+Only `retalk init` creates an identity; other commands fail if the selected
+user has none. Each acting command prints `using <name> (<id>) from <dir>` to
+stderr so stdout stays clean for messages and JSON.
 
 Machines need a roughly correct clock. Server request signatures expire after
 about 2.5 minutes.
 
 ## Two-minute local demo
 
-This demo runs on one machine. It creates two identities and a local relay.
+This runs three terminals on one machine: the relay, "alice", and "bob". In
+real use the two people sit on different machines — using separate terminals
+here keeps each identity's commands in one place, and lets each terminal set
+its own secret once instead of repeating it on every line.
 
-Terminal 1:
-
-```sh
-SERVER_AUDIENCE=http://127.0.0.1:8766 retalk-server
-```
-
-Terminal 2:
+**Terminal 1 — the relay server**
 
 ```sh
-export SERVER_URL=http://127.0.0.1:8766
-
-ALICE_ID=$(PICKLE_SECRET=alice-secret retalk init ./alice --name alice)
-BOB_ID=$(PICKLE_SECRET=bob-secret retalk init ./bob --name bob)
-
-PICKLE_SECRET=alice-secret retalk add bob "$BOB_ID" -s ./alice
-PICKLE_SECRET=bob-secret retalk add alice "$ALICE_ID" -s ./bob
-
-PICKLE_SECRET=bob-secret retalk receive -s ./bob
-PICKLE_SECRET=alice-secret retalk send bob "hello bob" -s ./alice
-
-PICKLE_SECRET=bob-secret retalk receive -s ./bob
-# alice: hello bob
-
-PICKLE_SECRET=bob-secret retalk send alice "hi alice, got it" -s ./bob
-PICKLE_SECRET=alice-secret retalk receive -s ./alice
-# bob: hi alice, got it
+retalk-server --host 127.0.0.1 --port 8766
 ```
 
-The first `receive` publishes Bob's keys so Alice can start a session.
+- `retalk-server` starts the relay; it stores only public keys and ciphertext,
+  never plaintext.
+- `--host`/`--port` are the address it listens on. For a local demo the public
+  URL is the same, so `--audience` defaults to it; behind a TLS proxy you would
+  add `--audience https://...`.
 
-To inspect what the server stored:
+Leave this terminal running.
+
+**Terminal 2 — alice**
+
+Create alice's identity, then set two variables so the later commands stay
+short:
+
+```sh
+# create the user "alice"; --passphrase encrypts her keys, --relay is saved in the store
+retalk init --user alice --display-name alice --passphrase alice-secret --relay http://127.0.0.1:8766
+
+# point this terminal at alice so later commands don't repeat themselves:
+export RETALK_USER=alice               # which user to act as (replaces --user)
+export RETALK_PASSPHRASE=alice-secret  # unlocks her keys (replaces --passphrase)
+# RETALK_RELAY isn't needed: init saved the relay URL inside alice's store
+
+retalk add bob <bob-id>                # save bob's id (from terminal 3) as the peer "bob"
+```
+
+`add` only needs `RETALK_USER` (no keys, no server contact). Sending and
+receiving come next, under **Exchange a message** below.
+
+**Terminal 3 — bob**
+
+Same steps with the user "bob" and his own passphrase:
+
+```sh
+retalk init --user bob --display-name bob --passphrase bob-secret --relay http://127.0.0.1:8766
+export RETALK_USER=bob
+export RETALK_PASSPHRASE=bob-secret
+retalk add alice <alice-id>   # paste alice's ID from terminal 2
+```
+
+Two users with two different passphrases is exactly why each terminal sets its
+own `RETALK_USER` and `RETALK_PASSPHRASE`: they cannot share them.
+
+**Exchange a message**
+
+The first message needs an order, because alice can only open an encrypted
+session once bob's public keys are on the relay:
+
+```sh
+# Terminal 3 (bob): publish bob's keys, then check for mail from alice (none yet)
+retalk receive --peer alice
+
+# Terminal 2 (alice): claim one of bob's keys, encrypt, upload the ciphertext
+retalk send --peer bob "hello bob"
+
+# Terminal 3 (bob): decrypt and print it, then reply
+retalk receive --peer alice    # -> {... "name":"alice","text":"hello bob"}
+retalk send --peer alice "hi alice, got it"
+
+# Terminal 2 (alice): read the reply
+retalk receive --peer bob      # -> {... "name":"bob","text":"hi alice, got it"}
+```
+
+Every `receive` does three things: it republishes your keys if the relay lost
+them, prints each pending message as one JSON line (`{"id","from","name","text"}`
+— see [docs/STANDARD.md](docs/STANDARD.md)), and sends back an encrypted
+acknowledgement — after which the relay deletes the delivered ciphertext. Add
+`--follow` to keep one terminal live-tailing instead of draining once.
+
+**Inspect what the relay stored**
 
 ```sh
 sqlite3 server.db 'SELECT body FROM messages LIMIT 1'
 ```
 
-You should see base64 ciphertext, not plaintext. Delivered messages are
-deleted from the server.
+You should see base64 ciphertext, not plaintext — and only until delivery,
+since delivered messages are removed from the server.
 
 ## Two machines
 
 Machine A:
 
 ```sh
-retalk init -u --name alice --server https://server.example.com
+export RETALK_USER=alice                     # which user this machine acts as
+export RETALK_PASSPHRASE="your-passphrase"   # or pass --no-passphrase to init
+retalk init --user alice --relay https://server.example.com
 # Share the printed user ID with Bob out-of-band.
 
 retalk add bob <bob-user-id>
-retalk send bob "hello from across the internet"
-retalk receive --follow
+retalk send --peer bob "hello from across the internet"
+retalk receive --all --follow
 ```
 
-Machine B does the same with Bob's identity and Alice's user ID.
+Machine B does the same with the user "bob" and Alice's user ID.
 
-After `init -u`, commands use the user-level identity by default, so you do
-not need `-s` flags.
-
-## Scripting
-
-Drain the mailbox from cron:
-
-```cron
-*/5 * * * * PICKLE_SECRET=... retalk receive --json >> ~/inbox.jsonl 2>/dev/null
-```
-
-Pipe messages into another tool:
-
-```sh
-retalk receive --json | jq -r .text
-```
-
-Tiny auto-responder:
-
-```sh
-retalk receive --follow --json | while read -r msg; do
-  sender=$(jq -r .from <<<"$msg")
-  text=$(jq -r .text <<<"$msg")
-  retalk send "$sender" "you said: $text"
-done
-```
-
-## Library usage
-
-```python
-from retalk import User
-
-alice = User(
-    "https://server.example.com",
-    pickle_secret="...",
-    name="alice-1",
-    store="alice/store.db",
-)
-
-print(alice.user_id())       # share out-of-band
-alice.publish()              # publish public keys to this server
-alice.send("<bob-user-id>", "hello")
-
-for sender, name, text in alice.receive():
-    print(name or sender, text)
-```
+With `RETALK_USER` exported, later commands know which user to act as without
+repeating `--user`.
 
 ## Delivery
 
-Each message carries an ID inside the encrypted envelope. When the recipient
-decrypts it, the recipient sends back an encrypted acknowledgement.
+retalk aims for at-least-once delivery with de-duplication, so a flaky or
+replaced server never silently loses mail. Each message carries an ID inside the
+encrypted envelope; when the recipient decrypts it their client returns an
+encrypted acknowledgement, and only then does the relay drop the ciphertext.
 
 Senders keep ciphertext in a local outbox until it is acknowledged.
-`maintain()` resends messages that have gone unacknowledged for 2 minutes.
-`retalk receive --follow` runs `maintain()` automatically.
+`maintain()` resends anything unacknowledged for more than 2 minutes, and
+`retalk receive --all --follow` runs `maintain()` once a minute.
 
-This makes server loss or server migration recoverable:
+For example, send to a peer who is offline and watch it arrive on their next
+poll:
 
-- clients republish missing public keys,
+```sh
+# alice: ciphertext is uploaded to the relay AND kept in alice's local outbox
+retalk send --peer bob "are you there?"
+
+# bob, later: decrypt, print, and ack -- after which the relay deletes it
+retalk receive --peer alice    # -> {... "name":"alice","text":"are you there?"}
+
+# alice: bob's ack arrives, so the message leaves alice's outbox
+retalk receive --all
+```
+
+Leaving a sender in `--follow` resends unacknowledged messages on its own:
+
+```sh
+# anything bob hasn't acked is re-uploaded about once a minute until it lands
+retalk receive --all --follow
+```
+
+This is also what makes server loss or migration recoverable -- point clients at
+a fresh relay and keep going:
+
+- clients republish missing public keys on their next request,
 - senders re-upload unacknowledged outbox messages, and
-- recipients drop duplicate ciphertext that they have already processed.
+- recipients drop duplicate ciphertext they have already processed.
 
 ## Key maintenance
 
@@ -312,13 +394,19 @@ new sessions available, but rotation limits how long the reusable key lives.
 
 ## More docs
 
-- [docs/auth.md](docs/auth.md) explains signed requests, the exact wire
-  format, replay protection, and why retalk does not use bearer tokens.
-- [docs/server.md](docs/server.md) explains what the relay stores, what
-  metadata it sees, why mailbox calls are authenticated, and what a hostile
+Full reference documentation lives in [docs/](docs/README.md) -- the protocol,
+the server trust model, the data format, and deployment guides. Start at the
+index, or jump straight to a topic:
+
+- [docs/README.md](docs/README.md) -- documentation index and reference hub.
+- [docs/auth.md](docs/auth.md) -- signed requests and the exact wire format.
+- [docs/server.md](docs/server.md) -- what the relay stores, and what a hostile
   server can and cannot do.
-- [docs/olm.md](docs/olm.md) explains one-time prekeys, fallback keys,
-  replenishment, and rotation.
+- [docs/olm.md](docs/olm.md) -- one-time prekeys, fallback keys, and rotation.
+- [docs/STANDARD.md](docs/STANDARD.md) -- the JSON data contract for tooling.
+
+Deploying a server (Hugging Face, Cloudflare, GCP) and contributing or cutting a
+release are covered from the [docs index](docs/README.md).
 
 ## Test
 
@@ -349,24 +437,3 @@ Coverage includes:
 - delivery acknowledgements and outbox recovery,
 - duplicate rejection, and
 - replayed, stale, and cross-server signed-request rejection.
-
-## Release
-
-Publishing is automated. Creating a GitHub Release triggers
-`.github/workflows/publish.yaml`, which checks that the tag matches the
-package version, runs the tests, builds with uv, and publishes to PyPI through
-trusted publishing.
-
-To cut a release:
-
-1. Bump `version` in `pyproject.toml` and `src/retalk/__init__.py`.
-2. Commit and push.
-3. Create a release whose tag is the version, optionally prefixed with `v`.
-
-```sh
-gh release create v0.0.1 --title v0.0.1 --notes "first beta"
-```
-
-Maintainers only need to do PyPI setup once: on pypi.org, add a trusted
-publisher for project `retalk` pointing at this repository, workflow
-`publish.yaml`, environment `pypi`.

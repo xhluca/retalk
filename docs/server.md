@@ -11,11 +11,45 @@ to trust. Clients do that.
 This page explains what the server stores, what it can see, why requests are
 authenticated, and what a hostile server can still do.
 
+## Configuration reference
+
+Every setting has a command-line flag and a matching environment variable; the
+flag wins when both are given. This is the canonical list — the deployment
+guides below only show these in context.
+
+**`retalk-server`** (the relay):
+
+| flag | env var | default | meaning |
+|------|---------|---------|---------|
+| `--host` | `RETALK_SERVER_HOST` | `0.0.0.0` | interface to bind (`0.0.0.0` = all, `127.0.0.1` = this machine only) |
+| `--port` | `RETALK_SERVER_PORT` | `8766` | TCP port to bind |
+| `--audience` | `RETALK_SERVER_AUDIENCE` | `http://HOST:PORT` | public URL clients connect to; request signatures are bound to it, so it must equal each client's relay URL exactly |
+| `--db` | `RETALK_SERVER_DB` | `server.db` | SQLite database path |
+
+`--host`/`--port` are where the process *listens*; `--audience` is the public
+URL clients *reach it at*. They coincide locally, but behind a TLS proxy the
+proxy listens publicly and forwards to a local `--host`/`--port`, so
+`--audience` must be set to the public `https://` URL.
+
+**`retalk`** (the client):
+
+| flag | env var | meaning |
+|------|---------|---------|
+| `--relay` | `RETALK_RELAY` | relay URL to talk to (must equal the server's `--audience`); `init` can save one per identity |
+| `--user` / `-u` | `RETALK_USER` | which identity to act as (`~/.local/share/retalk/NAME/`) |
+| `--dir` | — | use an identity in an explicit directory instead of by user name |
+| `--passphrase` | `RETALK_PASSPHRASE` | unlocks the identity's keys at rest |
+| `--no-passphrase` | — | open/create an identity with no passphrase (file-permission protected only) |
+
 ## Running it on the internet
 
 The server speaks plain HTTP on a local port. To expose it publicly, put it
 behind something that terminates TLS and forwards to that port:
 
+- [huggingface.md](server/huggingface.md) — host it for free on a Hugging Face
+  Docker Space: a public HTTPS URL with no domain, firewall, or TLS setup.
+  Quickest zero-cost option; the free tier has no persistent disk and sleeps
+  when idle.
 - [cloudflare.md](server/cloudflare.md) — Cloudflare Tunnel, free quick
   tunnels or a stable hostname on your own domain. No firewall changes.
 - [gcp.md](server/gcp.md) — running the server on a small Google Cloud
@@ -25,7 +59,7 @@ The examples assume the local demo from the README:
 
 - server at `http://127.0.0.1:8766`
 - Alice identity in `./alice`
-- `RETALK_SERVER=http://127.0.0.1:8766`
+- `RETALK_RELAY=http://127.0.0.1:8766`
 - `RETALK_PASSPHRASE=alice-secret`
 
 ## Database tables
@@ -251,17 +285,17 @@ Shape:
 
 ```json
 {
-  "user_id": "1247d297...",
+  "fingerprint": "1247d297...",
   "identity_key": "fkF/kOCL...",
   "signing_key": "Kcx2OupV...",
-  "ts": "1781731882",
+  "timestamp": "1781731882",
   "nonce": "c0ffee...",
-  "sig": "mF90aaQz..."
+  "signature": "mF90aaQz..."
 }
 ```
 
 Nothing in that object is secret. The private signing key is needed to
-produce `sig`, but it is not sent.
+produce `signature`, but it is not sent.
 
 ID squatting is not useful. To use an ID, the caller must produce signatures
 from keys that hash to that ID.
@@ -287,11 +321,11 @@ Trust IDs and saved peer names, not self-chosen names.
 Example:
 
 ```sh
-retalk receive -s ./bob
+retalk receive --all --dir ./bob
 # ~alice: hello
 
-retalk add boss "$ALICE_ID" -s ./bob
-retalk receive -s ./bob
+retalk add boss "$ALICE_ID" --dir ./bob
+retalk receive --all --dir ./bob
 # boss: are we still on for tomorrow?
 ```
 

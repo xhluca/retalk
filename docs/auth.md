@@ -47,7 +47,7 @@ receives a reusable secret.
 Each signature covers one canonical string:
 
 ```text
-tool|server_url|user_id|timestamp|nonce|args_hash
+tool|server_url|fingerprint|timestamp|nonce|args_hash
 ```
 
 Fields:
@@ -55,8 +55,8 @@ Fields:
 - `tool`: prevents a signature for `count_keys` from authorizing
   `read_messages`.
 - `server_url`: prevents a request captured on one server from working on
-  another server. This must match `SERVER_AUDIENCE`.
-- `user_id`: says which user is making the request.
+  another server. This must match `RETALK_SERVER_AUDIENCE`.
+- `fingerprint`: says which user is making the request (its key fingerprint).
 - `timestamp`: expires captured requests after about 2.5 minutes.
 - `nonce`: a random value used once. It blocks replay inside the timestamp
   window.
@@ -72,7 +72,8 @@ claimed user ID.
 For every request, the server:
 
 1. Recomputes the fingerprint of the supplied public keys.
-2. Rejects the request if the fingerprint does not equal `user_id`.
+2. Rejects the request if the recomputed fingerprint does not equal the
+   claimed `fingerprint`.
 3. Rejects timestamps more than about 150 seconds in the past or future.
 4. Rebuilds the signed string from its own copy of the tool name, audience,
    user ID, timestamp, nonce, and argument hash.
@@ -97,8 +98,10 @@ because nonces only matter during the timestamp window.
 - **Fully compromised server:** it can drop mail, delay mail, or refuse
   service. It still cannot impersonate you on another server because it never
   saw a reusable credential.
-- **Stolen local store without `PICKLE_SECRET`:** the signing key is encrypted
-  at rest. The store does not contain a separate token.
+- **Stolen local store:** by default the signing key is encrypted at rest with
+  your passphrase, and the store holds no reusable token. An identity created
+  with `--no-passphrase` is not encrypted and relies on file permissions
+  alone — use it only where that is acceptable.
 
 ## Operational requirements
 
@@ -106,7 +109,7 @@ Clocks must be close enough. A machine using NTP is fine. If a clock is off
 by more than about 2.5 minutes, requests fail with a stale or future
 timestamp error.
 
-`SERVER_AUDIENCE` must be the exact URL users connect to. For example, if
+`RETALK_SERVER_AUDIENCE` must be the exact URL users connect to. For example, if
 users connect to `https://server.example.com`, that must be the audience.
 Using `http://127.0.0.1:8766` on the server while users connect through
 HTTPS will break signatures.
@@ -130,13 +133,13 @@ Arguments hash:
 Signed text:
 
 ```text
-tool|server_url|user_id|ts|nonce|args_hash
+tool|server_url|fingerprint|timestamp|nonce|args_hash
 ```
 
 Rules:
 
 - UTF-8 encode the signed text.
-- `ts` is integer seconds since epoch as a decimal string.
+- `timestamp` is integer seconds since epoch as a decimal string.
 - `nonce` is 32 hex characters.
 - The signature is Ed25519 over the UTF-8 bytes, encoded as base64.
 
@@ -144,12 +147,12 @@ The `auth` object sent with every call is:
 
 ```json
 {
-  "user_id": "...",
+  "fingerprint": "...",
   "identity_key": "...",
   "signing_key": "...",
-  "ts": "...",
+  "timestamp": "...",
   "nonce": "...",
-  "sig": "..."
+  "signature": "..."
 }
 ```
 

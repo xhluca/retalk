@@ -7,9 +7,10 @@ Asserts:
   3. id --json round-trips the id printed by init.
   4. add + send + receive --json: a full encrypted exchange through a live
      server, peer names resolving on the sender side.
-  5. A wrong PICKLE_SECRET fails with a friendly error.
+  5. A wrong RETALK_PASSPHRASE fails with a friendly error.
   6. A wiped server database heals: clients republish keys on their next
      command and the conversation continues.
+  7. receive <peer> returns only that sender's mail; --all drains the rest.
 
 Uses port 8769 (see tests/README.md for the port registry).
 Run from the repo root: uv run python -m unittest discover -s tests
@@ -42,10 +43,10 @@ def wait_for_port(port: int, timeout: float = 15.0):
 class TestCLI(unittest.TestCase):
     def cli(self, *cmd, secret="cli-secret", expect=0):
         env = dict(os.environ,
-                   PICKLE_SECRET=secret,
-                   SERVER_URL=f"http://127.0.0.1:{PORT}",
+                   RETALK_PASSPHRASE=secret,
+                   RETALK_RELAY=f"http://127.0.0.1:{PORT}",
                    XDG_DATA_HOME=os.path.join(self.tmp, "xdg"))
-        env.pop("STORE", None)
+        env.pop("RETALK_USER", None)
         res = subprocess.run([sys.executable, "-m", "retalk.cli", *cmd],
                              capture_output=True, text=True, env=env)
         self.assertEqual(res.returncode, expect,
@@ -58,9 +59,9 @@ class TestCLI(unittest.TestCase):
             server = subprocess.Popen(
                 [sys.executable, "-m", "retalk.server"],
                 env=dict(os.environ,
-                         SERVER_DB=os.path.join(tmp, "server.db"),
-                         SERVER_HOST="127.0.0.1", SERVER_PORT=str(PORT),
-                         SERVER_AUDIENCE=f"http://127.0.0.1:{PORT}"),
+                         RETALK_SERVER_DB=os.path.join(tmp, "server.db"),
+                         RETALK_SERVER_HOST="127.0.0.1", RETALK_SERVER_PORT=str(PORT),
+                         RETALK_SERVER_AUDIENCE=f"http://127.0.0.1:{PORT}"),
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             try:
                 self._flow(tmp)
@@ -73,42 +74,41 @@ class TestCLI(unittest.TestCase):
 
         # 2. no identity anywhere -> loud refusal, nothing created
         res = self.cli("id", expect=2)
-        self.assertIn("no identity", res.stderr)
+        self.assertIn("no user selected", res.stderr)
 
-        # 1. init (explicit dir for alice, user-level for bob)
-        res = self.cli("init", alice_dir, "--name", "alice-1")
+        # 1. init (explicit dir for alice, local for bob)
+        res = self.cli("init", "--dir", alice_dir, "--display-name", "alice-1")
         aid = res.stdout.strip()
         self.assertRegex(aid, r"^[0-9a-f]{32}$")
         self.assertTrue(os.path.exists(os.path.join(alice_dir, "store.db")))
-        res = self.cli("init", alice_dir, expect=2)
+        res = self.cli("init", "--dir", alice_dir, expect=2)
         self.assertIn("already exists", res.stderr)
 
-        res = self.cli("init", "-u", "--name", "bob-1", secret="bob-secret")
+        res = self.cli("init", "--user", "bob", "--display-name", "bob-1", secret="bob-secret")
         bid = res.stdout.strip()
         self.assertRegex(bid, r"^[0-9a-f]{32}$")
 
-        # 3. id --json matches what init printed (bob resolves via the
-        # user-level default with no flags at all)
-        res = self.cli("id", "--json", secret="bob-secret")
-        self.assertEqual(json.loads(res.stdout)["user_id"], bid)
-        res = self.cli("id", "-s", alice_dir)
+        # 3. id --json matches what init printed (bob resolves via -u bob)
+        res = self.cli("id", "--json", "-u", "bob", secret="bob-secret")
+        self.assertEqual(json.loads(res.stdout)["fingerprint"], bid)
+        res = self.cli("id", "--dir", alice_dir)
         self.assertEqual(res.stdout.strip(), aid)
 
         # 4. full exchange: alice names bob, sends; bob receives
-        self.cli("add", "bob", bid, "-s", alice_dir)
-        res = self.cli("receive", "--json", secret="bob-secret")  # publishes bob
+        self.cli("add", "bob", bid, "--dir", alice_dir)
+        res = self.cli("receive", "--all", "-u", "bob", secret="bob-secret")  # publishes bob
         self.assertEqual(res.stdout, "")
-        self.cli("send", "bob", "hello over the cli", "-s", alice_dir)
-        res = self.cli("receive", "--json", secret="bob-secret")
+        self.cli("send", "--peer", "bob", "hello over the cli", "--dir", alice_dir)
+        res = self.cli("receive", "--all", "-u", "bob", secret="bob-secret")
         msgs = [json.loads(line) for line in res.stdout.splitlines()]
         self.assertEqual(len(msgs), 1, msgs)
         self.assertEqual(msgs[0]["from"], aid)
         self.assertEqual(msgs[0]["text"], "hello over the cli")
         self.assertEqual(msgs[0]["name"], "~alice-1")  # bob never added alice
 
-        # 5. wrong secret -> friendly refusal
-        res = self.cli("id", "-s", alice_dir, secret="wrong", expect=2)
-        self.assertIn("wrong secret", res.stderr)
+        # 5. wrong passphrase -> friendly refusal
+        res = self.cli("id", "--dir", alice_dir, secret="wrong", expect=2)
+        self.assertIn("wrong passphrase", res.stderr)
 
         # 6. server database wiped -> clients notice and republish; the
         # conversation continues (sessions and outbox live client-side)
@@ -117,11 +117,31 @@ class TestCLI(unittest.TestCase):
             for table in ("users", "otks", "messages"):
                 conn.execute(f"DELETE FROM {table}")
         conn.close()
-        self.cli("receive", secret="bob-secret")          # bob heals himself
-        self.cli("send", "bob", "after the wipe", "-s", alice_dir)  # alice too
-        res = self.cli("receive", "--json", secret="bob-secret")
+        self.cli("receive", "--all", "-u", "bob", secret="bob-secret")          # bob heals himself
+        self.cli("send", "--peer", "bob", "after the wipe", "--dir", alice_dir)  # alice too
+        res = self.cli("receive", "--all", "-u", "bob", secret="bob-secret")
         texts = [json.loads(l)["text"] for l in res.stdout.splitlines()]
         self.assertIn("after the wipe", texts)
+
+    def test_default_display_name(self):
+        """init defaults --display-name to the user name; --dir stays unnamed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            self.tmp = tmp
+            # --user NAME, no --display-name -> the stored name defaults to NAME
+            self.cli("init", "-u", "carol", secret="carol-secret")
+            res = self.cli("id", "--json", "-u", "carol", secret="carol-secret")
+            self.assertEqual(json.loads(res.stdout)["name"], "carol")
+            # an explicit --display-name still wins over the user name
+            self.cli("init", "-u", "dave", "--display-name", "Dave the Bot",
+                     secret="dave-secret")
+            res = self.cli("id", "--json", "-u", "dave", secret="dave-secret")
+            self.assertEqual(json.loads(res.stdout)["name"], "Dave the Bot")
+            # selected only by --dir (no user name) -> unnamed
+            d = os.path.join(tmp, "anon")
+            self.cli("init", "--dir", d)
+            res = self.cli("id", "--json", "--dir", d)
+            self.assertEqual(json.loads(res.stdout)["name"], "")
+            print("PASS: init display-name defaults to the user name")
 
     def test_help_screens(self):
         """Every command documents itself: --help exits 0 with substance."""
@@ -133,6 +153,86 @@ class TestCLI(unittest.TestCase):
         self.assertIn("first match wins", self.cli("--help").stdout)
         self.assertIn("PIN MISMATCH", self.cli("send", "--help").stdout)
         self.assertIn("cannot be recovered", self.cli("init", "--help").stdout)
+
+
+    def test_receive_per_peer(self):
+        """receive <peer> reads one sender; --all drains the whole mailbox."""
+        with tempfile.TemporaryDirectory() as tmp:
+            self.tmp = tmp
+            server = subprocess.Popen(
+                [sys.executable, "-m", "retalk.server"],
+                env=dict(os.environ,
+                         RETALK_SERVER_DB=os.path.join(tmp, "server.db"),
+                         RETALK_SERVER_HOST="127.0.0.1", RETALK_SERVER_PORT=str(PORT),
+                         RETALK_SERVER_AUDIENCE=f"http://127.0.0.1:{PORT}"),
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                wait_for_port(PORT)
+                a, b, c = (os.path.join(tmp, x) for x in "abc")
+                aid = self.cli("init", "--dir", a, "--display-name", "alice").stdout.strip()
+                bid = self.cli("init", "--dir", b, "--display-name", "bob").stdout.strip()
+                cid = self.cli("init", "--dir", c, "--display-name", "carol").stdout.strip()
+
+                self.cli("receive", "--all", "--dir", b)        # bob publishes keys
+                self.cli("send", "--peer", bid, "from alice", "--dir", a)
+                self.cli("send", "--peer", bid, "from carol", "--dir", c)
+
+                def rcv(*extra):
+                    out = self.cli("receive", *extra, "--dir", b).stdout
+                    return [(m["from"], m["text"])
+                            for m in (json.loads(l) for l in out.splitlines())]
+
+                # one sender only; the other's mail is left on the server
+                self.assertEqual(rcv("--peer", aid), [(aid, "from alice")])
+                # --all then delivers the remaining message from carol
+                self.assertEqual(rcv("--all"), [(cid, "from carol")])
+                # mailbox drained, and a target is mandatory
+                self.assertEqual(rcv("--all"), [])
+                self.cli("receive", "--dir", b, expect=2)                # no target
+                self.cli("receive", "--peer", aid, "--all", "--dir", b, expect=2)  # both
+                print("PASS: receive <peer> filters by sender; --all drains rest")
+            finally:
+                server.terminate()
+                server.wait(timeout=10)
+
+
+    def test_json_standard(self):
+        """send/receive output matches docs/STANDARD.md exactly."""
+        with tempfile.TemporaryDirectory() as tmp:
+            self.tmp = tmp
+            server = subprocess.Popen(
+                [sys.executable, "-m", "retalk.server"],
+                env=dict(os.environ,
+                         RETALK_SERVER_DB=os.path.join(tmp, "server.db"),
+                         RETALK_SERVER_HOST="127.0.0.1", RETALK_SERVER_PORT=str(PORT),
+                         RETALK_SERVER_AUDIENCE=f"http://127.0.0.1:{PORT}"),
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                wait_for_port(PORT)
+                a, b = os.path.join(tmp, "a"), os.path.join(tmp, "b")
+                aid = self.cli("init", "--dir", a, "--display-name", "alice").stdout.strip()
+                bid = self.cli("init", "--dir", b, "--display-name", "bob").stdout.strip()
+                self.cli("receive", "--all", "--dir", b)        # bob publishes keys
+
+                # send receipt: exactly {"id", "to"}
+                receipt = json.loads(self.cli("send", "--peer", bid, "hi", "--dir", a).stdout)
+                self.assertEqual(set(receipt), {"id", "to"})
+                self.assertEqual(receipt["to"], bid)
+                self.assertRegex(receipt["id"], r"^[0-9a-f]{32}$")
+
+                # received message: exactly {"id", "from", "name", "text"}
+                lines = self.cli("receive", "--all", "--dir", b).stdout.splitlines()
+                self.assertEqual(len(lines), 1)
+                m = json.loads(lines[0])
+                self.assertEqual(set(m), {"id", "from", "name", "text"})
+                self.assertRegex(m["from"], r"^[0-9a-f]{32}$")
+                # the id correlates the two sides (STANDARD.md)
+                self.assertEqual((m["id"], m["from"], m["text"]),
+                                 (receipt["id"], aid, "hi"))
+                print("PASS: send/receive JSON matches docs/STANDARD.md")
+            finally:
+                server.terminate()
+                server.wait(timeout=10)
 
 
 if __name__ == "__main__":

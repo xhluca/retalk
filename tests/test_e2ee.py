@@ -71,10 +71,15 @@ def wait_for_port(port: int, timeout: float = 15.0):
     raise TimeoutError(f"server did not start on port {port}")
 
 
+def triples(msgs):
+    """(from, name, text) view of receive()'s message dicts, for assertions."""
+    return [(m["from"], m["name"], m["text"]) for m in msgs]
+
+
 def start_server(db: str, port: int) -> subprocess.Popen:
-    env = dict(os.environ, SERVER_DB=db, SERVER_HOST="127.0.0.1",
-               SERVER_PORT=str(port),
-               SERVER_AUDIENCE=f"http://127.0.0.1:{port}")
+    env = dict(os.environ, RETALK_SERVER_DB=db, RETALK_SERVER_HOST="127.0.0.1",
+               RETALK_SERVER_PORT=str(port),
+               RETALK_SERVER_AUDIENCE=f"http://127.0.0.1:{port}")
     proc = subprocess.Popen(
         [sys.executable, "-m", "retalk.server"],
         env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -97,10 +102,10 @@ def main(tmp: str):
 
         a = User(url, "pickle-secret-a", name="alice-user-1", store=store_a)
         b = User(url, "pickle-secret-b", name="bob-user-1", store=store_b)
-        aid, bid = a.user_id(), b.user_id()
+        aid, bid = a.fingerprint(), b.fingerprint()
         # the IDs are self-verifying fingerprints; explicit pins on top
-        a.pins = {bid: b.identity_key()}
-        b.pins = {aid: a.identity_key()}
+        a.identity_keys = {bid: b.identity_key()}
+        b.identity_keys = {aid: a.identity_key()}
         # A assigns B a local peer name; B relies on the ~unverified name
         a.names = {bid: "bob"}
 
@@ -113,14 +118,14 @@ def main(tmp: str):
         a.send(bid, msg_ab)
         in_flight = [r[0] for r in sql(server_db, "SELECT body FROM messages")]
         got = b.receive()
-        assert got == [(aid, "~alice-user-1", msg_ab)], f"B received {got!r}"
+        assert triples(got) == [(aid, "~alice-user-1", msg_ab)], f"B received {got!r}"
         print("PASS 1: A -> B decrypted exact plaintext (no registration)")
 
         # 2. B -> A
         msg_ba = "reply from B: acknowledged swordfish-7741"
         b.send(aid, msg_ba)
         got = a.receive()
-        assert got == [(bid, "bob", msg_ba)], f"A received {got!r}"
+        assert triples(got) == [(bid, "bob", msg_ba)], f"A received {got!r}"
         print("PASS 2: B -> A decrypted exact plaintext")
 
         # 3. no plaintext at the server, and delivered mail is deleted
@@ -136,7 +141,7 @@ def main(tmp: str):
         evil_key = vz.Account().curve25519_key.to_base64()
         sql(server_db, "UPDATE users SET identity_key=? WHERE id=?", evil_key, bid)
         sql(store_a, "DELETE FROM sessions WHERE peer=?", bid)
-        a.pins = {}  # the fingerprint ID alone must catch the tamper
+        a.identity_keys = {}  # the fingerprint ID alone must catch the tamper
         try:
             a.send(bid, "this must never be encrypted to the evil key")
         except PinMismatchError as e:
@@ -179,7 +184,7 @@ def main(tmp: str):
 
         # 7. in-flight message to the OLD fallback decrypts after rotation
         got = b.receive()
-        assert got == [(aid, "~alice-user-1", msg_fb)], f"B received {got!r}"
+        assert triples(got) == [(aid, "~alice-user-1", msg_fb)], f"B received {got!r}"
         print("PASS 7: in-flight message to the pre-rotation fallback decrypted")
 
         # 8. concurrent sends from two processes sharing A's store
@@ -195,7 +200,7 @@ def main(tmp: str):
                  for tag in ("P1", "P2")]
         for p in procs:
             assert p.wait(timeout=60) == 0, "concurrent sender crashed"
-        got = sorted(text for _, _, text in b.receive())
+        got = sorted(m["text"] for m in b.receive())
         expected = sorted(f"msg-{tag}-{i}" for tag in ("P1", "P2") for i in range(5))
         assert got == expected, f"B received {got!r}"
         print("PASS 8: concurrent senders sharing one store stayed in sync")
@@ -205,13 +210,13 @@ def main(tmp: str):
         # (Olm sends handshake-type messages until a reply is received)
         b.send(aid, "establishing reply")
         got = a.receive()
-        assert got == [(bid, "bob", "establishing reply")], got
+        assert triples(got) == [(bid, "bob", "establishing reply")], got
         server2_db = os.path.join(tmp, "server2.db")
         servers.append(start_server(server2_db, PORT2))
         url2 = f"http://127.0.0.1:{PORT2}"
         a2 = User(url2, "pickle-secret-a", name="alice-user-1", store=store_a)
         b2 = User(url2, "pickle-secret-b", name="bob-user-1", store=store_b)
-        assert (a2.user_id(), b2.user_id()) == (aid, bid), "IDs not server-independent"
+        assert (a2.fingerprint(), b2.fingerprint()) == (aid, bid), "IDs not server-independent"
         # publishing keys is the only onboarding the new server needs (both
         # sides: a mailbox must exist before it can receive even an ack)
         a2.publish()
@@ -221,7 +226,7 @@ def main(tmp: str):
         mtypes = [r[0] for r in sql(server2_db, "SELECT mtype FROM messages")]
         assert mtypes == [1], f"expected an existing-session message, got {mtypes}"
         got = b2.receive()
-        assert got == [(aid, "~alice-user-1", msg_mig)], f"B received {got!r}"
+        assert triples(got) == [(aid, "~alice-user-1", msg_mig)], f"B received {got!r}"
         print("PASS 9: session survived migration to a brand-new server")
 
         # 10. ack lifecycle: drain everything on both servers; every sent
@@ -244,7 +249,7 @@ def main(tmp: str):
         n = a2.flush_outbox()
         assert n == 1, n
         got = b2.receive()
-        assert got == [(aid, "~alice-user-1", msg_lost)], f"B received {got!r}"
+        assert triples(got) == [(aid, "~alice-user-1", msg_lost)], f"B received {got!r}"
         # the stranded copy now arrives via server 1 too: the ratchet refuses
         # the re-used message key, and the client re-acks and drops it
         # instead of surfacing a duplicate or crashing
@@ -274,7 +279,7 @@ def main(tmp: str):
         args_hash = hashlib.sha256(b"{}").hexdigest()
         payload = f"read_messages|{url}|{aid}|{old_ts}|{nonce}|{args_hash}".encode()
         stale = a._auth_fields("read_messages", {})
-        stale.update(ts=old_ts, nonce=nonce, sig=acct.sign(payload).to_base64())
+        stale.update(timestamp=old_ts, nonce=nonce, signature=acct.sign(payload).to_base64())
         try:
             a._call_raw("read_messages", {"auth": stale})
         except RuntimeError as e:

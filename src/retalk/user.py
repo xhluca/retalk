@@ -16,7 +16,7 @@ refuses. IDs are server-independent, so sessions survive a server
 migration. See docs/auth.md.
 
 Private keys are persisted locally in SQLite, encrypted at rest with a key
-derived from `pickle_secret`. The process is stateless: account and session
+derived from `passphrase`. The process is stateless: account and session
 state live only on disk, loaded per operation and written back immediately.
 A per-store file lock serializes operations, so multiple processes may
 safely share one store.
@@ -56,19 +56,20 @@ class PinMismatchError(Exception):
 
 
 class User:
-    def __init__(self, server_url: str, pickle_secret: str, name: str = "",
-                 store: str = "user.db", pins: dict | None = None,
+    def __init__(self, server_url: str, passphrase: str, name: str = "",
+                 store: str = "user.db", identity_keys: dict | None = None,
                  names: dict | None = None):
         self.server_url = server_url
         self.name = name
-        self.pins = pins or {}
+        # {peer_id: full identity key} to pin, on top of the fingerprint ID
+        self.identity_keys = identity_keys or {}
         # local peer names {peer_id: name}; server-supplied names are
         # attacker-chosen text and are only ever shown marked with "~"
         self.names = names or {}
-        self._pickle_key = hashlib.sha256(pickle_secret.encode()).digest()
+        self._store_key = hashlib.sha256(passphrase.encode()).digest()
         self._store_path = store
         self._init_store()
-        self._load_account()  # create the account on first run; fail early on a wrong pickle_secret
+        self._load_account()  # create the account on first run; fail early on a wrong passphrase
 
     # ---------- local encrypted store ----------
 
@@ -121,22 +122,22 @@ class User:
     def _load_account(self) -> v.Account:
         blob = self._meta_get("account")
         if blob:
-            return v.Account.from_pickle(blob, self._pickle_key)
+            return v.Account.from_pickle(blob, self._store_key)
         acct = v.Account()
         self._save_account(acct)
         return acct
 
     def _save_account(self, acct: v.Account):
-        self._meta_set("account", acct.pickle(self._pickle_key))
+        self._meta_set("account", acct.pickle(self._store_key))
 
     def _load_session(self, peer: str) -> v.Session | None:
         blob = self._fetchone("SELECT blob FROM sessions WHERE peer=?", peer)
-        return v.Session.from_pickle(blob, self._pickle_key) if blob else None
+        return v.Session.from_pickle(blob, self._store_key) if blob else None
 
     def _save_session(self, peer: str, session: v.Session):
         self._exec("INSERT INTO sessions(peer, blob) VALUES(?,?) "
                    "ON CONFLICT(peer) DO UPDATE SET blob=excluded.blob",
-                   peer, session.pickle(self._pickle_key))
+                   peer, session.pickle(self._store_key))
 
     # ---------- signed server RPC ----------
 
@@ -151,8 +152,8 @@ class User:
         payload = (f"{tool}|{self.server_url}|{aid}|{ts}|{nonce}|"
                    f"{canonical_hash(args)}").encode()
         sig = acct.sign(payload)
-        return {"user_id": aid, "identity_key": ident, "signing_key": signk,
-                "ts": ts, "nonce": nonce, "sig": sig.to_base64()}
+        return {"fingerprint": aid, "identity_key": ident, "signing_key": signk,
+                "timestamp": ts, "nonce": nonce, "signature": sig.to_base64()}
 
     def _call(self, tool: str, args: dict | None = None):
         args = args or {}
@@ -189,7 +190,7 @@ class User:
                 f"'{fingerprint(identity_key_b64, signing_key_b64)}'. "
                 "Possible MITM by the server — refusing to establish a session."
             )
-        pinned = self.pins.get(peer_id)
+        pinned = self.identity_keys.get(peer_id)
         if pinned is not None and pinned != identity_key_b64:
             raise PinMismatchError(
                 f"PIN MISMATCH for peer '{peer_id}': server served identity key "
@@ -203,9 +204,10 @@ class User:
         """This user's Curve25519 identity public key, base64."""
         return self._load_account().curve25519_key.to_base64()
 
-    def user_id(self) -> str:
-        """This user's ID — the fingerprint of its public keys. Share this
-        with peers (out-of-band): it is both address and pin."""
+    def fingerprint(self) -> str:
+        """This user's fingerprint — the sha256 of its public keys, sent as
+        the `fingerprint` field in signed requests. Share it with peers
+        (out-of-band): it is both address and pin."""
         acct = self._load_account()
         return fingerprint(acct.curve25519_key.to_base64(),
                            acct.ed25519_key.to_base64())
@@ -269,13 +271,18 @@ class User:
                     "fallback_rotated": need_rotate,
                     "resent": resent}
 
-    def send(self, to: str, text: str):
+    def send(self, to: str, text: str) -> str:
         """Encrypt and send a message to a peer user ID. The ciphertext is
-        kept in a local outbox until the peer acknowledges decrypting it."""
+        kept in a local outbox until the peer acknowledges decrypting it.
+
+        Returns the message id (see docs/STANDARD.md) -- the same id the
+        recipient sees, so the two sides can be correlated."""
         with self._locked():
-            payload = {"id": uuid.uuid4().hex, "kind": "msg", "text": text,
+            mid = uuid.uuid4().hex
+            payload = {"id": mid, "kind": "msg", "text": text,
                        "name": self.name}
-            return self._send_envelope(to, payload, record_outbox=True)
+            self._send_envelope(to, payload, record_outbox=True)
+            return mid
 
     def _send_envelope(self, to: str, payload: dict, record_outbox: bool):
         session = self._load_session(to)
@@ -314,12 +321,18 @@ class User:
                              {"to": peer, "mtype": mtype, "body": body})
         return len(rows)
 
-    def receive(self) -> list[tuple[str, str, str]]:
+    def receive(self, peer: str | None = None) -> list[dict]:
         """Fetch and decrypt pending messages, acknowledging each to its
-        sender. Returns [(sender_id, sender_name, plaintext), ...]."""
+        sender. Returns a list of message dicts (see docs/STANDARD.md):
+        {"id", "from", "name", "text"}.
+
+        With `peer` (a user id) set, only that sender's messages are fetched;
+        everyone else's stays in the server mailbox for a later receive."""
         out = []
         with self._locked():
-            for m in self._call("read_messages"):
+            inbox = (self._call("read_messages", {"peer": peer}) if peer
+                     else self._call("read_messages"))
+            for m in inbox:
                 sender = m["from"]
                 body_hash = hashlib.sha256(m["body"].encode()).hexdigest()
                 anymsg = v.AnyOlmMessage.from_parts(m["mtype"], base64.b64decode(m["body"]))
@@ -370,5 +383,6 @@ class User:
                     sender, {"id": data["id"], "kind": "ack"}, record_outbox=False)
                 name = self.names.get(sender) or (
                     f"~{data['name']}" if data.get("name") else "")
-                out.append((sender, name, data["text"]))
+                out.append({"id": data["id"], "from": sender,
+                            "name": name, "text": data["text"]})
         return out

@@ -104,15 +104,15 @@ python3 -m venv ~/rt
 Quick check that it works, using a local loopback server:
 
 ```sh
-SERVER_DB=/tmp/s.db SERVER_HOST=127.0.0.1 SERVER_PORT=8766 \
-  SERVER_AUDIENCE=http://127.0.0.1:8766 ~/rt/bin/retalk-server &
-export SERVER_URL=http://127.0.0.1:8766
-PICKLE_SECRET=a ~/rt/bin/retalk init ~/alice --name alice
+RETALK_SERVER_DB=/tmp/s.db RETALK_SERVER_HOST=127.0.0.1 RETALK_SERVER_PORT=8766 \
+  RETALK_SERVER_AUDIENCE=http://127.0.0.1:8766 ~/rt/bin/retalk-server &
+export RETALK_RELAY=http://127.0.0.1:8766
+RETALK_PASSPHRASE=a ~/rt/bin/retalk init --dir ~/alice --display-name alice
 # ... add a peer, send, receive — see the main README
 ```
 
 To make the server reachable from other machines, run it behind a
-Cloudflare Tunnel and set `SERVER_AUDIENCE` to the public URL. Follow
+Cloudflare Tunnel and set `RETALK_SERVER_AUDIENCE` to the public URL. Follow
 [cloudflare.md](cloudflare.md) on this same VM; nothing GCP-specific
 changes.
 

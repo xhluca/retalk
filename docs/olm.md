@@ -87,7 +87,7 @@ Defaults:
 - `min_otks=20`
 - `batch=100`
 
-`retalk receive --follow` runs `maintain()` every minute.
+`retalk receive --all --follow` runs `maintain()` every minute.
 
 Without replenishment, an empty pool would stop new sessions from starting.
 Existing sessions would still work.

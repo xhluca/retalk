@@ -17,7 +17,7 @@ There are two ways to do it:
 ## The one rule that matters for retalk
 
 The server signs nothing, but clients sign every request and bind the
-signature to the server URL. So **`SERVER_AUDIENCE` must be the exact public
+signature to the server URL. So **`RETALK_SERVER_AUDIENCE` must be the exact public
 URL clients use** — the `https://...` Cloudflare address, not
 `http://localhost:8766`. If they disagree, every request fails signature
 verification. Cloudflare terminates TLS at its edge and forwards plain HTTP
@@ -40,17 +40,17 @@ Install `cloudflared` first (https://github.com/cloudflare/cloudflared).
 2. In another terminal, start the server with that URL as its audience:
 
    ```sh
-   SERVER_PORT=8766 \
-   SERVER_AUDIENCE=https://race-content-september-gary.trycloudflare.com \
+   RETALK_SERVER_PORT=8766 \
+   RETALK_SERVER_AUDIENCE=https://race-content-september-gary.trycloudflare.com \
      retalk-server
    ```
 
 3. Point clients at the same URL:
 
    ```sh
-   retalk init -u --name alice \
-     --server https://race-content-september-gary.trycloudflare.com
-   retalk send bob "hello through cloudflare"
+   retalk init --user alice --display-name alice \
+     --relay https://race-content-september-gary.trycloudflare.com
+   retalk send --peer bob "hello through cloudflare"
    ```
 
 The URL changes every time you restart the quick tunnel, so it's only
@@ -125,10 +125,10 @@ alternative if you prefer to manage the tunnel from the machine.
    ```sh
    cloudflared tunnel --config ~/.cloudflared/retalk.yml run retalk
    # in another terminal:
-   SERVER_PORT=8766 SERVER_AUDIENCE=https://retalk.example.com retalk-server
+   RETALK_SERVER_PORT=8766 RETALK_SERVER_AUDIENCE=https://retalk.example.com retalk-server
    ```
 
-   Clients then use `--server https://retalk.example.com`.
+   Clients then use `--relay https://retalk.example.com`.
 
 To run both as background services on a server, install `cloudflared` as a
 service (`cloudflared service install`) and run `retalk-server` under your

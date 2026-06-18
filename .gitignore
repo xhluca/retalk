@@ -5,3 +5,6 @@ __pycache__/
 *.log
 dist/
 dist/
+.claude/summaries/
+CLAUDE.md
+.claude/
