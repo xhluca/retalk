@@ -54,6 +54,21 @@ as the `id` string.
 {"id":"7d1f...c0","to":"38b151a1..."}
 ```
 
+### Contact
+
+Emitted by `retalk contacts --json` -- one object per saved peer (the peers you
+created with `retalk add`), sorted by name.
+
+| field          | type   | description |
+|----------------|--------|-------------|
+| `name`         | string | your local name for the peer; never leaves your machine. |
+| `fingerprint`  | string | the peer's user id (32-hex key fingerprint). |
+| `identity_key` | string | the peer's pinned base64 identity key (`retalk add --identity-key`), or `""` if none was pinned. |
+
+```json
+{"name":"bob","fingerprint":"1041c25c...","identity_key":"vGY3...="}
+```
+
 ## Notes for consumers
 
 - `receive` prints **zero** lines when there is nothing to read; check for

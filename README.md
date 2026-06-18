@@ -199,6 +199,7 @@ Common commands (with `RETALK_USER=alice` exported):
 ```sh
 retalk id                          # print my user ID
 retalk add bob <bob-user-id>       # save a trusted local name
+retalk contacts                    # list saved peers (name + fingerprint)
 retalk send --peer bob "hello"     # send one encrypted message
 retalk receive --all               # read every sender (one JSON line each)
 retalk receive --peer bob          # read only messages from bob

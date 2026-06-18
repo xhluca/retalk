@@ -232,6 +232,17 @@ def cmd_add(args):
     print(f"added {args.name} -> {args.fingerprint}", file=sys.stderr)
 
 
+def cmd_contacts(args):
+    d = _resolve_store(args)
+    store_db = d / STORE_FILE
+    for name, (fp, ik) in sorted(_saved_peers(store_db).items()):
+        if args.json:
+            print(json.dumps({"name": name, "fingerprint": fp,
+                              "identity_key": ik or ""}))
+        else:
+            print(f"{name}\t{fp}")
+
+
 def cmd_block(args):
     d = _resolve_store(args)
     store_db = d / STORE_FILE
@@ -375,7 +386,7 @@ quickstart:
 
 run `retalk <command> --help` for the full story of each command.""")
     sub = p.add_subparsers(dest="command", required=True,
-                           metavar="{init,id,add,block,unblock,blocked,send,receive}")
+                           metavar="{init,id,add,contacts,block,unblock,blocked,send,receive}")
 
     sp = sub.add_parser(
         "init", parents=[common], formatter_class=raw,
@@ -461,6 +472,30 @@ explicit second check of the full identity key for belt-and-braces.""")
                     help="peer's full base64 identity key, verified against "
                          "everything the server serves for this peer")
     sp.set_defaults(fn=cmd_add)
+
+    sp = sub.add_parser(
+        "contacts", parents=[common], formatter_class=raw,
+        help="list saved peers (your contacts)",
+        description="""\
+List the peers you have saved with `retalk add`, one per line as
+NAME<tab>FINGERPRINT, sorted by name. These local names never leave your
+machine, and the peer never learns them.
+
+With --json each line is a Contact object (see docs/STANDARD.md):
+{"name", "fingerprint", "identity_key"}, where identity_key is the pinned
+base64 key from `retalk add --identity-key`, or "" if none was pinned.
+
+No passphrase and no server contact -- this only reads your local peers
+table. Prints nothing when you have saved no peers.""",
+        epilog="""\
+examples:
+  retalk contacts                list saved peers as NAME<tab>FINGERPRINT
+  retalk contacts --json         one {"name","fingerprint","identity_key"} line each
+  retalk contacts --json | jq .  pretty-print every contact""")
+    sp.add_argument("--json", action="store_true",
+                    help="emit one JSON object per saved peer "
+                         "({\"name\", \"fingerprint\", \"identity_key\"})")
+    sp.set_defaults(fn=cmd_contacts)
 
     sp = sub.add_parser(
         "block", parents=[common], formatter_class=raw,
