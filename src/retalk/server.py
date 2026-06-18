@@ -15,20 +15,26 @@ nonce cache, and signatures are bound to this server's public URL so a
 request captured here is worthless anywhere else. See docs/auth.md.
 
 Config (a CLI flag overrides the matching env var):
-  --host      / RETALK_SERVER_HOST       interface to bind (default 0.0.0.0)
-  --port      / RETALK_SERVER_PORT       port to bind (default 8766)
-  --audience  / RETALK_SERVER_AUDIENCE   public URL users connect to, e.g.
-              https://server.example.com — REQUIRED for any non-local
-              deployment; signatures verify against it (defaults to the bind
-              host:port, showing 0.0.0.0 as 127.0.0.1)
-  --db        / RETALK_SERVER_DB         SQLite path (default server.db)
+  --host        / RETALK_SERVER_HOST       interface to bind (default 0.0.0.0)
+  --port        / RETALK_SERVER_PORT       port to bind (default 8766)
+  --audience    / RETALK_SERVER_AUDIENCE   public URL users connect to, e.g.
+                https://server.example.com — REQUIRED for any non-local
+                deployment; signatures verify against it (defaults to the bind
+                host:port, showing 0.0.0.0 as 127.0.0.1)
+  --db          / RETALK_SERVER_DB         SQLite path (default server.db)
+  --max-body    / RETALK_SERVER_MAX_BODY   max request body in bytes; larger
+                requests are rejected with HTTP 413 (default 1048576 = 1 MiB)
+  --rate-limit  / RETALK_SERVER_RATE_LIMIT max requests per caller fingerprint
+                per minute; over the cap returns HTTP 429 (default 0 = off)
+  --timeout     / RETALK_SERVER_TIMEOUT    per-connection socket timeout in
+                seconds, to drop slow/idle clients (default 30)
   --max-mailbox / RETALK_SERVER_MAX_MAILBOX  max undelivered messages per
-              recipient (default 0 = unlimited). A per-sender sub-cap keeps
-              one sender from filling a mailbox; see --max-mailbox-per-sender.
+                recipient (default 0 = unlimited). A per-sender sub-cap keeps
+                one sender from filling a mailbox; see --max-mailbox-per-sender.
   --max-mailbox-per-sender / RETALK_SERVER_MAX_MAILBOX_PER_SENDER  max
-              undelivered messages a single sender may hold in one recipient's
-              mailbox (default 0 = unlimited; ignored when the overall cap is
-              unlimited)
+                undelivered messages a single sender may hold in one recipient's
+                mailbox (default 0 = unlimited; ignored when the overall cap is
+                unlimited)
 
 A "mailbox full" rejection is safe for delivery: the sender keeps
 unacknowledged messages in its local outbox and resends them later, so
@@ -39,7 +45,9 @@ import hashlib
 import json
 import os
 import sqlite3
+import threading
 import time
+from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import vodozemac as v
@@ -48,6 +56,13 @@ DB_PATH = os.environ.get("RETALK_SERVER_DB", "server.db")
 HOST = os.environ.get("RETALK_SERVER_HOST", "0.0.0.0")
 PORT = int(os.environ.get("RETALK_SERVER_PORT", "8766"))
 AUDIENCE = os.environ.get("RETALK_SERVER_AUDIENCE", f"http://127.0.0.1:{PORT}")
+# Abuse-hardening (all backward compatible; defaults must not break clients):
+#   MAX_BODY   request body cap in bytes (oversized -> HTTP 413)
+#   RATE_LIMIT requests per caller fingerprint per minute (0 = disabled)
+#   TIMEOUT    per-connection socket timeout in seconds (slowloris defence)
+MAX_BODY = int(os.environ.get("RETALK_SERVER_MAX_BODY", str(1024 * 1024)))
+RATE_LIMIT = int(os.environ.get("RETALK_SERVER_RATE_LIMIT", "0"))
+TIMEOUT = float(os.environ.get("RETALK_SERVER_TIMEOUT", "30"))
 WINDOW = 150  # seconds of allowed clock skew, each direction
 # Per-recipient mailbox cap on undelivered messages; 0 = unlimited.
 MAX_MAILBOX = int(os.environ.get("RETALK_SERVER_MAX_MAILBOX", "0"))
@@ -55,6 +70,7 @@ MAX_MAILBOX = int(os.environ.get("RETALK_SERVER_MAX_MAILBOX", "0"))
 # unlimited (and only meaningful when MAX_MAILBOX is set).
 MAX_MAILBOX_PER_SENDER = int(
     os.environ.get("RETALK_SERVER_MAX_MAILBOX_PER_SENDER", "0"))
+RATE_WINDOW = 60  # seconds; the rate limit is "requests per this window"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users(
@@ -335,11 +351,66 @@ TOOLS = {fn.__name__: fn for fn in
           send_message, read_messages)}
 
 
+class _RateLimiter:
+    """Thread-safe sliding-window request counter keyed by caller fingerprint.
+
+    The server is multithreaded, so all access is guarded by a lock. Each
+    fingerprint keeps a deque of recent request timestamps; entries older than
+    the window are pruned on every check, and fingerprints whose deque empties
+    are dropped so the table cannot grow without bound."""
+
+    def __init__(self, limit: int, window: float = RATE_WINDOW):
+        self.limit = limit
+        self.window = window
+        self._hits: dict[str, deque] = {}
+        self._lock = threading.Lock()
+
+    def allow(self, fingerprint: str, now: float | None = None) -> bool:
+        """Record a request from `fingerprint`; return False if it is over the
+        cap. Disabled (limit <= 0) always allows."""
+        if self.limit <= 0:
+            return True
+        now = time.time() if now is None else now
+        cutoff = now - self.window
+        with self._lock:
+            # prune fully-expired fingerprints so the table stays bounded
+            for fp in [fp for fp, dq in self._hits.items()
+                       if not dq or dq[-1] <= cutoff]:
+                del self._hits[fp]
+            dq = self._hits.get(fingerprint)
+            if dq is None:
+                dq = self._hits[fingerprint] = deque()
+            while dq and dq[0] <= cutoff:
+                dq.popleft()
+            if len(dq) >= self.limit:
+                return False
+            dq.append(now)
+            return True
+
+
+_RATE_LIMITER = _RateLimiter(RATE_LIMIT)
+
+
 class _Handler(BaseHTTPRequestHandler):
+    # dropped if a client is too slow/idle (slowloris defence)
+    timeout = TIMEOUT
+
     def do_POST(self):
         try:
             length = int(self.headers.get("content-length", 0))
+            if length > MAX_BODY:
+                # do not read the oversized body; reject outright
+                self._reply(413, json.dumps(
+                    {"error": f"request body too large: {length} bytes "
+                              f"(max {MAX_BODY})"}).encode())
+                return
             req = json.loads(self.rfile.read(length))
+            fp = (req.get("args", {}).get("auth") or {}).get("fingerprint")
+            if fp and not _RATE_LIMITER.allow(fp):
+                self._reply(429, json.dumps(
+                    {"error": "rate limit exceeded; slow down and retry"}
+                ).encode())
+                return
             result = TOOLS[req["tool"]](**req.get("args", {}))
             self._reply(200, result.encode())
         except Exception as e:
@@ -357,7 +428,9 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    global DB_PATH, HOST, PORT, AUDIENCE, MAX_MAILBOX, MAX_MAILBOX_PER_SENDER
+    global DB_PATH, HOST, PORT, AUDIENCE
+    global MAX_MAILBOX, MAX_MAILBOX_PER_SENDER, MAX_BODY, RATE_LIMIT, TIMEOUT
+    global _RATE_LIMITER
     import argparse
     ap = argparse.ArgumentParser(
         prog="retalk-server",
@@ -374,7 +447,9 @@ def main():
                "Locally they coincide. Behind a TLS proxy, --host/--port stay\n"
                "local (e.g. 127.0.0.1:8766) while --audience is your public\n"
                "https:// address. Each flag overrides the matching RETALK_*\n"
-               "env var (RETALK_SERVER_HOST, RETALK_SERVER_PORT, RETALK_SERVER_AUDIENCE, RETALK_SERVER_DB).")
+               "env var (RETALK_SERVER_HOST, RETALK_SERVER_PORT, RETALK_SERVER_AUDIENCE, RETALK_SERVER_DB,\n"
+               "RETALK_SERVER_MAX_BODY, RETALK_SERVER_RATE_LIMIT, RETALK_SERVER_TIMEOUT,\n"
+               "RETALK_SERVER_MAX_MAILBOX, RETALK_SERVER_MAX_MAILBOX_PER_SENDER).")
     ap.add_argument("--host", metavar="HOST",
                     help="interface to bind: 0.0.0.0 for every interface or "
                          "127.0.0.1 for this machine only (overrides "
@@ -401,6 +476,17 @@ def main():
                          "out others; only applies when --max-mailbox is set "
                          "(overrides RETALK_SERVER_MAX_MAILBOX_PER_SENDER; "
                          "default 0 = unlimited)")
+    ap.add_argument("--max-body", metavar="BYTES", type=int,
+                    help="reject request bodies larger than this many bytes "
+                         "with HTTP 413 (overrides RETALK_SERVER_MAX_BODY; "
+                         "default 1048576 = 1 MiB)")
+    ap.add_argument("--rate-limit", metavar="N", type=int,
+                    help="max requests per caller fingerprint per minute "
+                         "before HTTP 429; 0 disables (overrides "
+                         "RETALK_SERVER_RATE_LIMIT; default 0)")
+    ap.add_argument("--timeout", metavar="SECONDS", type=float,
+                    help="per-connection socket timeout to drop slow/idle "
+                         "clients (overrides RETALK_SERVER_TIMEOUT; default 30)")
     args = ap.parse_args()
 
     if args.db:
@@ -418,7 +504,15 @@ def main():
     elif not os.environ.get("RETALK_SERVER_AUDIENCE"):
         host = "127.0.0.1" if HOST == "0.0.0.0" else HOST
         AUDIENCE = f"http://{host}:{PORT}"
+    if args.max_body is not None:
+        MAX_BODY = args.max_body
+    if args.rate_limit is not None:
+        RATE_LIMIT = args.rate_limit
+    if args.timeout is not None:
+        TIMEOUT = args.timeout
 
+    _RATE_LIMITER = _RateLimiter(RATE_LIMIT)
+    _Handler.timeout = TIMEOUT
     ThreadingHTTPServer((HOST, PORT), _Handler).serve_forever()
 
 

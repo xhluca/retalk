@@ -25,6 +25,9 @@ guides below only show these in context.
 | `--port` | `RETALK_SERVER_PORT` | `8766` | TCP port to bind |
 | `--audience` | `RETALK_SERVER_AUDIENCE` | `http://HOST:PORT` | public URL clients connect to; request signatures are bound to it, so it must equal each client's relay URL exactly |
 | `--db` | `RETALK_SERVER_DB` | `server.db` | SQLite database path |
+| `--max-body` | `RETALK_SERVER_MAX_BODY` | `1048576` | max request body in bytes; larger requests get HTTP 413 |
+| `--rate-limit` | `RETALK_SERVER_RATE_LIMIT` | `0` | max requests per caller fingerprint per minute (`0` = disabled); over the cap gets HTTP 429 |
+| `--timeout` | `RETALK_SERVER_TIMEOUT` | `30` | per-connection socket timeout in seconds (drops slow/idle clients) |
 | `--max-mailbox` | `RETALK_SERVER_MAX_MAILBOX` | `0` (unlimited) | max undelivered messages per recipient; see [Mailbox cap](#mailbox-cap) |
 | `--max-mailbox-per-sender` | `RETALK_SERVER_MAX_MAILBOX_PER_SENDER` | `0` (unlimited) | max undelivered messages a single sender may hold in one recipient's mailbox; only applies when `--max-mailbox` is set |
 
@@ -360,6 +363,45 @@ retalk add boss "$ALICE_ID" --dir ./bob
 retalk receive --all --dir ./bob
 # boss: are we still on for tomorrow?
 ```
+
+## Hardening against abuse
+
+Authentication proves who a request comes from, but an open relay is still
+exposed to denial-of-service from clients: huge request bodies, connections
+that dribble bytes to tie up worker threads, and floods of valid signed
+requests. Three built-in limits blunt these. They are tuned to be invisible
+to normal clients, so the defaults are safe to leave on.
+
+- **Request body-size cap** (`--max-body` / `RETALK_SERVER_MAX_BODY`,
+  default 1 MiB). The server reads the `Content-Length` header first and, if
+  it exceeds the cap, rejects the request with HTTP 413 *without reading the
+  body* — so an attacker cannot make the server buffer an oversized payload.
+  A normal request (even a `publish_keys` call carrying a batch of one-time
+  keys) is a few kilobytes, well under the default.
+
+- **Socket timeout** (`--timeout` / `RETALK_SERVER_TIMEOUT`, default 30s).
+  Each connection gets a read timeout, so a slow or idle client (a
+  "slowloris" that opens a connection and sends bytes one at a time, or never
+  finishes its request) is dropped instead of holding a worker thread open
+  indefinitely. The window is generous enough that a real client on a slow
+  link is unaffected.
+
+- **Per-fingerprint rate limit** (`--rate-limit` / `RETALK_SERVER_RATE_LIMIT`,
+  default `0` = disabled). When set to *N*, a caller may make at most *N*
+  requests per minute, counted per authenticated `fingerprint`. Over the cap
+  returns HTTP 429. The counter is an in-memory sliding window guarded by a
+  lock (the server is multithreaded) and prunes old entries, so it adds
+  negligible overhead and bounded memory. It is off by default so existing
+  deployments and tests are unaffected; turn it on for internet-facing
+  servers. Because the limit is keyed on the caller's own fingerprint, it
+  throttles per identity rather than per IP, and a caller cannot evade it
+  without minting a fresh keypair (which still cannot read another user's
+  mailbox).
+
+These caps reduce the cost of abuse but do not replace a reverse proxy.
+For internet exposure, also terminate TLS and apply network-level rate
+limiting and connection limits at the proxy (see the deployment guides
+above).
 
 ## Hostile server behavior
 
