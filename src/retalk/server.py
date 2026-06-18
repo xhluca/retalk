@@ -22,6 +22,17 @@ Config (a CLI flag overrides the matching env var):
               deployment; signatures verify against it (defaults to the bind
               host:port, showing 0.0.0.0 as 127.0.0.1)
   --db        / RETALK_SERVER_DB         SQLite path (default server.db)
+  --max-mailbox / RETALK_SERVER_MAX_MAILBOX  max undelivered messages per
+              recipient (default 0 = unlimited). A per-sender sub-cap keeps
+              one sender from filling a mailbox; see --max-mailbox-per-sender.
+  --max-mailbox-per-sender / RETALK_SERVER_MAX_MAILBOX_PER_SENDER  max
+              undelivered messages a single sender may hold in one recipient's
+              mailbox (default 0 = unlimited; ignored when the overall cap is
+              unlimited)
+
+A "mailbox full" rejection is safe for delivery: the sender keeps
+unacknowledged messages in its local outbox and resends them later, so
+at-least-once delivery survives the rejection (see docs/server.md).
 """
 
 import hashlib
@@ -38,6 +49,12 @@ HOST = os.environ.get("RETALK_SERVER_HOST", "0.0.0.0")
 PORT = int(os.environ.get("RETALK_SERVER_PORT", "8766"))
 AUDIENCE = os.environ.get("RETALK_SERVER_AUDIENCE", f"http://127.0.0.1:{PORT}")
 WINDOW = 150  # seconds of allowed clock skew, each direction
+# Per-recipient mailbox cap on undelivered messages; 0 = unlimited.
+MAX_MAILBOX = int(os.environ.get("RETALK_SERVER_MAX_MAILBOX", "0"))
+# Per-(sender, recipient) sub-cap so one sender can't crowd out others; 0 =
+# unlimited (and only meaningful when MAX_MAILBOX is set).
+MAX_MAILBOX_PER_SENDER = int(
+    os.environ.get("RETALK_SERVER_MAX_MAILBOX_PER_SENDER", "0"))
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users(
@@ -239,6 +256,30 @@ def send_message(to: str, mtype: int, body: str, auth: dict) -> str:
             if not conn.execute("SELECT 1 FROM users WHERE id=?",
                                 (to,)).fetchone():
                 raise ValueError(f"unknown recipient: {to}")
+            # Reject-not-evict mailbox cap: count undelivered mail BEFORE
+            # inserting and refuse if the recipient is at/over a limit, never
+            # dropping existing mail. The sender keeps the message in its local
+            # outbox and resends later, so at-least-once delivery survives the
+            # rejection. Default 0 = unlimited (caps off).
+            if MAX_MAILBOX:
+                total = conn.execute(
+                    "SELECT COUNT(*) FROM messages WHERE recipient=?",
+                    (to,)).fetchone()[0]
+                if total >= MAX_MAILBOX:
+                    raise ValueError(
+                        f"mailbox full: {to} has {total} undelivered messages "
+                        f"(cap {MAX_MAILBOX}); resend later from your outbox")
+                if MAX_MAILBOX_PER_SENDER:
+                    from_sender = conn.execute(
+                        "SELECT COUNT(*) FROM messages "
+                        "WHERE recipient=? AND sender=?",
+                        (to, sender)).fetchone()[0]
+                    if from_sender >= MAX_MAILBOX_PER_SENDER:
+                        raise ValueError(
+                            f"mailbox full for sender: {sender} already has "
+                            f"{from_sender} undelivered messages for {to} "
+                            f"(per-sender cap {MAX_MAILBOX_PER_SENDER}); "
+                            f"resend later from your outbox")
             cur = conn.execute(
                 "INSERT INTO messages(ts, sender, recipient, mtype, body) "
                 "VALUES(?,?,?,?,?)", (ts, sender, to, mtype, body),
@@ -316,7 +357,7 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    global DB_PATH, HOST, PORT, AUDIENCE
+    global DB_PATH, HOST, PORT, AUDIENCE, MAX_MAILBOX, MAX_MAILBOX_PER_SENDER
     import argparse
     ap = argparse.ArgumentParser(
         prog="retalk-server",
@@ -349,10 +390,25 @@ def main():
     ap.add_argument("--db", metavar="PATH",
                     help="SQLite database path (overrides RETALK_SERVER_DB; default "
                          "server.db)")
+    ap.add_argument("--max-mailbox", metavar="N", type=int,
+                    help="max undelivered messages per recipient; a full "
+                         "mailbox rejects further sends (reject-not-evict) so "
+                         "the sender resends later from its outbox (overrides "
+                         "RETALK_SERVER_MAX_MAILBOX; default 0 = unlimited)")
+    ap.add_argument("--max-mailbox-per-sender", metavar="N", type=int,
+                    help="max undelivered messages a single sender may hold in "
+                         "one recipient's mailbox, so one sender can't crowd "
+                         "out others; only applies when --max-mailbox is set "
+                         "(overrides RETALK_SERVER_MAX_MAILBOX_PER_SENDER; "
+                         "default 0 = unlimited)")
     args = ap.parse_args()
 
     if args.db:
         DB_PATH = args.db
+    if args.max_mailbox is not None:
+        MAX_MAILBOX = args.max_mailbox
+    if args.max_mailbox_per_sender is not None:
+        MAX_MAILBOX_PER_SENDER = args.max_mailbox_per_sender
     if args.host:
         HOST = args.host
     if args.port:
