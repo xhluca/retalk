@@ -156,6 +156,13 @@ Blocked senders are always dropped; `--peers-only` additionally drops anyone
 not in your saved peers. From the library, pass `blocked={...}`,
 `receive_policy="peers-only"`, and/or `known={...}` to `User`.
 
+When you drop a message this way, your client sends the sender a signed
+**negative ack** (keyed by the message's ciphertext hash, so no decryption and
+no one-time key is spent). The sender marks that outbox entry as refused and
+stops resending it — without it, an unacked dropped message would linger in
+their outbox and be re-delivered if you later unblocked them. Note this does
+reveal to the sender that the message was refused.
+
 ## Contributing
 
 → [CONTRIBUTING.md](CONTRIBUTING.md) — development setup, running the tests,

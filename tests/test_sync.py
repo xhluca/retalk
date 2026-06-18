@@ -117,6 +117,36 @@ class TestSync(unittest.TestCase):
             finally:
                 proc.terminate(); proc.wait(timeout=10)
 
+    def test_nack_marks_dropped_and_stops_resend(self):
+        from retalk import User
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "server.db")
+            proc = start_server(db, PORT)
+            url = f"http://127.0.0.1:{PORT}"
+            a_store = os.path.join(tmp, "a.db")
+            try:
+                a = User(url, "sa", name="a", store=a_store)
+                b = User(url, "sb", name="b", store=os.path.join(tmp, "b.db"))
+                aid, bid = a.fingerprint(), b.fingerprint()
+                a.publish(); b.publish()
+
+                # Bob blocks Alice; her message is dropped and negative-acked
+                b.blocked = {aid}
+                a.send(bid, "let me in")
+                self.assertEqual(b.receive(), [])         # dropped -> NACK to Alice
+
+                # Alice reads the NACK (not user mail) and marks her entry dropped
+                self.assertEqual(a.receive(), [])
+                self.assertEqual(
+                    sql(a_store, "SELECT dropped FROM outbox")[0][0], 1,
+                    "NACK did not mark the outbox entry dropped")
+
+                # a full sync must NOT resend a refused message
+                a.sync()
+                self.assertEqual(mailbox(db, bid), 0, "resent a refused message")
+            finally:
+                proc.terminate(); proc.wait(timeout=10)
+
 
 class TestSyncCLI(unittest.TestCase):
     def cli(self, *cmd, secret="cli", expect=0):
