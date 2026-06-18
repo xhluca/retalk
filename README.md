@@ -173,7 +173,7 @@ Name it per command, or set it once in the environment:
 ```sh
 retalk id --user alice           # name the user on the command, or...
 export RETALK_USER=alice          # ...set it once for the shell
-retalk id                         # now acts as alice
+retalk id                         # now acts as "alice"
 ```
 
 `init` prints the user ID. There is no interactive prompt — a command with no
@@ -192,7 +192,7 @@ Then exchange user IDs out-of-band and save your peer:
 
 ```sh
 retalk add bob <bob-user-id>   # an "incomplete" contact: just name + fingerprint
-retalk verify bob              # optional: fetch & record bob's keys now
+retalk verify bob              # optional: fetch & record "bob"'s keys now
 ```
 
 `add` stores only the name and fingerprint. The peer's actual keys are fetched
@@ -207,11 +207,11 @@ Common commands (with `RETALK_USER=alice` exported):
 ```sh
 retalk id                          # print my user ID
 retalk add bob <bob-user-id>       # save a peer (name + fingerprint)
-retalk verify bob                  # fetch & record bob's keys (optional)
+retalk verify bob                  # fetch & record "bob"'s keys (optional)
 retalk contacts                    # list saved peers and verified status
 retalk send --peer bob "hello"     # send one encrypted message
 retalk receive --all               # read every sender (one JSON line each)
-retalk receive --peer bob          # read only messages from bob
+retalk receive --peer bob          # read only messages from "bob"
 retalk receive --all --follow      # keep polling all senders; maintain keys
 retalk block eve                   # drop a sender's mail before decryption
 retalk unblock eve                 # stop dropping that sender
@@ -269,27 +269,27 @@ retalk-server --host 127.0.0.1 --port 8766
 
 Leave this terminal running.
 
-**Terminal 2 — alice**
+**Terminal 2 — "alice"**
 
-Create alice's identity, then set two variables so the later commands stay
+Create "alice"'s identity, then set two variables so the later commands stay
 short:
 
 ```sh
 # create the user "alice"; --passphrase encrypts her keys, --relay is saved in the store
 retalk init --user alice --display-name alice --passphrase alice-secret --relay http://127.0.0.1:8766
 
-# point this terminal at alice so later commands don't repeat themselves:
+# point this terminal at "alice" so later commands don't repeat themselves:
 export RETALK_USER=alice               # which user to act as (replaces --user)
 export RETALK_PASSPHRASE=alice-secret  # unlocks her keys (replaces --passphrase)
-# RETALK_RELAY isn't needed: init saved the relay URL inside alice's store
+# RETALK_RELAY isn't needed: init saved the relay URL inside "alice"'s store
 
-retalk add bob <bob-id>                # save bob's id (from terminal 3) as the peer "bob"
+retalk add bob <bob-id>                # save "bob"'s id (from terminal 3) as the peer "bob"
 ```
 
 `add` only needs `RETALK_USER` (no keys, no server contact). Sending and
 receiving come next, under **Exchange a message** below.
 
-**Terminal 3 — bob**
+**Terminal 3 — "bob"**
 
 Same steps with the user "bob" and his own passphrase:
 
@@ -297,7 +297,7 @@ Same steps with the user "bob" and his own passphrase:
 retalk init --user bob --display-name bob --passphrase bob-secret --relay http://127.0.0.1:8766
 export RETALK_USER=bob
 export RETALK_PASSPHRASE=bob-secret
-retalk add alice <alice-id>   # paste alice's ID from terminal 2
+retalk add alice <alice-id>   # paste "alice"'s ID from terminal 2
 ```
 
 Two users with two different passphrases is exactly why each terminal sets its
@@ -305,21 +305,21 @@ own `RETALK_USER` and `RETALK_PASSPHRASE`: they cannot share them.
 
 **Exchange a message**
 
-The first message needs an order, because alice can only open an encrypted
-session once bob's public keys are on the relay:
+The first message needs an order, because "alice" can only open an encrypted
+session once "bob"'s public keys are on the relay:
 
 ```sh
-# Terminal 3 (bob): publish bob's keys, then check for mail from alice (none yet)
+# Terminal 3 ("bob"): publish "bob"'s keys, then check for mail from "alice" (none yet)
 retalk receive --peer alice
 
-# Terminal 2 (alice): claim one of bob's keys, encrypt, upload the ciphertext
+# Terminal 2 ("alice"): claim one of "bob"'s keys, encrypt, upload the ciphertext
 retalk send --peer bob "hello bob"
 
-# Terminal 3 (bob): decrypt and print it, then reply
+# Terminal 3 ("bob"): decrypt and print it, then reply
 retalk receive --peer alice    # -> {... "name":"alice","text":"hello bob"}
 retalk send --peer alice "hi alice, got it"
 
-# Terminal 2 (alice): read the reply
+# Terminal 2 ("alice"): read the reply
 retalk receive --peer bob      # -> {... "name":"bob","text":"hi alice, got it"}
 ```
 
@@ -346,14 +346,14 @@ Machine A:
 export RETALK_USER=alice                     # which user this machine acts as
 export RETALK_PASSPHRASE="your-passphrase"   # or pass --no-passphrase to init
 retalk init --user alice --relay https://server.example.com
-# Share the printed user ID with Bob out-of-band.
+# Share the printed user ID with "Bob" out-of-band.
 
 retalk add bob <bob-user-id>
 retalk send --peer bob "hello from across the internet"
 retalk receive --all --follow
 ```
 
-Machine B does the same with the user "bob" and Alice's user ID.
+Machine B does the same with the user "bob" and "Alice"'s user ID.
 
 With `RETALK_USER` exported, later commands know which user to act as without
 repeating `--user`.
@@ -373,20 +373,20 @@ For example, send to a peer who is offline and watch it arrive on their next
 poll:
 
 ```sh
-# alice: ciphertext is uploaded to the relay AND kept in alice's local outbox
+# "alice": ciphertext is uploaded to the relay AND kept in "alice"'s local outbox
 retalk send --peer bob "are you there?"
 
-# bob, later: decrypt, print, and ack -- after which the relay deletes it
+# "bob", later: decrypt, print, and ack -- after which the relay deletes it
 retalk receive --peer alice    # -> {... "name":"alice","text":"are you there?"}
 
-# alice: bob's ack arrives, so the message leaves alice's outbox
+# "alice": "bob"'s ack arrives, so the message leaves "alice"'s outbox
 retalk receive --all
 ```
 
 Leaving a sender in `--follow` resends unacknowledged messages on its own:
 
 ```sh
-# anything bob hasn't acked is re-uploaded about once a minute until it lands
+# anything "bob" hasn't acked is re-uploaded about once a minute until it lands
 retalk receive --all --follow
 ```
 

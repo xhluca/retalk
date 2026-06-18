@@ -60,8 +60,8 @@ Fields:
 - `timestamp`: expires captured requests after about 2.5 minutes.
 - `nonce`: a random value used once. It blocks replay inside the timestamp
   window.
-- `args_hash`: binds the business arguments. A signed "send to Bob" request
-  cannot become "send to Charlie".
+- `args_hash`: binds the business arguments. A signed request to send to
+  "Bob" cannot become a request to send to "Charlie".
 
 The user ID is the sha256 fingerprint of the user's public identity and
 signing keys. That means the keys in the request must hash back to the

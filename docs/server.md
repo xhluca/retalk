@@ -63,7 +63,7 @@ behind something that terminates TLS and forwards to that port:
 The examples assume the local demo from the README:
 
 - server at `http://127.0.0.1:8766`
-- Alice identity in `./alice`
+- "Alice" identity in `./alice`
 - `RETALK_RELAY=http://127.0.0.1:8766`
 - `RETALK_PASSPHRASE=alice-secret`
 
@@ -357,11 +357,11 @@ Example:
 
 ```sh
 retalk receive --all --dir ./bob
-# ~alice: hello
+# ~"alice": hello
 
 retalk add boss "$ALICE_ID" --dir ./bob
 retalk receive --all --dir ./bob
-# boss: are we still on for tomorrow?
+# "boss": are we still on for tomorrow?
 ```
 
 ## Hardening against abuse
@@ -409,8 +409,8 @@ above).
 - **Read private keys:** fails. Private keys never leave clients.
 - **Swap public keys to man-in-the-middle a user:** clients detect the
   fingerprint mismatch and refuse with `PIN MISMATCH`.
-- **Forge a message from Alice:** fails. Message decryption is bound to
-  Alice's identity key.
+- **Forge a message from "Alice":** fails. Message decryption is bound to
+  "Alice"'s identity key.
 - **Capture credentials usable elsewhere:** fails. There are no bearer tokens,
   and signatures are bound to this server URL.
 - **Replay an old request:** rejected by nonce or timestamp checks.

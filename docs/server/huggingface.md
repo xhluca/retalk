@@ -125,7 +125,7 @@ Then, from your own machine, do a round trip against the public URL:
 
 ```sh
 retalk init --user alice --display-name alice --relay https://<owner>-retalk-relay.hf.space
-# create a second identity for bob the same way, then have each `add` the
+# create a second identity for "bob" the same way, then have each `add` the
 # other's user id as a peer, then:
 retalk send --peer bob "hello through hugging face"
 retalk receive --all --dir ./bob
