@@ -58,7 +58,8 @@ class PinMismatchError(Exception):
 class User:
     def __init__(self, server_url: str, passphrase: str, name: str = "",
                  store: str = "user.db", identity_keys: dict | None = None,
-                 names: dict | None = None):
+                 names: dict | None = None, blocked: set | None = None,
+                 receive_policy: str = "open", known: set | None = None):
         self.server_url = server_url
         self.name = name
         # {peer_id: full identity key} to pin, on top of the fingerprint ID
@@ -66,6 +67,14 @@ class User:
         # local peer names {peer_id: name}; server-supplied names are
         # attacker-chosen text and are only ever shown marked with "~"
         self.names = names or {}
+        # fingerprints whose mail is silently dropped before any crypto work
+        self.blocked = set(blocked) if blocked else set()
+        # "open" accepts anyone; "peers-only" accepts only known peers
+        self.receive_policy = receive_policy
+        # known-peer fingerprints; defaults to the union of pins and names so
+        # the caller can pass either source (or an explicit `known` set)
+        self.known = set(known) if known is not None else (
+            set(self.identity_keys) | set(self.names))
         self._store_key = hashlib.sha256(passphrase.encode()).digest()
         self._store_path = store
         self._init_store()
@@ -334,6 +343,14 @@ class User:
                      else self._call("read_messages"))
             for m in inbox:
                 sender = m["from"]
+                # Drop blocked or (in peers-only mode) unknown senders BEFORE
+                # any decryption or session work, so a hostile/unknown sender
+                # can never make us consume a one-time key with a pre-key
+                # message. The mail stays on the server, unacked.
+                if sender in self.blocked:
+                    continue
+                if self.receive_policy == "peers-only" and sender not in self.known:
+                    continue
                 body_hash = hashlib.sha256(m["body"].encode()).hexdigest()
                 anymsg = v.AnyOlmMessage.from_parts(m["mtype"], base64.b64decode(m["body"]))
                 try:

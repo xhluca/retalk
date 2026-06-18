@@ -115,6 +115,13 @@ def _saved_peers(store_db: Path) -> dict:
                                  "FROM peers")}
 
 
+def _blocked_set(store_db: Path) -> set:
+    _store_sql(store_db,
+               "CREATE TABLE IF NOT EXISTS blocked(fingerprint TEXT PRIMARY KEY)")
+    return {fp for (fp,) in
+            _store_sql(store_db, "SELECT fingerprint FROM blocked")}
+
+
 def _open_user(args, need_server: bool = True, banner: bool = True) -> User:
     d = _resolve_store(args)
     store_db = d / STORE_FILE
@@ -127,9 +134,17 @@ def _open_user(args, need_server: bool = True, banner: bool = True) -> User:
     peers = _saved_peers(store_db)
     identity_keys = {fp: ik for _, (fp, ik) in peers.items() if ik}
     names = {fp: name for name, (fp, _) in peers.items()}
+    known = {fp for _, (fp, _) in peers.items()}
+    blocked = _blocked_set(store_db)
+    # --peers-only this run, or the setting persisted by an earlier flag
+    policy = ("peers-only"
+              if (getattr(args, "peers_only", False)
+                  or _meta(store_db, "receive_policy") == "peers-only")
+              else "open")
     try:
         u = User(server, secret, name=_meta(store_db, "name") or "",
-                 store=str(store_db), identity_keys=identity_keys, names=names)
+                 store=str(store_db), identity_keys=identity_keys, names=names,
+                 blocked=blocked, receive_policy=policy, known=known)
     except Exception:
         _die(f"could not unlock the identity at {d} (wrong passphrase?)")
     if banner:
@@ -215,6 +230,36 @@ def cmd_add(args):
                "identity_key=excluded.identity_key",
                args.name, args.fingerprint, args.identity_key)
     print(f"added {args.name} -> {args.fingerprint}", file=sys.stderr)
+
+
+def cmd_block(args):
+    d = _resolve_store(args)
+    store_db = d / STORE_FILE
+    fp = _peer_to_id(args.peer, store_db)
+    _blocked_set(store_db)  # ensure the table exists
+    _store_sql(store_db, "INSERT OR IGNORE INTO blocked(fingerprint) VALUES(?)", fp)
+    print(f"blocked {args.peer} ({fp})", file=sys.stderr)
+
+
+def cmd_unblock(args):
+    d = _resolve_store(args)
+    store_db = d / STORE_FILE
+    fp = _peer_to_id(args.peer, store_db)
+    _blocked_set(store_db)  # ensure the table exists
+    _store_sql(store_db, "DELETE FROM blocked WHERE fingerprint=?", fp)
+    print(f"unblocked {args.peer} ({fp})", file=sys.stderr)
+
+
+def cmd_blocked(args):
+    d = _resolve_store(args)
+    store_db = d / STORE_FILE
+    names = {fp: name for name, (fp, _) in _saved_peers(store_db).items()}
+    for fp in sorted(_blocked_set(store_db)):
+        if args.json:
+            print(json.dumps({"fingerprint": fp, "name": names.get(fp, "")}))
+        else:
+            name = names.get(fp)
+            print(f"{fp}\t{name}" if name else fp)
 
 
 def cmd_send(args):
@@ -330,7 +375,7 @@ quickstart:
 
 run `retalk <command> --help` for the full story of each command.""")
     sub = p.add_subparsers(dest="command", required=True,
-                           metavar="{init,id,add,send,receive}")
+                           metavar="{init,id,add,block,unblock,blocked,send,receive}")
 
     sp = sub.add_parser(
         "init", parents=[common], formatter_class=raw,
@@ -418,6 +463,53 @@ explicit second check of the full identity key for belt-and-braces.""")
     sp.set_defaults(fn=cmd_add)
 
     sp = sub.add_parser(
+        "block", parents=[common], formatter_class=raw,
+        help="silently drop a sender's incoming messages",
+        description="""\
+Block a sender: their incoming messages are dropped during `receive` before
+any decryption happens, so a blocked sender can never even consume one of your
+one-time keys. The block is local to this identity's store and is never sent to
+the server or the peer; their mail simply stays on the server, unread.
+
+Name the sender by a saved peer name (from `retalk add`) or a raw 32-hex user
+id. Unblock later with `retalk unblock`; list current blocks with
+`retalk blocked`.""",
+        epilog="""\
+examples:
+  retalk block bob                              block a saved peer
+  retalk block f1041c25c87351d8550b31cc6b13ab04   block by raw id""")
+    sp.add_argument("peer", help="saved peer name or 32-hex user id to block")
+    sp.set_defaults(fn=cmd_block)
+
+    sp = sub.add_parser(
+        "unblock", parents=[common], formatter_class=raw,
+        help="stop dropping a previously blocked sender",
+        description="""\
+Remove a sender from the block list, so `receive` delivers their messages
+again. Name them by a saved peer name or a raw 32-hex user id. Unblocking
+someone who is not blocked is a no-op.""",
+        epilog="""\
+examples:
+  retalk unblock bob
+  retalk unblock f1041c25c87351d8550b31cc6b13ab04""")
+    sp.add_argument("peer", help="saved peer name or 32-hex user id to unblock")
+    sp.set_defaults(fn=cmd_unblock)
+
+    sp = sub.add_parser(
+        "blocked", parents=[common], formatter_class=raw,
+        help="list blocked senders",
+        description="""\
+List the fingerprints currently blocked for this identity, one per line
+(with the saved peer name, if any). No server contact.""",
+        epilog="""\
+examples:
+  retalk blocked
+  retalk blocked --json     one {"fingerprint","name"} object per line""")
+    sp.add_argument("--json", action="store_true",
+                    help="emit one JSON object per blocked sender")
+    sp.set_defaults(fn=cmd_blocked)
+
+    sp = sub.add_parser(
         "send", parents=[common], formatter_class=raw,
         help="encrypt and send one message",
         description="""\
@@ -472,12 +564,17 @@ rotate the fallback key daily, and re-send any of your own messages that
 have gone unacknowledged for 2 minutes.
 
 Messages the server already handed over are never served again, so pipe
---json output somewhere durable if you need a log.""",
+--json output somewhere durable if you need a log.
+
+Two filters drop senders before any decryption (so they never make you
+consume a one-time key): a blocked sender (`retalk block`) is always dropped,
+and with --peers-only only saved peers (`retalk add`) are accepted.""",
         epilog="""\
 examples:
   retalk receive --all                 read every sender, once
   retalk receive --peer bob            read only messages from bob
   retalk receive --all --follow        live tail of all senders + key upkeep
+  retalk receive --all --peers-only    drop mail from senders you never added
   retalk receive --all | jq .text      pipe the JSON lines to jq
 
 each line is a JSON message object (see docs/STANDARD.md): "id", "from",
@@ -491,6 +588,12 @@ each line is a JSON message object (see docs/STANDARD.md): "id", "from",
     sp.add_argument("--follow", action="store_true",
                     help="keep polling every 2s and maintain keys every "
                          "60s until ctrl-c")
+    sp.add_argument("--peers-only", action="store_true",
+                    help="accept mail only from saved peers (`retalk add`); "
+                         "messages from unknown senders are dropped before "
+                         "any decryption, so they never consume a one-time "
+                         "key. Blocked senders (`retalk block`) are always "
+                         "dropped regardless of this flag")
     sp.set_defaults(fn=cmd_receive)
 
     args = p.parse_args()

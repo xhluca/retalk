@@ -126,6 +126,28 @@ retalk receive --all --follow | while read -r msg; do
 done
 ```
 
+## Filtering who can reach you
+
+Two client-side filters drop unwanted senders during `receive`, before any
+decryption — so a hostile or unknown sender can never even make you consume
+one of your one-time keys:
+
+```sh
+retalk block bob              # drop bob's mail (by saved name or 32-hex id)
+retalk blocked                # list blocked senders (--json for objects)
+retalk unblock bob            # stop dropping bob
+
+retalk receive --all --peers-only   # accept only senders you `retalk add`ed
+```
+
+Both filters are local to your store: nothing is sent to the server or the
+peer, and the dropped sender's mail simply stays unread on the server when you
+target a single sender. (A drained `receive --all` still clears the mailbox
+server-side; the filtered messages just aren't surfaced or acknowledged.)
+Blocked senders are always dropped; `--peers-only` additionally drops anyone
+not in your saved peers. From the library, pass `blocked={...}`,
+`receive_policy="peers-only"`, and/or `known={...}` to `User`.
+
 ## Contributing
 
 → [CONTRIBUTING.md](CONTRIBUTING.md) — development setup, running the tests,
