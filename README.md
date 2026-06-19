@@ -212,7 +212,8 @@ retalk contacts                    # list saved peers and verified status
 retalk show bob                    # print "bob" as a shareable Contact card (JSON)
 retalk share --peer carol bob      # send "bob"'s card to "carol" (an introduction)
 retalk import '<card json>'        # save a contact someone shared with you
-retalk receive --all | retalk import --inbox   # import every contact shared with you
+retalk import --inbox --list       # contacts peers shared (saved by `receive`)
+retalk import --inbox              # save all of them as peers
 retalk send --peer bob "hello"     # send one encrypted message
 retalk receive --all               # read every sender (one JSON line each)
 retalk receive --peer bob          # read only messages from "bob"
@@ -245,21 +246,23 @@ retalk share --peer carol bob --as bobby   # recommend a different nickname
 `show` prints the contact as a JSON **card** — its fingerprint, the recommended
 nickname, and (if you have verified it) its keys. `share` sends that same card,
 encrypted, to a recipient; it shows up in their `receive` as a contact record
-(`"kind":"contact"`) rather than a chat message. They save it with `import`,
-keeping your recommended nickname or choosing their own:
+(`"kind":"contact"`) rather than a chat message.
+
+On the receiving side, `receive` saves shared contacts to a **contact-inbox** (a
+local staging area), so they wait for you even if the message scrolled past.
+`import --inbox` then moves them into your real contacts:
 
 ```sh
-retalk receive --all | retalk import --inbox   # import shared contacts, keep chat
-retalk import '<card json>'          # or import one card directly
-retalk import --as bobby '<card>'    # save it under a nickname of your own
+retalk import --inbox --list          # see who has been shared with you
+retalk import --inbox                 # save all of them as peers (and clear the inbox)
+retalk import --inbox bob --as bobby  # save just "bob", under a nickname of your own
 ```
 
-`import --inbox` reads a `receive` stream and saves every contact record
-(`"kind":"contact"`) in it, passing your chat messages straight through to
-stdout — so one pipe adopts the introductions people sent you without hiding
-your messages. It needs no relay or passphrase (it only reads already-decrypted
-records), so it also works on a saved log: `retalk receive --all > inbox.ndjson`
-then `retalk import --inbox < inbox.ndjson`.
+Each staged card records who introduced it. `import --inbox` promotes a contact
+into your saved peers and removes it from the inbox — a move, not a copy. Pass
+`retalk receive --no-save-contacts` to skip staging. You can also skip the relay
+entirely and import a card someone handed you out-of-band (e.g. `retalk show`
+output): `retalk import '<card json>'`, or `retalk import --as bobby '<card>'`.
 
 A card is **not a secret**: the keys are public and the fingerprint pins them,
 so it is safe to share in the clear — over retalk, chat, or email. `import`

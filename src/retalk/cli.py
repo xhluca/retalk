@@ -132,6 +132,47 @@ def _blocked_set(store_db: Path) -> set:
             _store_sql(store_db, "SELECT fingerprint FROM blocked")}
 
 
+# Columns of a staged shared contact, in select order. The card fields mirror
+# a Contact (docs/STANDARD.md); from_fp/from_name record who introduced it.
+_INBOX_COLS = ("fingerprint", "name", "identity_key", "signing_key",
+               "from_fp", "from_name", "msg_id", "ts")
+
+
+def _received_contacts(store_db: Path) -> list[dict]:
+    """The contact-inbox: cards received via `retalk share` and saved by
+    `retalk receive`, awaiting `retalk import --inbox`. One row per contact
+    (keyed by fingerprint, newest share wins), sorted by recommended name."""
+    _store_sql(store_db, "CREATE TABLE IF NOT EXISTS received_contacts("
+               "fingerprint TEXT PRIMARY KEY, name TEXT, identity_key TEXT, "
+               "signing_key TEXT, from_fp TEXT, from_name TEXT, msg_id TEXT, "
+               "ts REAL)")
+    rows = _store_sql(store_db, f"SELECT {', '.join(_INBOX_COLS)} "
+                                "FROM received_contacts ORDER BY name")
+    return [dict(zip(_INBOX_COLS, r)) for r in rows]
+
+
+def _stage_contact(store_db: Path, rec: dict):
+    """Save one received contact record (`receive`) into the inbox, replacing
+    any earlier card for the same fingerprint. Ignores a malformed card."""
+    card = rec.get("card") or {}
+    fp = card.get("fingerprint", "")
+    if not ID_RE.match(fp):
+        return
+    _received_contacts(store_db)  # ensure the table exists
+    _store_sql(store_db,
+               "INSERT INTO received_contacts("
+               "fingerprint, name, identity_key, signing_key, from_fp, "
+               "from_name, msg_id, ts) VALUES(?,?,?,?,?,?,?,?) "
+               "ON CONFLICT(fingerprint) DO UPDATE SET name=excluded.name, "
+               "identity_key=excluded.identity_key, "
+               "signing_key=excluded.signing_key, from_fp=excluded.from_fp, "
+               "from_name=excluded.from_name, msg_id=excluded.msg_id, "
+               "ts=excluded.ts",
+               fp, card.get("name") or "", card.get("identity_key") or "",
+               card.get("signing_key") or "", rec.get("from") or "",
+               rec.get("name") or "", rec.get("id") or "", time.time())
+
+
 def _open_user(args, need_server: bool = True, banner: bool = True) -> User:
     d = _resolve_store(args)
     store_db = d / STORE_FILE
@@ -386,32 +427,47 @@ def _save_card(store_db: Path, card: dict, as_name: str | None) -> tuple:
     return name, fp, bool(ik and sk)
 
 
-def _import_inbox(store_db: Path):
-    """Read a `retalk receive` stream (NDJSON) on stdin, import every
-    contact record (`"kind":"contact"`), and pass every other line through to
-    stdout unchanged -- so `receive | import --inbox` adopts introductions while
-    chat messages keep flowing down the pipe. Refused cards are reported and
-    skipped; the rest still import."""
+def _list_inbox(store_db: Path, as_json: bool):
+    """Show the contact-inbox without importing anything."""
+    for row in _received_contacts(store_db):
+        verified = bool(row["identity_key"] and row["signing_key"])
+        if as_json:
+            print(json.dumps({**row, "verified": verified}))
+        else:
+            via = row["from_name"] or row["from_fp"] or "?"
+            print(f"{row['name']}\t{row['fingerprint']}\t"
+                  f"{'verified' if verified else 'unverified'}\tfrom {via}")
+
+
+def _import_inbox(store_db: Path, selector: str | None, as_name: str | None):
+    """Promote staged contacts (saved by `receive`) into the saved peers, then
+    delete the imported rows from the inbox -- a move. With `selector` (a staged
+    name or fingerprint) only that contact is imported; otherwise all are. A
+    card refused (PIN MISMATCH) is reported and left in the inbox."""
+    rows = _received_contacts(store_db)
+    if selector is not None:
+        rows = [r for r in rows
+                if selector in (r["name"], r["fingerprint"])]
+        if not rows:
+            _die(f"no staged contact matching '{selector}' "
+                 "(see `retalk import --inbox --list`)")
+    if as_name and len(rows) != 1:
+        _die("--as needs exactly one contact: name the staged contact to import")
+    if not rows:
+        print("import --inbox: inbox empty", file=sys.stderr)
+        return
     imported = refused = 0
-    for line in sys.stdin:
-        s = line.strip()
-        if not s:
-            print(line, end="", flush=True)
-            continue
+    for r in rows:
+        card = {"fingerprint": r["fingerprint"], "name": r["name"],
+                "identity_key": r["identity_key"], "signing_key": r["signing_key"]}
         try:
-            rec = json.loads(s)
-        except json.JSONDecodeError:
-            print(line, end="", flush=True)  # not JSON: pass through untouched
-            continue
-        if not (isinstance(rec, dict) and rec.get("kind") == "contact"):
-            print(line, end="", flush=True)  # a chat message or other record
-            continue
-        try:
-            name, fp, verified = _save_card(store_db, rec.get("card", {}), None)
+            name, fp, verified = _save_card(store_db, card, as_name)
         except ValueError as e:
-            print(f"retalk: skipped a shared contact: {e}", file=sys.stderr)
+            print(f"retalk: kept staged (not imported): {e}", file=sys.stderr)
             refused += 1
             continue
+        _store_sql(store_db, "DELETE FROM received_contacts WHERE fingerprint=?",
+                   r["fingerprint"])
         imported += 1
         print(f"imported contact '{name}' ({fp}) "
               f"[{'verified' if verified else 'unverified'}]", file=sys.stderr)
@@ -424,14 +480,15 @@ def _import_inbox(store_db: Path):
 def cmd_import(args):
     store_db = _resolve_store(args) / STORE_FILE
     if args.inbox:
-        if args.card is not None:
-            _die("--inbox reads the receive stream from stdin; do not also pass "
-                 "a CARD argument")
-        if args.as_name:
-            _die("--as cannot be combined with --inbox: each shared contact "
-                 "keeps its own recommended nickname")
-        _import_inbox(store_db)
+        if args.list:
+            if args.as_name:
+                _die("--as has no meaning with --list (nothing is imported)")
+            _list_inbox(store_db, args.json)
+            return
+        _import_inbox(store_db, args.card, args.as_name)
         return
+    if args.list:
+        _die("--list only applies to --inbox")
     raw = args.card
     if raw is None or raw == "-":
         raw = sys.stdin.read()
@@ -494,22 +551,24 @@ def cmd_receive(args):
         _die("receive needs a target: --peer PEER for one sender, or --all "
              "for every sender")
     u = _open_user(args)
-    to = None if args.all else _peer_to_id(args.peer,
-                                           _resolve_store(args) / STORE_FILE)
+    store_db = _resolve_store(args) / STORE_FILE
+    to = None if args.all else _peer_to_id(args.peer, store_db)
 
-    def emit(batch):
-        for m in batch:                      # standard message objects
+    def handle(batch):
+        for m in batch:                      # standard message / contact objects
+            if args.save_contacts and m.get("kind") == "contact":
+                _stage_contact(store_db, m)  # to the inbox for `import --inbox`
             print(json.dumps(m), flush=True)
 
     try:
         u.sync(resend=False)          # reachable + fresh keys; reading never resends
-        emit(u.receive(to))
+        handle(u.receive(to))
         if not args.follow:
             return
         last_sync = time.monotonic()
         while True:
             time.sleep(2)
-            emit(u.receive(to))
+            handle(u.receive(to))
             if time.monotonic() - last_sync > 60:
                 u.sync(resend=False)  # key upkeep only; resends belong to send / `retalk sync`
                 last_sync = time.monotonic()
@@ -837,31 +896,38 @@ to its fingerprint -- otherwise import refuses with PIN MISMATCH and saves
 nothing; a card with no keys is saved as an unverified contact (verified on
 first contact).
 
-With --inbox, import instead reads a whole `retalk receive` stream on stdin and
-imports every contact record (`"kind":"contact"`) in it, passing all other
-lines (your chat messages) straight through to stdout. So
-`retalk receive --all | retalk import --inbox` adopts the introductions people
-sent you while you still see your messages -- a refused card is reported and
-skipped, the rest still import. (--inbox takes no CARD and no --as; each
-shared contact keeps its own recommended nickname.)
+With --inbox, import draws instead from the contact-inbox: the cards that
+`retalk receive` saved when peers shared contacts with you (`retalk share`).
+Plain `import --inbox` promotes every staged contact into your saved peers and
+removes it from the inbox (a move); `import --inbox NAME-OR-ID` imports just the
+one matching a staged name or fingerprint; `import --inbox --list` shows the
+inbox without importing anything. A staged card that fails its key check is
+reported and left in the inbox. The same PIN-MISMATCH rule applies.
 
-No passphrase and no server contact -- this only writes your local peers table.""",
+No passphrase and no server contact -- this only reads/writes local tables.""",
         epilog="""\
 examples:
   retalk import '{"fingerprint":"f104...","name":"bob","identity_key":"..","signing_key":".."}'
   retalk import --as bobby '<card json>'     save it under a nickname of your own
-  retalk receive --all | retalk import --inbox   import shared contacts, keep chat
-  retalk receive --all --follow | retalk import --inbox   auto-import as they arrive""")
+  retalk import --inbox --list               show contacts peers shared with you
+  retalk import --inbox                       save all of them as peers
+  retalk import --inbox bob --as bobby        save just "bob", under your own name""")
     sp.add_argument("card", nargs="?",
-                    help="the Contact card as a JSON string; omit or pass '-' "
-                         "to read it from stdin. Not used with --inbox")
+                    help="without --inbox: the Contact card as a JSON string "
+                         "(omit or '-' to read stdin). With --inbox: an optional "
+                         "staged name or fingerprint to import just that one")
     sp.add_argument("--as", dest="as_name", metavar="NAME",
                     help="nickname to save the contact under "
                          "(default: the card's recommended name)")
     sp.add_argument("--inbox", action="store_true",
-                    help="read a `retalk receive` NDJSON stream on stdin and "
-                         "import every contact record in it, passing other "
-                         "lines through to stdout")
+                    help="import from the contact-inbox (cards `receive` saved) "
+                         "rather than from a CARD")
+    sp.add_argument("--list", action="store_true",
+                    help="with --inbox: list the staged contacts and import "
+                         "nothing")
+    sp.add_argument("--json", action="store_true",
+                    help="with --inbox --list: emit one JSON object per staged "
+                         "contact")
     sp.set_defaults(fn=cmd_import)
 
     sp = sub.add_parser(
@@ -972,8 +1038,9 @@ Fetch pending messages from the server, decrypt them, and print each as one
 JSON object per line (NDJSON) on stdout -- see docs/STANDARD.md for the fields
 ({"id", "from", "name", "text"}). A contact shared with `retalk share` arrives
 as a contact record instead ({"id", "from", "name", "kind": "contact", "card":
-{...}}); save it with `retalk import`. Each decrypted message is acknowledged
-back to its sender (encrypted, like everything else).
+{...}}); it is also saved to the contact-inbox (unless --no-save-contacts) for
+`retalk import --inbox`. Each decrypted message is acknowledged back to its
+sender (encrypted, like everything else).
 
 Say whose messages to read: pass --peer PEER (a saved name or 32-hex user id)
 to read just that sender, or --all to drain every sender. Targeting one peer
@@ -998,10 +1065,12 @@ examples:
   retalk receive --all --follow        live tail of all senders + key upkeep
   retalk receive --all --peers-only    drop mail from senders you never added
   retalk receive --all | jq .text      pipe the JSON lines to jq
-  retalk receive --all | retalk import --inbox   save shared contacts, keep chat
+  retalk receive --all ; retalk import --inbox --list   read, then see staged contacts
 
 each line is a JSON message object (see docs/STANDARD.md): "id", "from",
-"name", "text" -- or a contact record with "kind":"contact" and "card".""")
+"name", "text" -- or a contact record with "kind":"contact" and "card".
+Contacts peers share are also saved to the contact-inbox (see
+`retalk import --inbox`); pass --no-save-contacts to skip that.""")
     sp.add_argument("--peer", metavar="PEER",
                     help="read only this peer's messages (a saved peer name "
                          "or a 32-hex user id); use --all for every sender")
@@ -1017,7 +1086,12 @@ each line is a JSON message object (see docs/STANDARD.md): "id", "from",
                          "any decryption, so they never consume a one-time "
                          "key. Blocked senders (`retalk block`) are always "
                          "dropped regardless of this flag")
-    sp.set_defaults(fn=cmd_receive)
+    sp.add_argument("--no-save-contacts", dest="save_contacts",
+                    action="store_false",
+                    help="do not save contacts that peers share with you "
+                         "(`retalk share`) to the contact-inbox; by default they "
+                         "are staged there for `retalk import --inbox`")
+    sp.set_defaults(fn=cmd_receive, save_contacts=True)
 
     args = p.parse_args()
     args.fn(args)

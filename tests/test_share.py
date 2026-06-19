@@ -189,9 +189,14 @@ class TestShare(unittest.TestCase):
                 server.terminate()
                 server.wait(timeout=10)
 
+    def inbox(self, d):
+        return [json.loads(l) for l in self.cli(
+            "import", "--inbox", "--list", "--json", "--dir", d
+        ).stdout.splitlines()]
+
     def test_import_inbox(self):
-        """`import --inbox` drains a `receive` stream: it imports every contact
-        record and passes chat messages straight through to stdout."""
+        """receive saves shared contacts to the contact-inbox; import --inbox
+        promotes them into saved peers and empties the inbox (a move)."""
         with tempfile.TemporaryDirectory() as tmp:
             self.tmp = tmp
             server = start_server(os.path.join(tmp, "server.db"), PORT)
@@ -199,7 +204,8 @@ class TestShare(unittest.TestCase):
                 a = os.path.join(tmp, "alice")
                 b = os.path.join(tmp, "bob")
                 c = os.path.join(tmp, "carol")
-                self.cli("init", "--dir", a, "--display-name", "alice")
+                aid = self.cli("init", "--dir", a,
+                               "--display-name", "alice").stdout.strip()
                 bid = self.cli("init", "--dir", b,
                                "--display-name", "bob").stdout.strip()
                 cid = self.cli("init", "--dir", c,
@@ -214,20 +220,42 @@ class TestShare(unittest.TestCase):
                 self.cli("share", "--peer", "carol", "bob", "--dir", a)
                 self.cli("send", "--peer", cid, "hi carol", "--dir", a)
 
-                # carol has no contacts yet; one pipe imports the introduction
-                # and leaves the chat message visible on stdout
+                # receive prints chat + contact and stages the contact; carol is
+                # not yet a peer of bob (the inbox is a staging area, not a peer)
+                recs = [json.loads(l) for l in
+                        self.cli("receive", "--all", "--dir", c).stdout.splitlines()]
+                self.assertIn("hi carol", [r.get("text") for r in recs])
                 self.assertEqual(self.cli("contacts", "--dir", c).stdout, "")
-                inbox = self.cli("receive", "--all", "--dir", c).stdout
-                res = self.cli_in(inbox, "import", "--inbox", "--dir", c)
 
-                cbob = self.contacts(c)["bob"]            # contact imported...
+                # the inbox lists bob, verified, with provenance (from alice)
+                staged = self.inbox(c)
+                self.assertEqual(len(staged), 1)
+                self.assertEqual((staged[0]["fingerprint"], staged[0]["name"],
+                                  staged[0]["verified"], staged[0]["from_fp"]),
+                                 (bid, "bob", True, aid))
+
+                # import --inbox promotes bob into peers and empties the inbox
+                res = self.cli("import", "--inbox", "--dir", c)
+                self.assertIn("imported contact 'bob'", res.stderr)
+                cbob = self.contacts(c)["bob"]
                 self.assertEqual((cbob["fingerprint"], cbob["verified"]),
                                  (bid, True))
-                self.assertIn("hi carol", res.stdout)     # ...chat passed through
-                self.assertNotIn('"kind": "contact"', res.stdout)  # card siphoned
-                self.assertIn("imported contact 'bob'", res.stderr)
-                print("PASS: import --inbox imports shared contacts, passes chat "
-                      "through")
+                self.assertEqual(self.inbox(c), [])       # moved, not copied
+
+                # --no-save-contacts: a later share is delivered but not staged
+                self.cli("share", "--peer", "carol", "bob", "--dir", a)
+                self.cli("receive", "--all", "--no-save-contacts", "--dir", c)
+                self.assertEqual(self.inbox(c), [])
+
+                # selector + --as: stage again, import just "bob" under a new name
+                self.cli("share", "--peer", "carol", "bob", "--dir", a)
+                self.cli("receive", "--all", "--dir", c)
+                self.assertEqual(len(self.inbox(c)), 1)
+                self.cli("import", "--inbox", "bob", "--as", "bobby", "--dir", c)
+                self.assertTrue(self.contacts(c)["bobby"]["verified"])
+                self.assertEqual(self.inbox(c), [])
+                print("PASS: receive stages shared contacts; import --inbox moves "
+                      "them into peers (all / selector / --no-save-contacts)")
             finally:
                 server.terminate()
                 server.wait(timeout=10)
