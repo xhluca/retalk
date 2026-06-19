@@ -9,6 +9,7 @@ Uses ports 8796 (library) / 8797 (CLI); see tests/README.md.
 Run from the repo root: uv run python -m unittest discover -s tests
 """
 
+import hashlib
 import json
 import os
 import socket
@@ -117,7 +118,11 @@ class TestSync(unittest.TestCase):
             finally:
                 proc.terminate(); proc.wait(timeout=10)
 
-    def test_nack_marks_dropped_and_stops_resend(self):
+    def test_server_side_nack_stops_resend_without_alice_receiving(self):
+        # Bob refuses Alice's message; the relay records the signed negative ack
+        # and rejects the resend, handing Alice Bob's signature. Alice marks the
+        # entry dropped from that rejection -- she NEVER calls receive, proving
+        # the fire-and-forget sender is covered.
         from retalk import User
         with tempfile.TemporaryDirectory() as tmp:
             db = os.path.join(tmp, "server.db")
@@ -130,20 +135,51 @@ class TestSync(unittest.TestCase):
                 aid, bid = a.fingerprint(), b.fingerprint()
                 a.publish(); b.publish()
 
-                # Bob blocks Alice; her message is dropped and negative-acked
                 b.blocked = {aid}
                 a.send(bid, "let me in")
-                self.assertEqual(b.receive(), [])         # dropped -> NACK to Alice
+                self.assertEqual(b.receive(), [])    # dropped -> nack on the relay
+                self.assertEqual(
+                    sql(db, "SELECT COUNT(*) FROM refused WHERE recipient=?",
+                        bid)[0][0], 1, "relay did not record the negative ack")
 
-                # Alice reads the NACK (not user mail) and marks her entry dropped
-                self.assertEqual(a.receive(), [])
+                # Alice's resend is refused; she marks it dropped (no receive)
+                self.assertEqual(a.sync()["resent"], 0, "resent a refused message")
                 self.assertEqual(
                     sql(a_store, "SELECT dropped FROM outbox")[0][0], 1,
-                    "NACK did not mark the outbox entry dropped")
+                    "refusal proof did not mark the outbox entry dropped")
+                self.assertEqual(mailbox(db, bid), 0, "refused message got stored")
+            finally:
+                proc.terminate(); proc.wait(timeout=10)
 
-                # a full sync must NOT resend a refused message
+    def test_forged_refusal_is_ignored(self):
+        # A hostile relay (or attacker with DB access) can mark a hash refused,
+        # but WITHOUT the recipient's signature the sender must not treat it as a
+        # real refusal -- else the relay could forge refusals to make senders
+        # give up. The send stays blocked at the relay, but the outbox entry
+        # stays live (dropped=0), so nothing is silently abandoned on a lie.
+        from retalk import User
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "server.db")
+            proc = start_server(db, PORT)
+            url = f"http://127.0.0.1:{PORT}"
+            a_store = os.path.join(tmp, "a.db")
+            try:
+                a = User(url, "sa", name="a", store=a_store)
+                b = User(url, "sb", name="b", store=os.path.join(tmp, "b.db"))
+                bid = b.fingerprint()
+                a.publish(); b.publish()
+                a.send(bid, "hi")
+
+                body = sql(a_store, "SELECT body FROM outbox")[0][0]
+                h = hashlib.sha256(body.encode()).hexdigest()
+                sql(db, "INSERT INTO refused(recipient, hash, sig, ts) "
+                        "VALUES(?,?,?,?)", bid, h, "not-a-real-signature",
+                    time.time())
+
                 a.sync()
-                self.assertEqual(mailbox(db, bid), 0, "resent a refused message")
+                self.assertEqual(
+                    sql(a_store, "SELECT dropped FROM outbox")[0][0], 0,
+                    "trusted a forged (unsigned) refusal")
             finally:
                 proc.terminate(); proc.wait(timeout=10)
 

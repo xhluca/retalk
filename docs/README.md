@@ -157,18 +157,20 @@ Blocked senders are always dropped; `--peers-only` additionally drops anyone
 not in your saved peers. From the library, pass `blocked={...}`,
 `receive_policy="peers-only"`, and/or `known={...}` to `User`.
 
-When you drop a message this way, your client sends the sender a signed
-**negative ack** (keyed by the message's ciphertext hash, so no decryption and
-no one-time key is spent). The sender marks that outbox entry as refused and
-stops resending it — without it, an unacked dropped message would linger in
-their outbox and be re-delivered if you later unblocked them. Note this does
-reveal to the sender that the message was refused.
+When you drop a message this way, your client records a signed **negative ack**
+on the relay (keyed by the message's ciphertext hash, so no decryption and no
+one-time key is spent). The relay then refuses that ciphertext's resends and
+hands the sender your signature as proof; the sender verifies it and marks the
+message dropped in its outbox. This works even for a sender that only ever
+`send`s and never `receive`s — without it, an unacked dropped message would be
+re-uploaded on every send and re-delivered if you later accepted the sender.
 
-A sender only acts on the negative ack when it next runs `receive` (that is
-where the inbox, including NACKs, is processed). A fire-and-forget sender that
-only ever calls `send` never sees it, so each `send` keeps re-uploading the
-refused message; if you later accept that sender, its whole backlog is
-delivered at once. This is the accepted trade for `send` resending the outbox.
+The relay cannot forge a refusal: the proof is signed by you, so a sender that
+gets an unsigned or invalid one keeps the message live (a hostile relay could
+only drop it, which it can always do). The trade is that the negative ack
+reveals to the sender that the message was refused, and the relay learns it too
+(it stores the refused hash, bounded by `--max-refused`); it never sees
+plaintext or your block list.
 
 ## Contributing
 

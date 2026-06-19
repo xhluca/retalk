@@ -51,11 +51,6 @@ def canonical_hash(args: dict) -> str:
     ).hexdigest()
 
 
-# Relay message type for a (signed, not encrypted) negative ack. Olm uses
-# 0 (pre-key) and 1 (normal), so 2 is a safe non-Olm sentinel.
-NACK_MTYPE = 2
-
-
 class PinMismatchError(Exception):
     pass
 
@@ -102,7 +97,8 @@ class User:
         self._exec("CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT)")
         self._exec("CREATE TABLE IF NOT EXISTS sessions(peer TEXT PRIMARY KEY, blob TEXT)")
         # sent-but-unacknowledged ciphertext, for re-delivery (server loss/migration);
-        # `dropped` is set when the recipient negative-acks (refuses) a message
+        # `dropped` is set when a resend comes back refused (the recipient
+        # negative-acked it on the relay)
         self._exec("CREATE TABLE IF NOT EXISTS outbox("
                    "id TEXT PRIMARY KEY, peer TEXT, mtype INT, body TEXT, "
                    "ts REAL, dropped INT DEFAULT 0)")
@@ -359,55 +355,55 @@ class User:
 
     def _flush_outbox(self, older_than: float) -> int:
         rows = self._fetchall(
-            "SELECT peer, mtype, body FROM outbox WHERE ts<=? AND dropped=0",
+            "SELECT id, peer, mtype, body FROM outbox WHERE ts<=? AND dropped=0",
             time.time() - older_than)
-        for peer, mtype, body in rows:
-            self._call("send_message",
+        sent = 0
+        for oid, peer, mtype, body in rows:
+            res = self._call("send_message",
                              {"to": peer, "mtype": mtype, "body": body})
-        return len(rows)
+            if isinstance(res, dict) and res.get("refused"):
+                # the recipient negative-acked this exact ciphertext on the
+                # relay; verify their signature (don't take the relay's word)
+                # before marking it dropped so we stop resending it
+                if self._verify_nack(peer, body, res.get("sig")):
+                    self._exec("UPDATE outbox SET dropped=1 WHERE id=?", oid)
+                continue
+            sent += 1
+        return sent
 
-    def _send_nack(self, to: str, ciphertext_hash: str):
-        """Tell `to` we refused the message whose ciphertext hashes to
-        `ciphertext_hash` — a negative ack so they stop resending it. Signed
-        (not encrypted) and keyed by the hash, so it needs no session and no
-        decryption of the refused message. Best-effort."""
+    def _send_nack(self, ciphertext_hash: str):
+        """Record on the relay that we refuse the message whose ciphertext
+        hashes to `ciphertext_hash` — a signed negative ack. Keyed by the hash,
+        so it needs no session and no decryption of the refused message. The
+        relay then rejects that ciphertext's resends and hands our signature to
+        the sender as proof, so even a sender that never calls receive stops
+        resending it. Best-effort."""
         acct = self._load_account()
-        sig = acct.sign(f"nack|{to}|{ciphertext_hash}".encode()).to_base64()
-        body = json.dumps({"hash": ciphertext_hash, "sig": sig})
+        sig = acct.sign(
+            f"nack|{self.fingerprint()}|{ciphertext_hash}".encode()).to_base64()
         try:
-            self._call("send_message",
-                       {"to": to, "mtype": NACK_MTYPE, "body": body})
+            self._call("nack", {"hash": ciphertext_hash, "sig": sig})
         except Exception:
-            pass  # sender unreachable / not published: dropping silently is fine
+            pass  # relay unreachable / rate-limited: a later receive re-nacks
 
-    def _handle_nack(self, sender: str, body: str):
-        """Process a negative ack from `sender`: if it matches an outbox entry
-        of ours to them, verify the signature and mark that entry dropped so we
-        stop resending a message they refused. The match is checked BEFORE
-        verifying (so bogus nacks can't make us do key lookups for nothing) and
-        the signature is verified BEFORE acting (so a hostile relay can't forge
-        a nack to suppress our delivery)."""
+    def _verify_nack(self, peer: str, body: str, sig: str | None) -> bool:
+        """Verify a refusal the relay returned for our `body` sent to `peer`:
+        the signature must be `peer`'s over 'nack|<peer>|<hash>'. Returns True
+        only on a valid signature, so a hostile relay cannot forge a refusal to
+        make us abandon a message (it could only drop it, which it always can)."""
+        if not sig:
+            return False
+        h = hashlib.sha256(body.encode()).hexdigest()
         try:
-            info = json.loads(body)
-            h = info["hash"]
-        except Exception:
-            return
-        matches = [oid for oid, ob in self._fetchall(
-            "SELECT id, body FROM outbox WHERE peer=? AND dropped=0", sender)
-            if hashlib.sha256(ob.encode()).hexdigest() == h]
-        if not matches:
-            return
-        try:
-            keys = self._call("get_keys", {"peer": sender})
-            self._verify_identity(sender, keys["identity_key"],
+            keys = self._call("get_keys", {"peer": peer})
+            self._verify_identity(peer, keys["identity_key"],
                                   keys["signing_key"])
             v.Ed25519PublicKey.from_base64(keys["signing_key"]).verify_signature(
-                f"nack|{self.fingerprint()}|{h}".encode(),
-                v.Ed25519Signature.from_base64(info["sig"]))
+                f"nack|{peer}|{h}".encode(),
+                v.Ed25519Signature.from_base64(sig))
+            return True
         except Exception:
-            return
-        for oid in matches:
-            self._exec("UPDATE outbox SET dropped=1 WHERE id=?", oid)
+            return False
 
     def receive(self, peer: str | None = None) -> list[dict]:
         """Fetch and decrypt pending messages, acknowledging each to its
@@ -423,22 +419,19 @@ class User:
             for m in inbox:
                 sender = m["from"]
                 body_hash = hashlib.sha256(m["body"].encode()).hexdigest()
-                is_nack = m["mtype"] == NACK_MTYPE
                 # Drop blocked or (in peers-only mode) unknown senders BEFORE
                 # any decryption or session work, so a hostile/unknown sender
                 # can never make us consume a one-time key with a pre-key
-                # message. Send a signed negative-ack (keyed by ciphertext hash,
-                # no decryption) so the sender stops resending — but never
-                # nack a nack, which would loop.
+                # message. Record a signed negative-ack on the relay (keyed by
+                # the ciphertext hash, no decryption) so the sender's resends
+                # are refused at the relay even if it never calls receive.
                 if sender in self.blocked or (
                         self.receive_policy == "peers-only"
                         and sender not in self.known):
-                    if not is_nack:
-                        self._send_nack(sender, body_hash)
+                    self._send_nack(body_hash)
                     continue
-                if is_nack:
-                    self._handle_nack(sender, m["body"])
-                    continue
+                if m["mtype"] not in (0, 1):
+                    continue  # not an Olm message (stray/obsolete type) — ignore
                 anymsg = v.AnyOlmMessage.from_parts(m["mtype"], base64.b64decode(m["body"]))
                 try:
                     if m["mtype"] == 0:
