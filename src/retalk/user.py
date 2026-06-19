@@ -96,18 +96,11 @@ class User:
     def _init_store(self):
         self._exec("CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT)")
         self._exec("CREATE TABLE IF NOT EXISTS sessions(peer TEXT PRIMARY KEY, blob TEXT)")
-        # sent-but-unacknowledged ciphertext, for re-delivery (server loss/migration);
-        # `dropped` is set when a resend comes back refused (the recipient
-        # negative-acked it on the relay)
+        # sent-but-unacknowledged ciphertext, for re-delivery (server loss/migration).
+        # A row is deleted on an ack, or when a resend comes back refused (the
+        # recipient negative-acked it on the relay).
         self._exec("CREATE TABLE IF NOT EXISTS outbox("
-                   "id TEXT PRIMARY KEY, peer TEXT, mtype INT, body TEXT, "
-                   "ts REAL, dropped INT DEFAULT 0)")
-        if "dropped" not in [r[1] for r in
-                             self._fetchall("PRAGMA table_info(outbox)")]:
-            try:  # migrate stores created before the dropped column
-                self._exec("ALTER TABLE outbox ADD COLUMN dropped INT DEFAULT 0")
-            except sqlite3.OperationalError:
-                pass
+                   "id TEXT PRIMARY KEY, peer TEXT, mtype INT, body TEXT, ts REAL)")
         # hash of every processed ciphertext -> its message id, to re-ack duplicates
         self._exec("CREATE TABLE IF NOT EXISTS processed(hash TEXT PRIMARY KEY, msg_id TEXT)")
 
@@ -355,7 +348,7 @@ class User:
 
     def _flush_outbox(self, older_than: float) -> int:
         rows = self._fetchall(
-            "SELECT id, peer, mtype, body FROM outbox WHERE ts<=? AND dropped=0",
+            "SELECT id, peer, mtype, body FROM outbox WHERE ts<=?",
             time.time() - older_than)
         sent = 0
         for oid, peer, mtype, body in rows:
@@ -364,9 +357,9 @@ class User:
             if isinstance(res, dict) and res.get("refused"):
                 # the recipient negative-acked this exact ciphertext on the
                 # relay; verify their signature (don't take the relay's word)
-                # before marking it dropped so we stop resending it
+                # before dropping it from the outbox so we stop resending it
                 if self._verify_nack(peer, body, res.get("sig")):
-                    self._exec("UPDATE outbox SET dropped=1 WHERE id=?", oid)
+                    self._exec("DELETE FROM outbox WHERE id=?", oid)
                 continue
             sent += 1
         return sent
