@@ -33,6 +33,7 @@ guides below only show these in context.
 | `--admin-password` | `RETALK_SERVER_ADMIN_PASSWORD` | (unset) | password for the `/admin` API-key endpoint; unset disables `/admin`; see [Closing the relay](#closing-the-relay-api-keys) |
 | `--require-api-key` | `RETALK_SERVER_REQUIRE_API_KEY` | off | require a valid API key on every tool request (HTTP 401 otherwise); see [Closing the relay](#closing-the-relay-api-keys) |
 | `--max-refused` | `RETALK_SERVER_MAX_REFUSED` | `1000` | max negative-acks (refused message hashes) kept per recipient before the oldest are evicted; see [Refusing mail (negative acks)](#refusing-mail-negative-acks) |
+| `--refused-ttl` | `RETALK_SERVER_REFUSED_TTL` | `604800` (7 days) | seconds a negative-ack lives before it expires and is pruned (`0` = no expiry); see [Refusing mail (negative acks)](#refusing-mail-negative-acks) |
 
 `--host`/`--port` are where the process *listens*; `--audience` is the public
 URL clients *reach it at*. They coincide locally, but behind a TLS proxy the
@@ -158,7 +159,7 @@ that at the relay:
    relay does not store it; it returns `{"refused": true, "hash": ..., "sig":
    ...}` with the recipient's signature.
 4. The sender verifies that signature against the recipient's signing key and
-   marks the message dropped in its outbox, so it stops resending — even a
+   **deletes** the message from its outbox, so it stops resending — even a
    sender that only ever `send`s and never `receive`s.
 
 This keeps the relay **untrusted**. It cannot forge a refusal: the proof is the
@@ -169,10 +170,17 @@ stores the hash) — it still never sees plaintext, private keys, or the
 recipient's block list, which stays client-side.
 
 Because a recipient can record arbitrary hashes, the `refused` table is bounded
-per recipient by `--max-refused` (default 1000): once exceeded, the oldest
-entries are evicted. An evicted entry just means a very old refused message
-could be re-uploaded once more and re-dropped; it is never a correctness
-problem.
+two ways:
+
+- **By age** — `--refused-ttl` (default 7 days): an entry past its TTL stops
+  blocking and is pruned (server-wide) on the next `nack`, so the table shrinks
+  over time instead of only at the cap.
+- **By count** — `--max-refused` (default 1000 per recipient): once exceeded,
+  the oldest entries are evicted.
+
+Either bound expiring an entry just means a very old refused message could be
+re-uploaded once more and re-dropped (re-recording the refusal); it is never a
+correctness problem.
 
 ## Closing the relay (API keys)
 

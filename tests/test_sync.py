@@ -120,9 +120,9 @@ class TestSync(unittest.TestCase):
 
     def test_server_side_nack_stops_resend_without_alice_receiving(self):
         # Bob refuses Alice's message; the relay records the signed negative ack
-        # and rejects the resend, handing Alice Bob's signature. Alice marks the
-        # entry dropped from that rejection -- she NEVER calls receive, proving
-        # the fire-and-forget sender is covered.
+        # and rejects the resend, handing Alice Bob's signature. Alice deletes
+        # the entry from her outbox on that rejection -- she NEVER calls
+        # receive, proving the fire-and-forget sender is covered.
         from retalk import User
         with tempfile.TemporaryDirectory() as tmp:
             db = os.path.join(tmp, "server.db")
@@ -142,11 +142,12 @@ class TestSync(unittest.TestCase):
                     sql(db, "SELECT COUNT(*) FROM refused WHERE recipient=?",
                         bid)[0][0], 1, "relay did not record the negative ack")
 
-                # Alice's resend is refused; she marks it dropped (no receive)
+                # Alice's resend is refused; she deletes it from her outbox (no
+                # receive needed)
                 self.assertEqual(a.sync()["resent"], 0, "resent a refused message")
                 self.assertEqual(
-                    sql(a_store, "SELECT dropped FROM outbox")[0][0], 1,
-                    "refusal proof did not mark the outbox entry dropped")
+                    sql(a_store, "SELECT COUNT(*) FROM outbox")[0][0], 0,
+                    "refusal proof did not remove the outbox entry")
                 self.assertEqual(mailbox(db, bid), 0, "refused message got stored")
             finally:
                 proc.terminate(); proc.wait(timeout=10)
@@ -156,7 +157,7 @@ class TestSync(unittest.TestCase):
         # but WITHOUT the recipient's signature the sender must not treat it as a
         # real refusal -- else the relay could forge refusals to make senders
         # give up. The send stays blocked at the relay, but the outbox entry
-        # stays live (dropped=0), so nothing is silently abandoned on a lie.
+        # stays put, so nothing is silently abandoned on a lie.
         from retalk import User
         with tempfile.TemporaryDirectory() as tmp:
             db = os.path.join(tmp, "server.db")
@@ -178,8 +179,70 @@ class TestSync(unittest.TestCase):
 
                 a.sync()
                 self.assertEqual(
-                    sql(a_store, "SELECT dropped FROM outbox")[0][0], 0,
-                    "trusted a forged (unsigned) refusal")
+                    sql(a_store, "SELECT COUNT(*) FROM outbox")[0][0], 1,
+                    "trusted a forged (unsigned) refusal and dropped the message")
+            finally:
+                proc.terminate(); proc.wait(timeout=10)
+
+    def test_refused_entry_expires(self):
+        # An expired refusal (older than the server's TTL) no longer blocks a
+        # resend -- the message goes through and the outbox entry is kept (only a
+        # *verified, live* refusal removes it). This is the count aging out.
+        from retalk import User
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "server.db")
+            proc = start_server(db, PORT)
+            url = f"http://127.0.0.1:{PORT}"
+            a_store = os.path.join(tmp, "a.db")
+            try:
+                a = User(url, "sa", name="a", store=a_store)
+                b = User(url, "sb", name="b", store=os.path.join(tmp, "b.db"))
+                bid = b.fingerprint()
+                a.publish(); b.publish()
+                a.send(bid, "x")
+                sql(db, "DELETE FROM messages")                  # relay loses it
+
+                body = sql(a_store, "SELECT body FROM outbox")[0][0]
+                h = hashlib.sha256(body.encode()).hexdigest()
+                sql(db, "INSERT INTO refused(recipient, hash, sig, ts) "
+                        "VALUES(?,?,?,?)", bid, h, "sig",
+                    time.time() - 8 * 24 * 3600)             # older than 7d TTL
+
+                a.sync()
+                self.assertEqual(mailbox(db, bid), 1,
+                                 "an expired refusal still blocked delivery")
+                self.assertEqual(
+                    sql(a_store, "SELECT COUNT(*) FROM outbox")[0][0], 1,
+                    "outbox entry wrongly removed on an expired refusal")
+            finally:
+                proc.terminate(); proc.wait(timeout=10)
+
+    def test_expired_refusals_pruned_on_new_nack(self):
+        # A fresh nack prunes server-wide expired refusals, so the table shrinks
+        # over time rather than only at the per-recipient cap.
+        from retalk import User
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "server.db")
+            proc = start_server(db, PORT)
+            url = f"http://127.0.0.1:{PORT}"
+            try:
+                a = User(url, "sa", name="a", store=os.path.join(tmp, "a.db"))
+                b = User(url, "sb", name="b", store=os.path.join(tmp, "b.db"))
+                aid, bid = a.fingerprint(), b.fingerprint()
+                a.publish(); b.publish()
+
+                old = time.time() - 8 * 24 * 3600                # past the TTL
+                for hh in ("a" * 64, "b" * 64):
+                    sql(db, "INSERT INTO refused(recipient, hash, sig, ts) "
+                            "VALUES(?,?,?,?)", bid, hh, "s", old)
+                self.assertEqual(sql(db, "SELECT COUNT(*) FROM refused")[0][0], 2)
+
+                b.blocked = {aid}                               # trigger a nack
+                a.send(bid, "let me in")
+                self.assertEqual(b.receive(), [])
+                rows = sql(db, "SELECT hash FROM refused WHERE recipient=?", bid)
+                self.assertEqual(len(rows), 1,
+                                 f"stale refusals not pruned on a new nack: {rows}")
             finally:
                 proc.terminate(); proc.wait(timeout=10)
 

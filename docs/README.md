@@ -169,7 +169,8 @@ The relay cannot forge a refusal: the proof is signed by you, so a sender that
 gets an unsigned or invalid one keeps the message live (a hostile relay could
 only drop it, which it can always do). The trade is that the negative ack
 reveals to the sender that the message was refused, and the relay learns it too
-(it stores the refused hash, bounded by `--max-refused`); it never sees
+(it stores the refused hash, bounded by `--max-refused` and aged out by
+`--refused-ttl`); it never sees
 plaintext or your block list.
 
 ## Contributing

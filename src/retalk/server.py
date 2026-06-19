@@ -44,6 +44,9 @@ Config (a CLI flag overrides the matching env var):
   --max-refused / RETALK_SERVER_MAX_REFUSED  max negative-acks (refused message
                 hashes) kept per recipient before the oldest are evicted; bounds
                 the `refused` table (default 1000, 0 = unlimited)
+  --refused-ttl / RETALK_SERVER_REFUSED_TTL  seconds a negative-ack lives before
+                it expires and is pruned, so the `refused` table shrinks over
+                time (default 604800 = 7 days, 0 = no expiry)
 
 A "mailbox full" rejection is safe for delivery: the sender keeps
 unacknowledged messages in its local outbox and resends them later, so
@@ -95,6 +98,10 @@ RATE_WINDOW = 60  # seconds; the rate limit is "requests per this window"
 # recipient can record arbitrary hashes, so this is bounded by oldest-eviction
 # to stop the table growing without limit; 0 = unlimited (not recommended).
 MAX_REFUSED = int(os.environ.get("RETALK_SERVER_MAX_REFUSED", "1000"))
+# Time-to-live (seconds) for negative-acks: an expired one stops blocking and is
+# pruned, so the refused table shrinks over time, not only at the cap. A sender
+# that resends after expiry just gets re-dropped and re-nacked. 0 = no expiry.
+REFUSED_TTL = float(os.environ.get("RETALK_SERVER_REFUSED_TTL", str(7 * 24 * 3600)))
 # Optional relay access control (admission, NOT identity — see docs/auth.md):
 #   ADMIN_PASSWORD   unlocks the /admin API-key endpoint (HTTP Basic); empty
 #                    string disables /admin entirely (404).
@@ -320,12 +327,13 @@ def send_message(to: str, mtype: int, body: str, auth: dict) -> str:
             # Negative-ack gate: if the recipient previously refused this exact
             # ciphertext (see `nack`), do not store it again. Return the
             # recipient's signed refusal so the sender can verify it (the relay
-            # cannot forge one) and mark the message dropped in its outbox,
-            # which stops resends even from a sender that never calls receive.
+            # cannot forge one) and delete the message from its outbox, which
+            # stops resends even from a sender that never calls receive.
             h = hashlib.sha256(body.encode()).hexdigest()
+            cutoff = ts - REFUSED_TTL if REFUSED_TTL else -1.0
             ref = conn.execute(
-                "SELECT sig FROM refused WHERE recipient=? AND hash=?",
-                (to, h)).fetchone()
+                "SELECT sig FROM refused WHERE recipient=? AND hash=? AND ts>?",
+                (to, h, cutoff)).fetchone()
             if ref:
                 return json.dumps({"refused": True, "hash": h, "sig": ref[0]})
             # Reject-not-evict mailbox cap: count undelivered mail BEFORE
@@ -409,8 +417,9 @@ def nack(hash: str, sig: str, auth: dict) -> str:
     proof of refusal, so the relay can reject the refused message's resends
     without being able to forge a refusal itself.
 
-    Bounded per recipient by MAX_REFUSED (oldest entries evicted), since a
-    caller may record arbitrary hashes."""
+    Bounded two ways, since a caller may record arbitrary hashes: by age
+    (REFUSED_TTL, expired entries pruned) and by count per recipient
+    (MAX_REFUSED, oldest evicted)."""
     me = _caller("nack", {"hash": hash, "sig": sig}, auth)
     if not (isinstance(hash, str) and len(hash) == 64
             and all(c in "0123456789abcdef" for c in hash)):
@@ -422,10 +431,16 @@ def nack(hash: str, sig: str, auth: dict) -> str:
         raise PermissionError("bad nack signature")
     conn = _db()
     try:
+        now = time.time()
         with conn:
+            if REFUSED_TTL:  # age out expired refusals server-wide
+                conn.execute("DELETE FROM refused WHERE ts<?",
+                             (now - REFUSED_TTL,))
+            # re-nacking the same ciphertext refreshes its timestamp (and sig)
             conn.execute(
-                "INSERT OR IGNORE INTO refused(recipient, hash, sig, ts) "
-                "VALUES(?,?,?,?)", (me, hash, sig, time.time()))
+                "INSERT INTO refused(recipient, hash, sig, ts) VALUES(?,?,?,?) "
+                "ON CONFLICT(recipient, hash) DO UPDATE SET "
+                "sig=excluded.sig, ts=excluded.ts", (me, hash, sig, now))
             if MAX_REFUSED:
                 n = conn.execute("SELECT COUNT(*) FROM refused WHERE recipient=?",
                                  (me,)).fetchone()[0]
@@ -703,7 +718,7 @@ class _Handler(BaseHTTPRequestHandler):
 def main():
     global DB_PATH, HOST, PORT, AUDIENCE
     global MAX_MAILBOX, MAX_MAILBOX_PER_SENDER, MAX_BODY, RATE_LIMIT, TIMEOUT
-    global ADMIN_PASSWORD, REQUIRE_API_KEY, MAX_REFUSED
+    global ADMIN_PASSWORD, REQUIRE_API_KEY, MAX_REFUSED, REFUSED_TTL
     global _RATE_LIMITER
     import argparse
     ap = argparse.ArgumentParser(
@@ -725,7 +740,7 @@ def main():
                "RETALK_SERVER_MAX_BODY, RETALK_SERVER_RATE_LIMIT, RETALK_SERVER_TIMEOUT,\n"
                "RETALK_SERVER_MAX_MAILBOX, RETALK_SERVER_MAX_MAILBOX_PER_SENDER,\n"
                "RETALK_SERVER_ADMIN_PASSWORD, RETALK_SERVER_REQUIRE_API_KEY,\n"
-               "RETALK_SERVER_MAX_REFUSED).")
+               "RETALK_SERVER_MAX_REFUSED, RETALK_SERVER_REFUSED_TTL).")
     ap.add_argument("--host", metavar="HOST",
                     help="interface to bind: 0.0.0.0 for every interface or "
                          "127.0.0.1 for this machine only (overrides "
@@ -776,6 +791,11 @@ def main():
                          "recipient before the oldest are evicted; bounds the "
                          "refused table (overrides RETALK_SERVER_MAX_REFUSED; "
                          "default 1000, 0 = unlimited)")
+    ap.add_argument("--refused-ttl", metavar="SECONDS", type=float,
+                    help="seconds a negative-ack lives before it expires and is "
+                         "pruned, so the refused table shrinks over time "
+                         "(overrides RETALK_SERVER_REFUSED_TTL; default 604800 "
+                         "= 7 days, 0 = no expiry)")
     args = ap.parse_args()
 
     if args.db:
@@ -805,6 +825,8 @@ def main():
         REQUIRE_API_KEY = True
     if args.max_refused is not None:
         MAX_REFUSED = args.max_refused
+    if args.refused_ttl is not None:
+        REFUSED_TTL = args.refused_ttl
 
     _RATE_LIMITER = _RateLimiter(RATE_LIMIT)
     _Handler.timeout = TIMEOUT
