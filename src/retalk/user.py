@@ -230,6 +230,33 @@ class User:
         return fingerprint(acct.curve25519_key.to_base64(),
                            acct.ed25519_key.to_base64())
 
+    # ---------- at-rest sealing (optional local copies) ----------
+
+    def _at_rest_key(self):
+        """A self-encryption keypair derived from the store key, for sealing
+        optional local copies of messages (`retalk receive --save-messages`).
+        It is only as strong as the passphrase: a --no-passphrase identity
+        derives the store key from a public constant, so its at-rest copies
+        are not meaningfully encrypted (the caller is expected to warn)."""
+        seed = hashlib.sha256(b"retalk:at-rest|" + self._store_key).digest()
+        return v.Curve25519SecretKey.from_bytes(seed)
+
+    def encrypt_at_rest(self, text: str) -> str:
+        """Seal `text` for local storage, returning a blob that only this
+        identity (with its passphrase) can open. The blob is the JSON triple
+        [ciphertext, mac, ephemeral_key] (each base64). Reverse with
+        decrypt_at_rest."""
+        dec = v.PkDecryption.from_key(self._at_rest_key())
+        msg = v.PkEncryption.from_key(dec.public_key).encrypt(text.encode())
+        return json.dumps([base64.b64encode(b).decode()
+                           for b in (msg.ciphertext, msg.mac, msg.ephemeral_key)])
+
+    def decrypt_at_rest(self, blob: str) -> str:
+        """Open a blob produced by encrypt_at_rest."""
+        dec = v.PkDecryption.from_key(self._at_rest_key())
+        ct, mac, eph = (base64.b64decode(p) for p in json.loads(blob))
+        return dec.decrypt(v.Message(ct, mac, eph)).decode()
+
     def publish(self, n: int = 100, rotate_fallback: bool = False):
         """Publish identity, signing, and n fresh one-time keys to the
         server. This is also all the onboarding a server needs — there is no

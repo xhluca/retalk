@@ -173,6 +173,24 @@ def _stage_contact(store_db: Path, rec: dict):
                rec.get("name") or "", rec.get("id") or "", time.time())
 
 
+def _ensure_messages(store_db: Path):
+    _store_sql(store_db, "CREATE TABLE IF NOT EXISTS messages("
+               "msg_id TEXT PRIMARY KEY, from_fp TEXT, from_name TEXT, "
+               "body TEXT, ts REAL)")
+
+
+def _save_message(store_db: Path, u, rec: dict):
+    """Persist one chat message (`receive --save-messages`) with its body
+    sealed at rest by the identity's key (see User.encrypt_at_rest)."""
+    _ensure_messages(store_db)
+    _store_sql(store_db,
+               "INSERT OR IGNORE INTO messages(msg_id, from_fp, from_name, "
+               "body, ts) VALUES(?,?,?,?,?)",
+               rec.get("id") or "", rec.get("from") or "",
+               rec.get("name") or "", u.encrypt_at_rest(rec.get("text") or ""),
+               time.time())
+
+
 def _open_user(args, need_server: bool = True, banner: bool = True) -> User:
     d = _resolve_store(args)
     store_db = d / STORE_FILE
@@ -554,10 +572,18 @@ def cmd_receive(args):
     store_db = _resolve_store(args) / STORE_FILE
     to = None if args.all else _peer_to_id(args.peer, store_db)
 
+    if args.save_messages and _meta(store_db, "no_passphrase") == "1":
+        print("retalk: warning: --save-messages on a --no-passphrase identity "
+              "stores message bodies with no real protection (its store key is "
+              "a public constant); the folder's file permissions are the only "
+              "guard", file=sys.stderr)
+
     def handle(batch):
         for m in batch:                      # standard message / contact objects
             if args.save_contacts and m.get("kind") == "contact":
                 _stage_contact(store_db, m)  # to the inbox for `import --inbox`
+            elif args.save_messages and "text" in m:
+                _save_message(store_db, u, m)  # sealed copy for `retalk history`
             print(json.dumps(m), flush=True)
 
     try:
@@ -574,6 +600,23 @@ def cmd_receive(args):
                 last_sync = time.monotonic()
     except KeyboardInterrupt:
         pass
+
+
+def cmd_history(args):
+    u = _open_user(args, need_server=False, banner=False)
+    store_db = _resolve_store(args) / STORE_FILE
+    _ensure_messages(store_db)
+    peer_fp = _peer_to_id(args.peer, store_db) if args.peer else None
+    where = "WHERE from_fp=? " if peer_fp else ""
+    rows = _store_sql(store_db,
+                      "SELECT msg_id, from_fp, from_name, body FROM messages "
+                      f"{where}ORDER BY ts", *([peer_fp] if peer_fp else []))
+    # prefer the current saved-peer name; fall back to the label stored at receive
+    names = {fp: name for name, (fp, _ik, _sk) in _saved_peers(store_db).items()}
+    for msg_id, from_fp, from_name, body in rows:
+        print(json.dumps({"id": msg_id, "from": from_fp,
+                          "name": names.get(from_fp) or from_name,
+                          "text": u.decrypt_at_rest(body)}), flush=True)
 
 
 def cmd_sync(args):
@@ -666,7 +709,7 @@ quickstart:
 
 run `retalk <command> --help` for the full story of each command.""")
     sub = p.add_subparsers(dest="command", required=True,
-                           metavar="{init,id,add,contacts,show,share,import,verify,block,unblock,blocked,send,receive}")
+                           metavar="{init,id,add,contacts,show,share,import,verify,block,unblock,blocked,send,receive,history}")
 
     sp = sub.add_parser(
         "init", parents=[common], formatter_class=raw,
@@ -1091,7 +1134,35 @@ Contacts peers share are also saved to the contact-inbox (see
                     help="do not save contacts that peers share with you "
                          "(`retalk share`) to the contact-inbox; by default they "
                          "are staged there for `retalk import --inbox`")
+    sp.add_argument("--save-messages", action="store_true",
+                    help="also keep a local copy of each chat message, sealed "
+                         "with this identity's key, for `retalk history`. Off by "
+                         "default (retalk keeps no message log otherwise). On a "
+                         "--no-passphrase identity the seal is not real "
+                         "encryption -- the store key is public")
     sp.set_defaults(fn=cmd_receive, save_contacts=True)
+
+    sp = sub.add_parser(
+        "history", parents=[common], formatter_class=raw,
+        help="replay messages saved by `receive --save-messages`",
+        description="""\
+Print the messages this identity has saved with `retalk receive
+--save-messages`, oldest first, as one JSON object per line (NDJSON) -- the same
+Message shape `receive` emits ({"id", "from", "name", "text"}, see
+docs/STANDARD.md). Each body is decrypted from its at-rest seal on the way out,
+so this needs the identity's passphrase but never the relay.
+
+retalk keeps no message log unless you opt in with `receive --save-messages`;
+with `--peer` only that sender's saved messages are shown.""",
+        epilog="""\
+examples:
+  retalk history                 every saved message, oldest first
+  retalk history --peer bob      only messages saved from bob
+  retalk history | jq -r .text   just the text of each""")
+    sp.add_argument("--peer", metavar="PEER",
+                    help="show only this sender's saved messages (a saved peer "
+                         "name or a 32-hex user id)")
+    sp.set_defaults(fn=cmd_history)
 
     args = p.parse_args()
     args.fn(args)

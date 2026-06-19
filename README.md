@@ -218,6 +218,8 @@ retalk send --peer bob "hello"     # send one encrypted message
 retalk receive --all               # read every sender (one JSON line each)
 retalk receive --peer bob          # read only messages from "bob"
 retalk receive --all --follow      # keep polling all senders; maintain keys
+retalk receive --all --save-messages   # also keep a sealed local copy
+retalk history                     # replay saved messages (needs --save-messages)
 retalk block eve                   # drop a sender's mail before decryption
 retalk unblock eve                 # stop dropping that sender
 retalk blocked                     # list blocked senders
@@ -271,6 +273,26 @@ match (`PIN MISMATCH`), so a tampered introduction is rejected, never trusted.
 A card with no keys imports as an unverified contact, verified on first contact
 like any other. `show` + `import` also copy a contact between two of your own
 identities without going through the relay at all.
+
+### Saving a message history
+
+By default `retalk receive` keeps **no** message log: it decrypts each message,
+prints it, and forgets it (pipe the output somewhere if you want a record).
+Opt in with `--save-messages` to also keep a local copy, and read it back with
+`retalk history`:
+
+```sh
+retalk receive --all --save-messages   # decrypt, print, and keep a copy
+retalk history                         # replay saved messages, oldest first
+retalk history --peer bob              # just bob's
+```
+
+Saved bodies are **sealed at rest** with a key derived from the identity's
+passphrase (the same secret that protects your keys), so the SQLite file does
+not hold plaintext; `history` unseals them on the way out. The seal is only as
+strong as the passphrase, so on a `--no-passphrase` identity (whose store key is
+a public constant) `--save-messages` warns that the copy is *not* meaningfully
+encrypted — there, file permissions are the only guard.
 
 ### Selecting the user
 

@@ -28,6 +28,7 @@ Run from the repo root: uv run python -m unittest discover -s tests
 import json
 import os
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -256,6 +257,58 @@ class TestShare(unittest.TestCase):
                 self.assertEqual(self.inbox(c), [])
                 print("PASS: receive stages shared contacts; import --inbox moves "
                       "them into peers (all / selector / --no-save-contacts)")
+            finally:
+                server.terminate()
+                server.wait(timeout=10)
+
+
+    def test_save_messages(self):
+        """receive --save-messages keeps a sealed local copy that `history`
+        replays; without the flag nothing is kept; the body is encrypted at
+        rest."""
+        with tempfile.TemporaryDirectory() as tmp:
+            self.tmp = tmp
+            server = start_server(os.path.join(tmp, "server.db"), PORT)
+            try:
+                a = os.path.join(tmp, "alice")
+                b = os.path.join(tmp, "bob")
+                aid = self.cli("init", "--dir", a,
+                               "--display-name", "alice").stdout.strip()
+                bid = self.cli("init", "--dir", b,
+                               "--display-name", "bob").stdout.strip()
+                self.cli("receive", "--all", "--dir", b)   # bob publishes keys
+
+                # 1. without the flag, nothing is kept
+                self.cli("send", "--peer", bid, "first", "--dir", a)
+                self.cli("receive", "--all", "--dir", b)
+                self.assertEqual(self.cli("history", "--dir", b).stdout, "")
+
+                # 2. with the flag, the message is saved and history replays it
+                #    in the same Message shape `receive` emits
+                self.cli("send", "--peer", bid, "hello bob", "--dir", a)
+                self.cli("receive", "--all", "--save-messages", "--dir", b)
+                hist = [json.loads(l) for l in
+                        self.cli("history", "--dir", b).stdout.splitlines()]
+                self.assertEqual(len(hist), 1)
+                self.assertEqual(set(hist[0]), {"id", "from", "name", "text"})
+                self.assertEqual((hist[0]["from"], hist[0]["text"]),
+                                 (aid, "hello bob"))
+
+                # 3. the stored body is encrypted at rest (no plaintext on disk)
+                conn = sqlite3.connect(os.path.join(b, "store.db"))
+                body = conn.execute("SELECT body FROM messages").fetchone()[0]
+                conn.close()
+                self.assertNotIn("hello bob", body)
+
+                # 4. --peer filters; saved messages keep their order
+                self.cli("send", "--peer", bid, "again", "--dir", a)
+                self.cli("receive", "--all", "--save-messages", "--dir", b)
+                texts = [json.loads(l)["text"] for l in
+                         self.cli("history", "--peer", aid, "--dir", b)
+                         .stdout.splitlines()]
+                self.assertEqual(texts, ["hello bob", "again"])
+                print("PASS: receive --save-messages persists sealed copies; "
+                      "history replays them")
             finally:
                 server.terminate()
                 server.wait(timeout=10)
