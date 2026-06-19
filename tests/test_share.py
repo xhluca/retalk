@@ -189,6 +189,49 @@ class TestShare(unittest.TestCase):
                 server.terminate()
                 server.wait(timeout=10)
 
+    def test_import_inbox(self):
+        """`import --inbox` drains a `receive` stream: it imports every contact
+        record and passes chat messages straight through to stdout."""
+        with tempfile.TemporaryDirectory() as tmp:
+            self.tmp = tmp
+            server = start_server(os.path.join(tmp, "server.db"), PORT)
+            try:
+                a = os.path.join(tmp, "alice")
+                b = os.path.join(tmp, "bob")
+                c = os.path.join(tmp, "carol")
+                self.cli("init", "--dir", a, "--display-name", "alice")
+                bid = self.cli("init", "--dir", b,
+                               "--display-name", "bob").stdout.strip()
+                cid = self.cli("init", "--dir", c,
+                               "--display-name", "carol").stdout.strip()
+                self.cli("receive", "--all", "--dir", b)  # bob/carol publish keys
+                self.cli("receive", "--all", "--dir", c)
+                self.cli("add", "bob", bid, "--dir", a)
+                self.cli("verify", "bob", "--dir", a)
+                self.cli("add", "carol", cid, "--dir", a)
+
+                # alice introduces bob to carol AND sends her a chat message
+                self.cli("share", "--peer", "carol", "bob", "--dir", a)
+                self.cli("send", "--peer", cid, "hi carol", "--dir", a)
+
+                # carol has no contacts yet; one pipe imports the introduction
+                # and leaves the chat message visible on stdout
+                self.assertEqual(self.cli("contacts", "--dir", c).stdout, "")
+                inbox = self.cli("receive", "--all", "--dir", c).stdout
+                res = self.cli_in(inbox, "import", "--inbox", "--dir", c)
+
+                cbob = self.contacts(c)["bob"]            # contact imported...
+                self.assertEqual((cbob["fingerprint"], cbob["verified"]),
+                                 (bid, True))
+                self.assertIn("hi carol", res.stdout)     # ...chat passed through
+                self.assertNotIn('"kind": "contact"', res.stdout)  # card siphoned
+                self.assertIn("imported contact 'bob'", res.stderr)
+                print("PASS: import --inbox imports shared contacts, passes chat "
+                      "through")
+            finally:
+                server.terminate()
+                server.wait(timeout=10)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -212,6 +212,7 @@ retalk contacts                    # list saved peers and verified status
 retalk show bob                    # print "bob" as a shareable Contact card (JSON)
 retalk share --peer carol bob      # send "bob"'s card to "carol" (an introduction)
 retalk import '<card json>'        # save a contact someone shared with you
+retalk receive --all | retalk import --inbox   # import every contact shared with you
 retalk send --peer bob "hello"     # send one encrypted message
 retalk receive --all               # read every sender (one JSON line each)
 retalk receive --peer bob          # read only messages from "bob"
@@ -248,10 +249,17 @@ encrypted, to a recipient; it shows up in their `receive` as a contact record
 keeping your recommended nickname or choosing their own:
 
 ```sh
-retalk receive --all | jq -c '.card // empty' | retalk import   # import shared cards
+retalk receive --all | retalk import --inbox   # import shared contacts, keep chat
 retalk import '<card json>'          # or import one card directly
 retalk import --as bobby '<card>'    # save it under a nickname of your own
 ```
+
+`import --inbox` reads a `receive` stream and saves every contact record
+(`"kind":"contact"`) in it, passing your chat messages straight through to
+stdout — so one pipe adopts the introductions people sent you without hiding
+your messages. It needs no relay or passphrase (it only reads already-decrypted
+records), so it also works on a saved log: `retalk receive --all > inbox.ndjson`
+then `retalk import --inbox < inbox.ndjson`.
 
 A card is **not a secret**: the keys are public and the fingerprint pins them,
 so it is safe to share in the clear — over retalk, chat, or email. `import`

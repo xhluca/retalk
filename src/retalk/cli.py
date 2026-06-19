@@ -345,37 +345,34 @@ def cmd_share(args):
           file=sys.stderr)
 
 
-def cmd_import(args):
-    d = _resolve_store(args)
-    store_db = d / STORE_FILE
-    raw = args.card
-    if raw is None or raw == "-":
-        raw = sys.stdin.read()
-    try:
-        card = json.loads(raw)
-    except json.JSONDecodeError as e:
-        _die(f"card is not valid JSON: {e}")
+def _save_card(store_db: Path, card: dict, as_name: str | None) -> tuple:
+    """Validate a Contact card and save it as a local peer (like `add`, plus a
+    checked `verify` when the card carries keys). Returns (name, fingerprint,
+    verified). Raises ValueError(message) on a bad card -- callers decide
+    whether that aborts (single import) or just skips one (--inbox)."""
     if not isinstance(card, dict):
-        _die("card must be a JSON object (see `retalk show`)")
+        raise ValueError("card must be a JSON object (see `retalk show`)")
     fp = card.get("fingerprint", "")
     if not ID_RE.match(fp):
-        _die("card has no valid fingerprint (expected 32 hex characters)")
-    name = args.as_name or card.get("name") or ""
+        raise ValueError("card has no valid fingerprint (expected 32 hex "
+                         "characters)")
+    name = as_name or card.get("name") or ""
     if not name:
-        _die("card has no recommended nickname -- pass `--as NAME` to choose one")
+        raise ValueError("card has no recommended nickname -- pass `--as NAME` "
+                         "to choose one")
     if ID_RE.match(name):
-        _die("nickname looks like a user id -- give it a human name with `--as`")
-
+        raise ValueError("nickname looks like a user id -- give it a human "
+                         "name with `--as`")
     ik, sk = card.get("identity_key") or "", card.get("signing_key") or ""
     if ik or sk:
         if not (ik and sk):
-            _die("card has only one key: a verified card needs both "
-                 "identity_key and signing_key, or neither")
+            raise ValueError("card has only one key: a verified card needs both "
+                             "identity_key and signing_key, or neither")
         got = fingerprint(ik, sk)
         if got != fp:
-            _die(f"PIN MISMATCH: the card's keys hash to {got}, not {fp} -- "
-                 "refusing to import a contact whose keys do not match its id")
-
+            raise ValueError(f"PIN MISMATCH: the card's keys hash to {got}, not "
+                             f"{fp} -- refusing a contact whose keys do not "
+                             "match its id")
     _saved_peers(store_db)  # ensure the table exists
     # save name + fingerprint (like `add`); re-adding a name resets its keys
     _store_sql(store_db,
@@ -386,8 +383,68 @@ def cmd_import(args):
     if ik and sk:           # record the keys (like a checked `verify`)
         _store_sql(store_db, "UPDATE peers SET identity_key=?, signing_key=? "
                              "WHERE fingerprint=?", ik, sk, fp)
-    status = "verified" if (ik and sk) else "unverified"
-    print(f"imported contact '{name}' ({fp}) [{status}]", file=sys.stderr)
+    return name, fp, bool(ik and sk)
+
+
+def _import_inbox(store_db: Path):
+    """Read a `retalk receive` stream (NDJSON) on stdin, import every
+    contact record (`"kind":"contact"`), and pass every other line through to
+    stdout unchanged -- so `receive | import --inbox` adopts introductions while
+    chat messages keep flowing down the pipe. Refused cards are reported and
+    skipped; the rest still import."""
+    imported = refused = 0
+    for line in sys.stdin:
+        s = line.strip()
+        if not s:
+            print(line, end="", flush=True)
+            continue
+        try:
+            rec = json.loads(s)
+        except json.JSONDecodeError:
+            print(line, end="", flush=True)  # not JSON: pass through untouched
+            continue
+        if not (isinstance(rec, dict) and rec.get("kind") == "contact"):
+            print(line, end="", flush=True)  # a chat message or other record
+            continue
+        try:
+            name, fp, verified = _save_card(store_db, rec.get("card", {}), None)
+        except ValueError as e:
+            print(f"retalk: skipped a shared contact: {e}", file=sys.stderr)
+            refused += 1
+            continue
+        imported += 1
+        print(f"imported contact '{name}' ({fp}) "
+              f"[{'verified' if verified else 'unverified'}]", file=sys.stderr)
+    print(f"import --inbox: {imported} imported, {refused} refused",
+          file=sys.stderr)
+    if refused:
+        sys.exit(2)
+
+
+def cmd_import(args):
+    store_db = _resolve_store(args) / STORE_FILE
+    if args.inbox:
+        if args.card is not None:
+            _die("--inbox reads the receive stream from stdin; do not also pass "
+                 "a CARD argument")
+        if args.as_name:
+            _die("--as cannot be combined with --inbox: each shared contact "
+                 "keeps its own recommended nickname")
+        _import_inbox(store_db)
+        return
+    raw = args.card
+    if raw is None or raw == "-":
+        raw = sys.stdin.read()
+    try:
+        card = json.loads(raw)
+    except json.JSONDecodeError as e:
+        _die(f"card is not valid JSON: {e}")
+    try:
+        name, fp, verified = _save_card(store_db, card, args.as_name)
+    except ValueError as e:
+        _die(str(e))
+    print(f"imported contact '{name}' ({fp}) "
+          f"[{'verified' if verified else 'unverified'}]", file=sys.stderr)
 
 
 def cmd_block(args):
@@ -774,24 +831,37 @@ is saved as a peer under its recommended nickname, exactly as if you had run
 `retalk add` (and `retalk verify`, when the card carries keys).
 
 The card comes from the CARD argument, or from stdin when CARD is omitted or
-"-", so you can pipe: `retalk receive --all | jq -c .card | retalk import`. The
-nickname is the card's `name`, or `--as NAME` to choose your own (required when
-the card has no name). If the card includes keys, they must hash to its
-fingerprint -- otherwise import refuses with PIN MISMATCH and saves nothing; a
-card with no keys is saved as an unverified contact (verified on first contact).
+"-". The nickname is the card's `name`, or `--as NAME` to choose your own
+(required when the card has no name). If the card includes keys, they must hash
+to its fingerprint -- otherwise import refuses with PIN MISMATCH and saves
+nothing; a card with no keys is saved as an unverified contact (verified on
+first contact).
+
+With --inbox, import instead reads a whole `retalk receive` stream on stdin and
+imports every contact record (`"kind":"contact"`) in it, passing all other
+lines (your chat messages) straight through to stdout. So
+`retalk receive --all | retalk import --inbox` adopts the introductions people
+sent you while you still see your messages -- a refused card is reported and
+skipped, the rest still import. (--inbox takes no CARD and no --as; each
+shared contact keeps its own recommended nickname.)
 
 No passphrase and no server contact -- this only writes your local peers table.""",
         epilog="""\
 examples:
   retalk import '{"fingerprint":"f104...","name":"bob","identity_key":"..","signing_key":".."}'
-  retalk receive --all | jq -c '.card // empty' | retalk import   import shared cards
-  retalk import --as bobby '<card json>'     save it under a nickname of your own""")
+  retalk import --as bobby '<card json>'     save it under a nickname of your own
+  retalk receive --all | retalk import --inbox   import shared contacts, keep chat
+  retalk receive --all --follow | retalk import --inbox   auto-import as they arrive""")
     sp.add_argument("card", nargs="?",
                     help="the Contact card as a JSON string; omit or pass '-' "
-                         "to read it from stdin")
+                         "to read it from stdin. Not used with --inbox")
     sp.add_argument("--as", dest="as_name", metavar="NAME",
                     help="nickname to save the contact under "
                          "(default: the card's recommended name)")
+    sp.add_argument("--inbox", action="store_true",
+                    help="read a `retalk receive` NDJSON stream on stdin and "
+                         "import every contact record in it, passing other "
+                         "lines through to stdout")
     sp.set_defaults(fn=cmd_import)
 
     sp = sub.add_parser(
@@ -928,7 +998,7 @@ examples:
   retalk receive --all --follow        live tail of all senders + key upkeep
   retalk receive --all --peers-only    drop mail from senders you never added
   retalk receive --all | jq .text      pipe the JSON lines to jq
-  retalk receive --all | jq -c '.card // empty' | retalk import   save shared contacts
+  retalk receive --all | retalk import --inbox   save shared contacts, keep chat
 
 each line is a JSON message object (see docs/STANDARD.md): "id", "from",
 "name", "text" -- or a contact record with "kind":"contact" and "card".""")

@@ -106,7 +106,8 @@ present.
 `retalk import` saves the `card` as a local peer, re-checking any keys against
 the `fingerprint` (a card whose keys do not hash to it is refused, never
 trusted). The recipient is free to keep the recommended `name` or choose
-another (`import --as NAME`).
+another (`import --as NAME`). `retalk import --inbox` consumes a whole `receive`
+stream, importing these records and passing Message records through untouched.
 
 ### Share receipt
 
