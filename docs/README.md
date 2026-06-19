@@ -112,6 +112,8 @@ Drain the mailbox from cron:
 */5 * * * * RETALK_PASSPHRASE=... retalk receive --all >> ~/inbox.jsonl 2>/dev/null
 ```
 
+Note: `receive --all` is a full mailbox drain — it reads, acks, and deletes every sender's mail at once. Use it sparingly. For ongoing receipt a single long-lived `retalk receive --all --follow` (or `retalk receive --peer NAME` for one sender) is better than repeated `--all` polls; two concurrent `--all` readers split the mail between them.
+
 Retry unacknowledged sends from cron — useful for a mostly-listening client
 that rarely calls `send` (every `send` already resends; `receive` never does):
 
