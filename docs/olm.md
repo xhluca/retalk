@@ -79,7 +79,7 @@ The pool drains only when new sessions are created. That can happen when:
 The default publish uploads 100 one-time prekeys. The pool only shrinks, so
 clients need to refill it.
 
-`User.maintain()` calls `count_keys`. If fewer than `min_otks` keys remain
+`User.sync()` calls `count_keys`. If fewer than `min_otks` keys remain
 unclaimed, it generates and uploads a new batch.
 
 Defaults:
@@ -87,7 +87,9 @@ Defaults:
 - `min_otks=20`
 - `batch=100`
 
-`retalk receive --all --follow` runs `maintain()` every minute.
+`retalk receive --all --follow` runs this key upkeep — a `sync(resend=False)`
+pass — every minute. Resending unacknowledged messages is a separate step
+(`send` and the explicit `retalk sync` command do it; `receive` never does).
 
 Without replenishment, an empty pool would stop new sessions from starting.
 Existing sessions would still work.

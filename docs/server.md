@@ -32,6 +32,7 @@ guides below only show these in context.
 | `--max-mailbox-per-sender` | `RETALK_SERVER_MAX_MAILBOX_PER_SENDER` | `0` (unlimited) | max undelivered messages a single sender may hold in one recipient's mailbox; only applies when `--max-mailbox` is set |
 | `--admin-password` | `RETALK_SERVER_ADMIN_PASSWORD` | (unset) | password for the `/admin` API-key endpoint; unset disables `/admin`; see [Closing the relay](#closing-the-relay-api-keys) |
 | `--require-api-key` | `RETALK_SERVER_REQUIRE_API_KEY` | off | require a valid API key on every tool request (HTTP 401 otherwise); see [Closing the relay](#closing-the-relay-api-keys) |
+| `--max-refused` | `RETALK_SERVER_MAX_REFUSED` | `1000` | max negative-acks (refused message hashes) kept per recipient before the oldest are evicted; see [Refusing mail (negative acks)](#refusing-mail-negative-acks) |
 
 `--host`/`--port` are where the process *listens*; `--audience` is the public
 URL clients *reach it at*. They coincide locally, but behind a TLS proxy the
@@ -103,6 +104,13 @@ Rows are deleted as soon as `read_messages` delivers them to the recipient.
 `nonces` stores recent request nonces so copied requests cannot be replayed.
 Old entries are purged automatically.
 
+`refused` stores negative acks (see [Refusing mail](#refusing-mail-negative-acks)):
+
+- the recipient who refused,
+- the refused message's ciphertext hash,
+- the recipient's signature over that refusal (the proof handed to senders),
+- a timestamp (used to evict the oldest past the per-recipient cap).
+
 ## Mailbox cap
 
 By default a recipient's mailbox is unbounded, so an open relay can be filled
@@ -132,6 +140,39 @@ survives a dropped server, see *The server database is disposable*). So
 at-least-once delivery survives a "mailbox full" rejection: once the recipient
 polls and drains the mailbox, the held-back messages get through on the next
 flush.
+
+## Refusing mail (negative acks)
+
+Senders resend unacknowledged outbox mail, which is what makes delivery survive
+a dropped server. But a recipient who *refuses* a message (a blocked or, in
+peers-only mode, an unknown sender — both decided client-side) would otherwise
+see it re-uploaded on every resend. The `nack` tool lets the recipient stop
+that at the relay:
+
+1. On dropping a message, the recipient calls `nack` with the message's
+   ciphertext hash and a signature over `nack|<recipient>|<hash>`. No
+   decryption happens and no one-time key is spent.
+2. The relay verifies the signature and records `(recipient, hash, signature)`
+   in the `refused` table.
+3. On any later `send_message` to that recipient with the same ciphertext, the
+   relay does not store it; it returns `{"refused": true, "hash": ..., "sig":
+   ...}` with the recipient's signature.
+4. The sender verifies that signature against the recipient's signing key and
+   marks the message dropped in its outbox, so it stops resending — even a
+   sender that only ever `send`s and never `receive`s.
+
+This keeps the relay **untrusted**. It cannot forge a refusal: the proof is the
+recipient's own signature, and a sender that receives an unsigned or invalid
+one keeps the message live. A hostile relay could only *drop* messages, which
+it can always do. The cost is that the relay learns a message was refused (it
+stores the hash) — it still never sees plaintext, private keys, or the
+recipient's block list, which stays client-side.
+
+Because a recipient can record arbitrary hashes, the `refused` table is bounded
+per recipient by `--max-refused` (default 1000): once exceeded, the oldest
+entries are evicted. An evicted entry just means a very old refused message
+could be re-uploaded once more and re-dropped; it is never a correctness
+problem.
 
 ## Closing the relay (API keys)
 
@@ -222,10 +263,13 @@ The server sees metadata:
 - when messages are sent and received,
 - how often users communicate,
 - message sizes,
-- public key material.
+- public key material,
+- which message ciphertexts a recipient refused (the hashes in `refused`).
 
 This is an accepted leak in v1. End-to-end encryption protects message
-content, not the social graph.
+content, not the social graph. The refused hashes reveal *that* a recipient
+turned a message away, but not its content nor the recipient's block list
+(which never leaves the client).
 
 The server does not see:
 
@@ -264,7 +308,7 @@ While the README demo is running:
 
 ```sh
 sqlite3 server.db '.tables'
-# messages  nonces  otks  users
+# api_keys  messages  nonces  otks  refused  users
 
 sqlite3 server.db 'SELECT id, substr(identity_key,1,16) FROM users'
 # public keys only

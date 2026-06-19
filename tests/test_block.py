@@ -236,13 +236,19 @@ class TestBlockCLI(unittest.TestCase):
         self.cli("send", "--peer", aid, "first knock from carol", "--dir", c)
         out = self.cli("receive", "--peer", cid, "--peers-only", "--dir", a).stdout
         self.assertEqual(out, "", f"unknown carol surfaced in peers-only: {out!r}")
-        # add carol as a peer -> now peers-only delivers her too
+        # add carol as a peer -> peers-only now delivers her. Carol is a
+        # fire-and-forget sender (she only ever `send`s, never `receive`s), yet
+        # her earlier blocked/dropped messages are NOT resurrected: each was
+        # refused server-side (a signed negative ack), so the relay rejects the
+        # resends and carol marks them dropped from the rejection. Only her
+        # latest, accepted message arrives.
         self.cli("add", "carol", cid, "--dir", a)
         self.cli("send", "--peer", aid, "second knock from carol", "--dir", c)
         out = self.cli("receive", "--all", "--peers-only", "--dir", a).stdout
         texts = [json.loads(l)["text"] for l in out.splitlines()]
         self.assertEqual(texts, ["second knock from carol"], texts)
-        print("PASS: CLI block/unblock/blocked + --peers-only behave correctly")
+        print("PASS: CLI block/unblock/blocked + --peers-only; server-side nack "
+              "keeps a send-only sender's refused mail from resurrecting")
 
 
 if __name__ == "__main__":

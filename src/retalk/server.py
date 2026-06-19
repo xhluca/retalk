@@ -41,6 +41,9 @@ Config (a CLI flag overrides the matching env var):
   --require-api-key / RETALK_SERVER_REQUIRE_API_KEY  require a valid API key
                 (Authorization: Bearer <key>) on every tool request, else 401
                 (default off)
+  --max-refused / RETALK_SERVER_MAX_REFUSED  max negative-acks (refused message
+                hashes) kept per recipient before the oldest are evicted; bounds
+                the `refused` table (default 1000, 0 = unlimited)
 
 A "mailbox full" rejection is safe for delivery: the sender keeps
 unacknowledged messages in its local outbox and resends them later, so
@@ -88,6 +91,10 @@ MAX_MAILBOX = int(os.environ.get("RETALK_SERVER_MAX_MAILBOX", "0"))
 MAX_MAILBOX_PER_SENDER = int(
     os.environ.get("RETALK_SERVER_MAX_MAILBOX_PER_SENDER", "0"))
 RATE_WINDOW = 60  # seconds; the rate limit is "requests per this window"
+# Per-recipient cap on stored negative-acks (refused message hashes). A
+# recipient can record arbitrary hashes, so this is bounded by oldest-eviction
+# to stop the table growing without limit; 0 = unlimited (not recommended).
+MAX_REFUSED = int(os.environ.get("RETALK_SERVER_MAX_REFUSED", "1000"))
 # Optional relay access control (admission, NOT identity — see docs/auth.md):
 #   ADMIN_PASSWORD   unlocks the /admin API-key endpoint (HTTP Basic); empty
 #                    string disables /admin entirely (404).
@@ -128,6 +135,14 @@ CREATE TABLE IF NOT EXISTS api_keys(
     label TEXT,
     created REAL,
     disabled INT DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS refused(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    recipient TEXT,
+    hash TEXT,
+    sig TEXT,
+    ts REAL,
+    UNIQUE(recipient, hash)
 );
 """
 
@@ -302,6 +317,17 @@ def send_message(to: str, mtype: int, body: str, auth: dict) -> str:
             if not conn.execute("SELECT 1 FROM users WHERE id=?",
                                 (to,)).fetchone():
                 raise ValueError(f"unknown recipient: {to}")
+            # Negative-ack gate: if the recipient previously refused this exact
+            # ciphertext (see `nack`), do not store it again. Return the
+            # recipient's signed refusal so the sender can verify it (the relay
+            # cannot forge one) and mark the message dropped in its outbox,
+            # which stops resends even from a sender that never calls receive.
+            h = hashlib.sha256(body.encode()).hexdigest()
+            ref = conn.execute(
+                "SELECT sig FROM refused WHERE recipient=? AND hash=?",
+                (to, h)).fetchone()
+            if ref:
+                return json.dumps({"refused": True, "hash": h, "sig": ref[0]})
             # Reject-not-evict mailbox cap: count undelivered mail BEFORE
             # inserting and refuse if the recipient is at/over a limit, never
             # dropping existing mail. The sender keeps the message in its local
@@ -376,9 +402,46 @@ def read_messages(auth: dict, peer: str | None = None) -> str:
         conn.close()
 
 
+def nack(hash: str, sig: str, auth: dict) -> str:
+    """Record that the caller refuses any future message whose ciphertext
+    hashes to `hash` (a signed negative ack). `sig` is the caller's signature
+    over 'nack|<caller>|<hash>'; it is stored and later handed to the sender as
+    proof of refusal, so the relay can reject the refused message's resends
+    without being able to forge a refusal itself.
+
+    Bounded per recipient by MAX_REFUSED (oldest entries evicted), since a
+    caller may record arbitrary hashes."""
+    me = _caller("nack", {"hash": hash, "sig": sig}, auth)
+    if not (isinstance(hash, str) and len(hash) == 64
+            and all(c in "0123456789abcdef" for c in hash)):
+        raise ValueError("hash must be a 64-char sha256 hex digest")
+    try:  # verify the proof so we never store/relay a bogus one
+        v.Ed25519PublicKey.from_base64(auth["signing_key"]).verify_signature(
+            f"nack|{me}|{hash}".encode(), v.Ed25519Signature.from_base64(sig))
+    except Exception:
+        raise PermissionError("bad nack signature")
+    conn = _db()
+    try:
+        with conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO refused(recipient, hash, sig, ts) "
+                "VALUES(?,?,?,?)", (me, hash, sig, time.time()))
+            if MAX_REFUSED:
+                n = conn.execute("SELECT COUNT(*) FROM refused WHERE recipient=?",
+                                 (me,)).fetchone()[0]
+                if n > MAX_REFUSED:
+                    conn.execute(
+                        "DELETE FROM refused WHERE id IN (SELECT id FROM refused "
+                        "WHERE recipient=? ORDER BY id LIMIT ?)",
+                        (me, n - MAX_REFUSED))
+        return json.dumps({"ok": True})
+    finally:
+        conn.close()
+
+
 TOOLS = {fn.__name__: fn for fn in
          (publish_keys, count_keys, get_keys, claim_key,
-          send_message, read_messages)}
+          send_message, read_messages, nack)}
 
 
 # ---------- relay access control: API keys (admission only, not identity) ----
@@ -640,7 +703,7 @@ class _Handler(BaseHTTPRequestHandler):
 def main():
     global DB_PATH, HOST, PORT, AUDIENCE
     global MAX_MAILBOX, MAX_MAILBOX_PER_SENDER, MAX_BODY, RATE_LIMIT, TIMEOUT
-    global ADMIN_PASSWORD, REQUIRE_API_KEY
+    global ADMIN_PASSWORD, REQUIRE_API_KEY, MAX_REFUSED
     global _RATE_LIMITER
     import argparse
     ap = argparse.ArgumentParser(
@@ -661,7 +724,8 @@ def main():
                "env var (RETALK_SERVER_HOST, RETALK_SERVER_PORT, RETALK_SERVER_AUDIENCE, RETALK_SERVER_DB,\n"
                "RETALK_SERVER_MAX_BODY, RETALK_SERVER_RATE_LIMIT, RETALK_SERVER_TIMEOUT,\n"
                "RETALK_SERVER_MAX_MAILBOX, RETALK_SERVER_MAX_MAILBOX_PER_SENDER,\n"
-               "RETALK_SERVER_ADMIN_PASSWORD, RETALK_SERVER_REQUIRE_API_KEY).")
+               "RETALK_SERVER_ADMIN_PASSWORD, RETALK_SERVER_REQUIRE_API_KEY,\n"
+               "RETALK_SERVER_MAX_REFUSED).")
     ap.add_argument("--host", metavar="HOST",
                     help="interface to bind: 0.0.0.0 for every interface or "
                          "127.0.0.1 for this machine only (overrides "
@@ -707,6 +771,11 @@ def main():
                     help="require a valid API key (Authorization: Bearer "
                          "<key>) on every tool request; mint keys at /admin "
                          "(also via RETALK_SERVER_REQUIRE_API_KEY)")
+    ap.add_argument("--max-refused", metavar="N", type=int,
+                    help="max negative-acks (refused message hashes) kept per "
+                         "recipient before the oldest are evicted; bounds the "
+                         "refused table (overrides RETALK_SERVER_MAX_REFUSED; "
+                         "default 1000, 0 = unlimited)")
     args = ap.parse_args()
 
     if args.db:
@@ -734,6 +803,8 @@ def main():
         ADMIN_PASSWORD = args.admin_password
     if args.require_api_key:
         REQUIRE_API_KEY = True
+    if args.max_refused is not None:
+        MAX_REFUSED = args.max_refused
 
     _RATE_LIMITER = _RateLimiter(RATE_LIMIT)
     _Handler.timeout = TIMEOUT

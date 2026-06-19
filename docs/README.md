@@ -89,14 +89,16 @@ alice.send("<bob-user-id>", "hello")     # returns the message id
 for m in alice.receive():                # each m: {"id","from","name","text"}
     print(m["name"] or m["from"], m["text"])
 
-alice.maintain()                         # replenish one-time keys, rotate the
-                                         # fallback, resend unacked messages
+alice.sync()                             # reconcile keys (publish/replenish/
+                                         # rotate) + resend unacked messages
 ```
 
 `receive()` returns the same message objects the CLI prints — see
-[STANDARD.md](STANDARD.md). Call `maintain()` periodically to keep the
-server-side key pool healthy and to resend unacknowledged mail; the CLI's
-`retalk receive --all --follow` does this for you once a minute.
+[STANDARD.md](STANDARD.md). Call `sync()` periodically to keep your keys
+healthy on the relay and to resend unacknowledged mail (this is the `retalk
+sync` command). `send` resends too — it runs a full `sync` before handing
+over the new message — so the only thing that never resends is `receive`,
+which runs just the key-upkeep half.
 
 ## Scripting the CLI
 
@@ -108,6 +110,13 @@ Drain the mailbox from cron:
 
 ```cron
 */5 * * * * RETALK_PASSPHRASE=... retalk receive --all >> ~/inbox.jsonl 2>/dev/null
+```
+
+Retry unacknowledged sends from cron — useful for a mostly-listening client
+that rarely calls `send` (every `send` already resends; `receive` never does):
+
+```cron
+*/5 * * * * RETALK_PASSPHRASE=... retalk sync >/dev/null 2>&1
 ```
 
 Pipe messages into another tool:
@@ -147,6 +156,21 @@ server-side; the filtered messages just aren't surfaced or acknowledged.)
 Blocked senders are always dropped; `--peers-only` additionally drops anyone
 not in your saved peers. From the library, pass `blocked={...}`,
 `receive_policy="peers-only"`, and/or `known={...}` to `User`.
+
+When you drop a message this way, your client records a signed **negative ack**
+on the relay (keyed by the message's ciphertext hash, so no decryption and no
+one-time key is spent). The relay then refuses that ciphertext's resends and
+hands the sender your signature as proof; the sender verifies it and marks the
+message dropped in its outbox. This works even for a sender that only ever
+`send`s and never `receive`s — without it, an unacked dropped message would be
+re-uploaded on every send and re-delivered if you later accepted the sender.
+
+The relay cannot forge a refusal: the proof is signed by you, so a sender that
+gets an unsigned or invalid one keeps the message live (a hostile relay could
+only drop it, which it can always do). The trade is that the negative ack
+reveals to the sender that the message was refused, and the relay learns it too
+(it stores the refused hash, bounded by `--max-refused`); it never sees
+plaintext or your block list.
 
 ## Contributing
 

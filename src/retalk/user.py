@@ -96,9 +96,18 @@ class User:
     def _init_store(self):
         self._exec("CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT)")
         self._exec("CREATE TABLE IF NOT EXISTS sessions(peer TEXT PRIMARY KEY, blob TEXT)")
-        # sent-but-unacknowledged ciphertext, for re-delivery (server loss/migration)
+        # sent-but-unacknowledged ciphertext, for re-delivery (server loss/migration);
+        # `dropped` is set when a resend comes back refused (the recipient
+        # negative-acked it on the relay)
         self._exec("CREATE TABLE IF NOT EXISTS outbox("
-                   "id TEXT PRIMARY KEY, peer TEXT, mtype INT, body TEXT, ts REAL)")
+                   "id TEXT PRIMARY KEY, peer TEXT, mtype INT, body TEXT, "
+                   "ts REAL, dropped INT DEFAULT 0)")
+        if "dropped" not in [r[1] for r in
+                             self._fetchall("PRAGMA table_info(outbox)")]:
+            try:  # migrate stores created before the dropped column
+                self._exec("ALTER TABLE outbox ADD COLUMN dropped INT DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass
         # hash of every processed ciphertext -> its message id, to re-ack duplicates
         self._exec("CREATE TABLE IF NOT EXISTS processed(hash TEXT PRIMARY KEY, msg_id TEXT)")
 
@@ -260,32 +269,48 @@ class User:
             self._meta_set("fallback_ts", str(time.time()))
         self._save_account(acct)
 
-    def maintain(self, min_otks: int = 20, batch: int = 100,
-                       fallback_max_age: float = 86400.0,
-                       resend_after: float = 120.0) -> dict:
-        """Keep server-side key material healthy. Call periodically.
+    def sync(self, *, publish: bool = True, replenish: bool = True,
+             rotate: bool = True, resend: bool = True,
+             min_otks: int = 20, batch: int = 100,
+             fallback_max_age: float = 86400.0,
+             resend_after: float = 0.0) -> dict:
+        """One reconciliation pass over a single `count_keys` round-trip. Each
+        flag turns its step off, so every caller shares this one routine:
 
-        Replenishes one-time keys when the server's unclaimed stash drops
-        below min_otks, rotates the fallback key when it is older than
-        fallback_max_age seconds (default: daily) or missing server-side,
-        and re-sends outbox messages unacknowledged for resend_after seconds.
+          publish   — (re)publish identity+signing keys (plus a key batch) when
+                      the relay has forgotten us, so we stay reachable and our
+                      messages stay verifiable.
+          replenish — upload a fresh batch of one-time keys when the unclaimed
+                      stash is low.
+          rotate    — rotate the reusable fallback key once it is stale.
+          resend    — re-upload unacknowledged outbox messages (loss recovery).
+
+        `send` and `sync` resend; `receive` passes resend=False (reading never
+        resends — retries belong to send and to an explicit sync). The default
+        resend_after=0 re-sends everything still unacknowledged.
         """
         with self._locked():
             counts = self._call("count_keys")
-            need_otks = counts["unclaimed"] < min_otks
+            forgotten = not counts["has_fallback"]
             ts = self._meta_get("fallback_ts")
-            need_rotate = (
-                not counts["has_fallback"]
-                or ts is None
-                or time.time() - float(ts) > fallback_max_age
-            )
+            stale = ts is None or time.time() - float(ts) > fallback_max_age
+            need_otks = replenish and counts["unclaimed"] < min_otks
+            need_rotate = (rotate and stale) or (publish and forgotten)
             if need_otks or need_rotate:
                 self._publish(batch if need_otks else 0, need_rotate)
-            resent = self._flush_outbox(resend_after)
-            return {"unclaimed": counts["unclaimed"],
-                    "replenished": need_otks,
-                    "fallback_rotated": need_rotate,
+            resent = self._flush_outbox(resend_after) if resend else 0
+            return {"unclaimed": counts["unclaimed"], "republished": forgotten,
+                    "replenished": need_otks, "fallback_rotated": need_rotate,
                     "resent": resent}
+
+    def maintain(self, min_otks: int = 20, batch: int = 100,
+                 fallback_max_age: float = 86400.0,
+                 resend_after: float = 120.0) -> dict:
+        """Backward-compatible periodic upkeep: a full `sync()` pass. Prefer
+        calling `sync()` directly for finer control (e.g. resend=False)."""
+        return self.sync(min_otks=min_otks, batch=batch,
+                         fallback_max_age=fallback_max_age,
+                         resend_after=resend_after)
 
     def send(self, to: str, text: str) -> str:
         """Encrypt and send a message to a peer user ID. The ciphertext is
@@ -330,12 +355,55 @@ class User:
 
     def _flush_outbox(self, older_than: float) -> int:
         rows = self._fetchall(
-            "SELECT peer, mtype, body FROM outbox WHERE ts<=?",
+            "SELECT id, peer, mtype, body FROM outbox WHERE ts<=? AND dropped=0",
             time.time() - older_than)
-        for peer, mtype, body in rows:
-            self._call("send_message",
+        sent = 0
+        for oid, peer, mtype, body in rows:
+            res = self._call("send_message",
                              {"to": peer, "mtype": mtype, "body": body})
-        return len(rows)
+            if isinstance(res, dict) and res.get("refused"):
+                # the recipient negative-acked this exact ciphertext on the
+                # relay; verify their signature (don't take the relay's word)
+                # before marking it dropped so we stop resending it
+                if self._verify_nack(peer, body, res.get("sig")):
+                    self._exec("UPDATE outbox SET dropped=1 WHERE id=?", oid)
+                continue
+            sent += 1
+        return sent
+
+    def _send_nack(self, ciphertext_hash: str):
+        """Record on the relay that we refuse the message whose ciphertext
+        hashes to `ciphertext_hash` — a signed negative ack. Keyed by the hash,
+        so it needs no session and no decryption of the refused message. The
+        relay then rejects that ciphertext's resends and hands our signature to
+        the sender as proof, so even a sender that never calls receive stops
+        resending it. Best-effort."""
+        acct = self._load_account()
+        sig = acct.sign(
+            f"nack|{self.fingerprint()}|{ciphertext_hash}".encode()).to_base64()
+        try:
+            self._call("nack", {"hash": ciphertext_hash, "sig": sig})
+        except Exception:
+            pass  # relay unreachable / rate-limited: a later receive re-nacks
+
+    def _verify_nack(self, peer: str, body: str, sig: str | None) -> bool:
+        """Verify a refusal the relay returned for our `body` sent to `peer`:
+        the signature must be `peer`'s over 'nack|<peer>|<hash>'. Returns True
+        only on a valid signature, so a hostile relay cannot forge a refusal to
+        make us abandon a message (it could only drop it, which it always can)."""
+        if not sig:
+            return False
+        h = hashlib.sha256(body.encode()).hexdigest()
+        try:
+            keys = self._call("get_keys", {"peer": peer})
+            self._verify_identity(peer, keys["identity_key"],
+                                  keys["signing_key"])
+            v.Ed25519PublicKey.from_base64(keys["signing_key"]).verify_signature(
+                f"nack|{peer}|{h}".encode(),
+                v.Ed25519Signature.from_base64(sig))
+            return True
+        except Exception:
+            return False
 
     def receive(self, peer: str | None = None) -> list[dict]:
         """Fetch and decrypt pending messages, acknowledging each to its
@@ -350,15 +418,20 @@ class User:
                      else self._call("read_messages"))
             for m in inbox:
                 sender = m["from"]
+                body_hash = hashlib.sha256(m["body"].encode()).hexdigest()
                 # Drop blocked or (in peers-only mode) unknown senders BEFORE
                 # any decryption or session work, so a hostile/unknown sender
                 # can never make us consume a one-time key with a pre-key
-                # message. The mail stays on the server, unacked.
-                if sender in self.blocked:
+                # message. Record a signed negative-ack on the relay (keyed by
+                # the ciphertext hash, no decryption) so the sender's resends
+                # are refused at the relay even if it never calls receive.
+                if sender in self.blocked or (
+                        self.receive_policy == "peers-only"
+                        and sender not in self.known):
+                    self._send_nack(body_hash)
                     continue
-                if self.receive_policy == "peers-only" and sender not in self.known:
-                    continue
-                body_hash = hashlib.sha256(m["body"].encode()).hexdigest()
+                if m["mtype"] not in (0, 1):
+                    continue  # not an Olm message (stray/obsolete type) — ignore
                 anymsg = v.AnyOlmMessage.from_parts(m["mtype"], base64.b64decode(m["body"]))
                 try:
                     if m["mtype"] == 0:
