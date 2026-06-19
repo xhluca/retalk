@@ -525,6 +525,21 @@ def cmd_import(args):
 def cmd_block(args):
     d = _resolve_store(args)
     store_db = d / STORE_FILE
+    if args.list:
+        if args.peer is not None:
+            _die("give a peer to block, or --list to show the block list, "
+                 "not both")
+        names = {fp: name for name, (fp, _ik, _sk)
+                 in _saved_peers(store_db).items()}
+        for fp in sorted(_blocked_set(store_db)):
+            if args.json:
+                print(json.dumps({"fingerprint": fp, "name": names.get(fp, "")}))
+            else:
+                name = names.get(fp)
+                print(f"{fp}\t{name}" if name else fp)
+        return
+    if args.peer is None:
+        _die("block needs a peer to block, or --list to show the block list")
     fp = _peer_to_id(args.peer, store_db)
     _blocked_set(store_db)  # ensure the table exists
     _store_sql(store_db, "INSERT OR IGNORE INTO blocked(fingerprint) VALUES(?)", fp)
@@ -538,18 +553,6 @@ def cmd_unblock(args):
     _blocked_set(store_db)  # ensure the table exists
     _store_sql(store_db, "DELETE FROM blocked WHERE fingerprint=?", fp)
     print(f"unblocked {args.peer} ({fp})", file=sys.stderr)
-
-
-def cmd_blocked(args):
-    d = _resolve_store(args)
-    store_db = d / STORE_FILE
-    names = {fp: name for name, (fp, _ik, _sk) in _saved_peers(store_db).items()}
-    for fp in sorted(_blocked_set(store_db)):
-        if args.json:
-            print(json.dumps({"fingerprint": fp, "name": names.get(fp, "")}))
-        else:
-            name = names.get(fp)
-            print(f"{fp}\t{name}" if name else fp)
 
 
 def cmd_send(args):
@@ -709,7 +712,7 @@ quickstart:
 
 run `retalk <command> --help` for the full story of each command.""")
     sub = p.add_subparsers(dest="command", required=True,
-                           metavar="{init,id,add,contacts,show,share,import,verify,block,unblock,blocked,send,receive,history}")
+                           metavar="{init,id,add,contacts,show,share,import,verify,block,unblock,send,receive,history}")
 
     sp = sub.add_parser(
         "init", parents=[common], formatter_class=raw,
@@ -975,7 +978,7 @@ examples:
 
     sp = sub.add_parser(
         "block", parents=[common], formatter_class=raw,
-        help="silently drop a sender's incoming messages",
+        help="silently drop a sender's incoming messages (or --list them)",
         description="""\
 Block a sender: their incoming messages are dropped during `receive` before
 any decryption happens, so a blocked sender can never even consume one of your
@@ -983,13 +986,22 @@ one-time keys. The block is local to this identity's store and is never sent to
 the server or the peer; their mail simply stays on the server, unread.
 
 Name the sender by a saved peer name (from `retalk add`) or a raw 32-hex user
-id. Unblock later with `retalk unblock`; list current blocks with
-`retalk blocked`.""",
+id. Pass --list (instead of a peer) to print the current block list, one per
+line with the saved peer name if any; --json emits one object per line. Unblock
+later with `retalk unblock`.""",
         epilog="""\
 examples:
   retalk block bob                              block a saved peer
-  retalk block f1041c25c87351d8550b31cc6b13ab04   block by raw id""")
-    sp.add_argument("peer", help="saved peer name or 32-hex user id to block")
+  retalk block f1041c25c87351d8550b31cc6b13ab04   block by raw id
+  retalk block --list                           show the block list
+  retalk block --list --json     one {"fingerprint","name"} object per line""")
+    sp.add_argument("peer", nargs="?",
+                    help="saved peer name or 32-hex user id to block; omit "
+                         "with --list")
+    sp.add_argument("--list", action="store_true",
+                    help="list blocked senders instead of blocking one")
+    sp.add_argument("--json", action="store_true",
+                    help="with --list: emit one JSON object per blocked sender")
     sp.set_defaults(fn=cmd_block)
 
     sp = sub.add_parser(
@@ -998,27 +1010,14 @@ examples:
         description="""\
 Remove a sender from the block list, so `receive` delivers their messages
 again. Name them by a saved peer name or a raw 32-hex user id. Unblocking
-someone who is not blocked is a no-op.""",
+someone who is not blocked is a no-op. List current blocks with
+`retalk block --list`.""",
         epilog="""\
 examples:
   retalk unblock bob
   retalk unblock f1041c25c87351d8550b31cc6b13ab04""")
     sp.add_argument("peer", help="saved peer name or 32-hex user id to unblock")
     sp.set_defaults(fn=cmd_unblock)
-
-    sp = sub.add_parser(
-        "blocked", parents=[common], formatter_class=raw,
-        help="list blocked senders",
-        description="""\
-List the fingerprints currently blocked for this identity, one per line
-(with the saved peer name, if any). No server contact.""",
-        epilog="""\
-examples:
-  retalk blocked
-  retalk blocked --json     one {"fingerprint","name"} object per line""")
-    sp.add_argument("--json", action="store_true",
-                    help="emit one JSON object per blocked sender")
-    sp.set_defaults(fn=cmd_blocked)
 
     sp = sub.add_parser(
         "sync", parents=[common], formatter_class=raw,

@@ -222,14 +222,14 @@ retalk receive --all --save-messages   # also keep a sealed local copy
 retalk history                     # replay saved messages (needs --save-messages)
 retalk block eve                   # drop a sender's mail before decryption
 retalk unblock eve                 # stop dropping that sender
-retalk blocked                     # list blocked senders
+retalk block --list                # list blocked senders
 retalk receive --all --peers-only  # accept only saved peers (drop strangers)
 ```
 
 Use `receive --all` deliberately, not as a routine poll: it drains and acknowledges *every* sender's mail at once and deletes it from the relay. For ongoing receipt prefer a single long-lived `retalk receive --all --follow` (one reader that owns the drain), or `retalk receive --peer NAME` for one sender. Two concurrent `receive --all` readers split the mail between them, so don't run a bare `--all` while a `--follow` reader is going.
 
-`block`/`unblock`/`blocked` and `--peers-only` are local filters that drop a
-sender during `receive` *before* any decryption, so a blocked or unknown
+`block`/`unblock`/`block --list` and `--peers-only` are local filters that drop
+a sender during `receive` *before* any decryption, so a blocked or unknown
 sender can never make you consume a one-time key. Nothing is sent to the
 server or the peer.
 
