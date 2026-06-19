@@ -38,8 +38,9 @@ the repo is pushed there.
 Name it `tests/test_<topic>.py` with a `unittest.TestCase` (or plain
 `TestCase`), and both discovery and CI pick it up automatically. Conventions:
 keep all state in a `tempfile.TemporaryDirectory()`, and if it starts servers,
-give them ports not used by other test files (test_e2ee.py uses
-**8767-8768**). Files run sequentially today, but unique ports keep parallel
+give them ports not used by other test files (in use so far: test_e2ee.py
+**8767-8768**, test_cli.py **8769**, test_contacts.py **8772**, test_share.py
+**8773**). Files run sequentially today, but unique ports keep parallel
 running possible. Note that `test_e2ee.py` wraps its 14 criteria in a
 *single* test method on purpose: they're one ordered, stateful scenario, not
 14 independent tests.

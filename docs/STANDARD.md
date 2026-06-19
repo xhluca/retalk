@@ -40,6 +40,10 @@ by `User.receive()` (one dict per message).
 There is no timestamp field: message timing is metadata the relay sees, not
 part of the authenticated message, so it is deliberately not surfaced here.
 
+`receive` also emits [shared-contact](#shared-contact) records (`retalk share`)
+in the same stream; a consumer that only wants chat messages keeps the records
+with a `text` field and ignores those with `"kind": "contact"`.
+
 ### Send receipt
 
 Emitted by `retalk send` -- exactly one object -- and returned by `User.send()`
@@ -57,7 +61,10 @@ as the `id` string.
 ### Contact
 
 Emitted by `retalk contacts --json` -- one object per saved peer (created with
-`retalk add`), sorted by name.
+`retalk add`), sorted by name. The same object is the **contact card** that
+`retalk show` prints, `retalk share` sends (inside a shared-contact record,
+below), and `retalk import` ingests -- so a contact can be copied between
+identities verbatim.
 
 | field          | type    | description |
 |----------------|---------|-------------|
@@ -75,6 +82,46 @@ An unverified contact (added but not yet verified) has empty `identity_key` and
 `signing_key` and `"verified": false`. Messaging still works -- the keys are
 fetched and checked against the fingerprint on the fly; `retalk verify` just
 makes that explicit and records the result.
+
+### Shared contact
+
+Emitted by `retalk receive` -- and returned by `User.receive()` -- when a peer
+sends you a contact with `retalk share`, in place of a Message. It carries the
+distinguishing field `"kind": "contact"`; a chat message has no `kind` and a
+`text` field instead, so the two are told apart by which of `text`/`card` is
+present.
+
+| field  | type   | description |
+|--------|--------|-------------|
+| `id`   | string | the message id (as for a Message). |
+| `from` | string | the sender's user id -- the peer who shared the contact, not the contact being shared. |
+| `name` | string | display label for the **sender** (as for a Message): your saved name for them, else their `~`-prefixed self-chosen name, else `""`. |
+| `kind` | string | always `"contact"`. |
+| `card` | object | the shared contact as a [Contact](#contact) object: the introduced user's `fingerprint`, recommended `name` (nickname), and `identity_key`/`signing_key` (`""` when the sharer had not verified them). |
+
+```json
+{"id":"7d1f...c0","from":"38b151a1...","name":"alice","kind":"contact","card":{"name":"bob","fingerprint":"1041c25c...","identity_key":"vGY3...=","signing_key":"Kcx2...=","verified":true}}
+```
+
+`retalk import` saves the `card` as a local peer, re-checking any keys against
+the `fingerprint` (a card whose keys do not hash to it is refused, never
+trusted). The recipient is free to keep the recommended `name` or choose
+another (`import --as NAME`).
+
+### Share receipt
+
+Emitted by `retalk share` -- exactly one object -- and returned by
+`User.share()` as the `id` string.
+
+| field    | type   | description |
+|----------|--------|-------------|
+| `id`     | string | the id of the share message just sent; matches the `id` the recipient sees. |
+| `to`     | string | the recipient's user id (who you introduced the contact *to*). |
+| `shared` | string | the shared contact's user id (who you introduced). |
+
+```json
+{"id":"7d1f...c0","to":"38b151a1...","shared":"1041c25c..."}
+```
 
 ## Notes for consumers
 

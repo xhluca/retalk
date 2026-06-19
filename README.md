@@ -209,6 +209,9 @@ retalk id                          # print my user ID
 retalk add bob <bob-user-id>       # save a peer (name + fingerprint)
 retalk verify bob                  # fetch & record "bob"'s keys (optional)
 retalk contacts                    # list saved peers and verified status
+retalk show bob                    # print "bob" as a shareable Contact card (JSON)
+retalk share --peer carol bob      # send "bob"'s card to "carol" (an introduction)
+retalk import '<card json>'        # save a contact someone shared with you
 retalk send --peer bob "hello"     # send one encrypted message
 retalk receive --all               # read every sender (one JSON line each)
 retalk receive --peer bob          # read only messages from "bob"
@@ -225,6 +228,38 @@ Use `receive --all` deliberately, not as a routine poll: it drains and acknowled
 sender during `receive` *before* any decryption, so a blocked or unknown
 sender can never make you consume a one-time key. Nothing is sent to the
 server or the peer.
+
+### Sharing contacts
+
+Once you have saved a peer, you can introduce it to someone else — pass along
+its user ID together with a **recommended nickname** — instead of making them
+copy a fingerprint by hand.
+
+```sh
+retalk show bob                      # print "bob" as a Contact card (one JSON line)
+retalk share --peer carol bob        # send that card to "carol" over the relay
+retalk share --peer carol bob --as bobby   # recommend a different nickname
+```
+
+`show` prints the contact as a JSON **card** — its fingerprint, the recommended
+nickname, and (if you have verified it) its keys. `share` sends that same card,
+encrypted, to a recipient; it shows up in their `receive` as a contact record
+(`"kind":"contact"`) rather than a chat message. They save it with `import`,
+keeping your recommended nickname or choosing their own:
+
+```sh
+retalk receive --all | jq -c '.card // empty' | retalk import   # import shared cards
+retalk import '<card json>'          # or import one card directly
+retalk import --as bobby '<card>'    # save it under a nickname of your own
+```
+
+A card is **not a secret**: the keys are public and the fingerprint pins them,
+so it is safe to share in the clear — over retalk, chat, or email. `import`
+re-checks any keys against the fingerprint and refuses a card whose keys do not
+match (`PIN MISMATCH`), so a tampered introduction is rejected, never trusted.
+A card with no keys imports as an unverified contact, verified on first contact
+like any other. `show` + `import` also copy a contact between two of your own
+identities without going through the relay at all.
 
 ### Selecting the user
 
