@@ -96,8 +96,9 @@ alice.sync()                             # reconcile keys (publish/replenish/
 `receive()` returns the same message objects the CLI prints — see
 [STANDARD.md](STANDARD.md). Call `sync()` periodically to keep your keys
 healthy on the relay and to resend unacknowledged mail (this is the `retalk
-sync` command). `send` and `receive` already run the key-upkeep half of it;
-only `sync` resends.
+sync` command). `send` resends too — it runs a full `sync` before handing
+over the new message — so the only thing that never resends is `receive`,
+which runs just the key-upkeep half.
 
 ## Scripting the CLI
 
@@ -111,8 +112,8 @@ Drain the mailbox from cron:
 */5 * * * * RETALK_PASSPHRASE=... retalk receive --all >> ~/inbox.jsonl 2>/dev/null
 ```
 
-Retry unacknowledged sends from cron (one-shot `send`/`receive` don't resend —
-only `sync` does):
+Retry unacknowledged sends from cron — useful for a mostly-listening client
+that rarely calls `send` (every `send` already resends; `receive` never does):
 
 ```cron
 */5 * * * * RETALK_PASSPHRASE=... retalk sync >/dev/null 2>&1
@@ -162,6 +163,12 @@ no one-time key is spent). The sender marks that outbox entry as refused and
 stops resending it — without it, an unacked dropped message would linger in
 their outbox and be re-delivered if you later unblocked them. Note this does
 reveal to the sender that the message was refused.
+
+A sender only acts on the negative ack when it next runs `receive` (that is
+where the inbox, including NACKs, is processed). A fire-and-forget sender that
+only ever calls `send` never sees it, so each `send` keeps re-uploading the
+refused message; if you later accept that sender, its whole backlog is
+delivered at once. This is the accepted trade for `send` resending the outbox.
 
 ## Contributing
 

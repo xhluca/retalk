@@ -1,8 +1,8 @@
 """Unified sync semantics (src/retalk/user.py `sync()` + CLI wiring).
 
 Asserts the design we settled on:
-  - `receive` and `send` reconcile keys but NEVER resend the outbox
-    (`sync(resend=False)`); only an explicit `sync` (or `maintain`) resends.
+  - `receive` reconciles keys but NEVER resends the outbox
+    (`sync(resend=False)`); `send` and an explicit `sync` both resend.
   - `sync` re-publishes keys when the relay has forgotten the user.
 
 Uses ports 8796 (library) / 8797 (CLI); see tests/README.md.
@@ -159,7 +159,7 @@ class TestSyncCLI(unittest.TestCase):
         self.assertEqual(res.returncode, expect, f"{cmd}: {res.stderr}")
         return res
 
-    def test_send_and_receive_never_resend_only_sync(self):
+    def test_receive_never_resends_but_send_and_sync_do(self):
         with tempfile.TemporaryDirectory() as tmp:
             self.tmp = tmp
             db = os.path.join(tmp, "server.db")
@@ -182,13 +182,17 @@ class TestSyncCLI(unittest.TestCase):
                 self.cli("receive", "--all", "--dir", a)
                 self.assertEqual(mailbox(db, bid), 0, "receive resent the outbox")
 
-                # alice sending m2 must upload only m2, not also resend m1
+                # alice sending m2 also resends the still-unacked m1
+                # (send runs a full sync first), recovering the lost message
                 self.cli("send", "--peer", "bob", "m2", "--dir", a)
-                self.assertEqual(mailbox(db, bid), 1, "send resent the outbox")
+                self.assertEqual(mailbox(db, bid), 2,
+                                 "send did not resend the unacked outbox")
 
-                # explicit sync recovers the lost m1
+                # an explicit sync resends both again (the relay has no dedup;
+                # the recipient de-duplicates by id on receive)
+                sql(db, "DELETE FROM messages")
                 self.cli("sync", "--dir", a)
-                self.assertGreaterEqual(mailbox(db, bid), 2, "sync did not resend")
+                self.assertEqual(mailbox(db, bid), 2, "sync did not resend")
 
                 # bob ends up with both, de-duplicated
                 out = self.cli("receive", "--all", "--dir", b).stdout

@@ -330,7 +330,7 @@ def cmd_send(args):
     u = _open_user(args)
     to = _peer_to_id(args.peer, _resolve_store(args) / STORE_FILE)
 
-    u.sync(resend=False)           # reachable + fresh keys; retries are `retalk sync`'s job
+    u.sync()                       # keys + resend the unacked outbox along with this one
     mid = u.send(to, args.text)
     print(json.dumps({"id": mid, "to": to}))
     print(f"sent to {args.peer}", file=sys.stderr)
@@ -685,10 +685,10 @@ encrypting an impostor key.
 
 Delivery is tracked: the message stays in your local outbox until the
 peer's client acknowledges decrypting it (acks arrive during your next
-`receive`). Unacknowledged messages are re-sent automatically by
-`receive --follow`, so nothing is lost if the server dies or is swapped.
-On first contact with a server your public keys are published
-automatically.
+`receive`). Each `send` also re-uploads any still-unacknowledged outbox
+mail (and `retalk sync` does the same), so nothing is lost if the server
+dies or is swapped; a recipient who already has a copy just re-acks it. On
+first contact with a server your public keys are published automatically.
 
 Prints a JSON receipt on stdout -- {"id", "to"} (see docs/STANDARD.md); the
 id matches the one the recipient will see.""",
@@ -718,9 +718,9 @@ leaves everyone else's mail in the mailbox for a later receive.
 
 Without --follow: drain the mailbox once and exit (good for cron and
 scripts). With --follow: poll every 2 seconds until interrupted, and once
-a minute run key maintenance — replenish one-time keys on the server,
-rotate the fallback key daily, and re-send any of your own messages that
-have gone unacknowledged for 2 minutes.
+a minute run key maintenance — replenish one-time keys on the server and
+rotate the fallback key daily. Reading never resends your outbox; `send`
+and `retalk sync` do that.
 
 Messages the server already handed over are never served again, so pipe
 --json output somewhere durable if you need a log.
