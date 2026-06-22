@@ -237,7 +237,7 @@ def _peer_to_id(peer: str, store_db: Path) -> str:
 
 def _build_card(store_db: Path, contact: str, as_name: str | None) -> dict:
     """Build a Contact card (see docs/STANDARD.md) for `contact` -- a saved
-    peer name or a raw 32-hex fingerprint -- to `show` or `share`.
+    peer name or a raw 32-hex fingerprint -- for `contacts --show` or `share`.
 
     The recommended nickname is `as_name` if given, else the saved peer name,
     else "". The identity_key/signing_key are filled in only when the contact
@@ -332,6 +332,17 @@ def cmd_add(args):
 def cmd_contacts(args):
     d = _resolve_store(args)
     store_db = d / STORE_FILE
+    # --show NAME-OR-ID: just that one contact. As a Contact card with --json
+    # (the shareable form `share` sends and `import` ingests), else a single
+    # status row. --as relabels the card's recommended nickname.
+    if args.show is not None:
+        card = _build_card(store_db, args.show, args.as_name)
+        if args.json:
+            print(json.dumps(card))
+        else:
+            status = "verified" if card["verified"] else "unverified"
+            print(f"{card['name']}\t{card['fingerprint']}\t{status}")
+        return
     for name, (fp, ik, sk) in sorted(_saved_peers(store_db).items()):
         verified = bool(ik and sk)
         if args.json:
@@ -384,12 +395,6 @@ def cmd_verify(args):
     print(f"verified {name} ({fp}) from {source}", file=sys.stderr)
 
 
-def cmd_show(args):
-    d = _resolve_store(args)
-    card = _build_card(d / STORE_FILE, args.contact, args.as_name)
-    print(json.dumps(card))
-
-
 def cmd_share(args):
     store_db = _resolve_store(args) / STORE_FILE
     card = _build_card(store_db, args.contact, args.as_name)
@@ -410,7 +415,8 @@ def _save_card(store_db: Path, card: dict, as_name: str | None) -> tuple:
     verified). Raises ValueError(message) on a bad card -- callers decide
     whether that aborts (single import) or just skips one (--inbox)."""
     if not isinstance(card, dict):
-        raise ValueError("card must be a JSON object (see `retalk show`)")
+        raise ValueError("card must be a JSON object "
+                         "(see `retalk contacts --show`)")
     fp = card.get("fingerprint", "")
     if not ID_RE.match(fp):
         raise ValueError("card has no valid fingerprint (expected 32 hex "
@@ -712,7 +718,7 @@ quickstart:
 
 run `retalk <command> --help` for the full story of each command.""")
     sub = p.add_subparsers(dest="command", required=True,
-                           metavar="{init,id,add,contacts,show,share,import,verify,block,unblock,send,receive,history}")
+                           metavar="{init,id,add,contacts,share,import,verify,block,unblock,send,receive,history}")
 
     sp = sub.add_parser(
         "init", parents=[common], formatter_class=raw,
@@ -834,7 +840,7 @@ examples:
 
     sp = sub.add_parser(
         "contacts", parents=[common], formatter_class=raw,
-        help="list saved peers (your contacts)",
+        help="list saved peers, or --show one as a Contact card",
         description="""\
 List the peers you have saved with `retalk add`, one per line as
 NAME<tab>FINGERPRINT<tab>STATUS (verified or unverified), sorted by name. These
@@ -846,59 +852,47 @@ each line is a Contact object (see docs/STANDARD.md): {"name", "fingerprint",
 "identity_key", "signing_key", "verified"}, where the key fields are "" until
 the peer is verified.
 
+Pass --show NAME-OR-ID to print just one contact instead of the whole list:
+its status row by default, or -- with --json -- its full Contact card, the
+shareable form `retalk share` sends over the relay and `retalk import` ingests.
+You can hand that card over any out-of-band channel (paste it, pipe it) and have
+the other side import it. --show also accepts a raw 32-hex user id you have not
+saved, emitting a minimal (unverified) card; --as relabels the recommended
+nickname the recipient sees.
+
 No passphrase and no server contact -- this only reads your local peers
 table. Prints nothing when you have saved no peers.""",
         epilog="""\
 examples:
-  retalk contacts                list saved peers as NAME<tab>FINGERPRINT<tab>STATUS
-  retalk contacts --json         one Contact object (see docs/STANDARD.md) per line
-  retalk contacts --json | jq .  pretty-print every contact""")
+  retalk contacts                  list saved peers as NAME<tab>FINGERPRINT<tab>STATUS
+  retalk contacts --json           one Contact object (see docs/STANDARD.md) per line
+  retalk contacts --json | jq .    pretty-print every contact
+  retalk contacts --show bob       bob's status row (name, id, verified?)
+  retalk contacts --show bob --json          bob's full Contact card, one JSON line
+  retalk contacts --show bob --json --as bobby   recommend the nickname 'bobby'
+  retalk contacts --show bob --json | retalk import --dir ./carol   copy bob over""")
     sp.add_argument("--json", action="store_true",
-                    help="emit one Contact object per saved peer (see "
-                         "docs/STANDARD.md): name, fingerprint, identity_key, "
-                         "signing_key, verified")
-    sp.set_defaults(fn=cmd_contacts)
-
-    sp = sub.add_parser(
-        "show", parents=[common], formatter_class=raw,
-        help="print one saved peer as a shareable Contact card (JSON)",
-        description="""\
-Print one contact as a Contact card (JSON, see docs/STANDARD.md) on stdout:
-{"fingerprint", "name", "identity_key", "signing_key", "verified"}. This is the
-shareable form of a saved peer -- the same object `retalk share` sends over the
-relay and `retalk import` ingests, so you can also hand it over any out-of-band
-channel (paste it, pipe it) and have the other side import it.
-
-Name the contact by a saved peer name (from `retalk add`) or a raw 32-hex user
-id. The card's `name` is the recommended nickname the recipient sees: the saved
-peer name, or whatever you pass with `--as`. The identity_key/signing_key are
-included only when the contact is verified (`retalk verify`); otherwise they are
-"" and the card is unverified -- the recipient verifies it on first contact, as
-usual. The keys are not secret, and the fingerprint pins them, so a card is safe
-to share in the clear.
-
-No passphrase and no server contact -- this only reads your local peers table.""",
-        epilog="""\
-examples:
-  retalk show bob                  bob's Contact card as one JSON line
-  retalk show bob --as bobby       recommend the nickname 'bobby' instead
-  retalk show bob | retalk import --dir ./carol   copy bob to another identity""")
-    sp.add_argument("contact",
-                    help="a saved peer name (from `retalk add`) or a 32-hex "
-                         "user id to emit as a Contact card")
+                    help="emit Contact objects (see docs/STANDARD.md: name, "
+                         "fingerprint, identity_key, signing_key, verified) "
+                         "instead of status rows; with --show, the full card")
+    sp.add_argument("--show", metavar="CONTACT",
+                    help="print just this contact (a saved peer name or a "
+                         "32-hex user id) instead of the whole list; add --json "
+                         "for its shareable Contact card")
     sp.add_argument("--as", dest="as_name", metavar="NAME",
-                    help="recommended nickname to put in the card "
+                    help="with --show: recommended nickname to put in the card "
                          "(default: the saved peer name)")
-    sp.set_defaults(fn=cmd_show)
+    sp.set_defaults(fn=cmd_contacts)
 
     sp = sub.add_parser(
         "share", parents=[common], formatter_class=raw,
         help="send a saved contact to a peer (an introduction)",
         description="""\
 Introduce one of your contacts to a peer: build that contact's Contact card
-(the same JSON `retalk show` prints) and send it, encrypted, to the recipient
-over the relay. The recipient sees it in `retalk receive` as a contact record
-and saves it with `retalk import`, under the nickname you recommend.
+(the same JSON `retalk contacts --show CONTACT --json` prints) and send it,
+encrypted, to the recipient over the relay. The recipient sees it in `retalk
+receive` as a contact record and saves it with `retalk import`, under the
+nickname you recommend.
 
 `--peer` is the recipient: a saved peer name (from `retalk add`) or a raw
 32-hex user id. The positional CONTACT is the contact you are sharing, likewise
@@ -930,8 +924,9 @@ examples:
         "import", parents=[common], formatter_class=raw,
         help="save a contact from a shared Contact card",
         description="""\
-Save a contact from a Contact card -- the JSON that `retalk show` prints and
-`retalk share` sends (the `card` object of a received contact record). The card
+Save a contact from a Contact card -- the JSON that `retalk contacts --show
+CONTACT --json` prints and `retalk share` sends (the `card` object of a received
+contact record). The card
 is saved as a peer under its recommended nickname, exactly as if you had run
 `retalk add` (and `retalk verify`, when the card carries keys).
 

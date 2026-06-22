@@ -69,7 +69,7 @@ conventions.
 
 ## Command reference
 
-`retalk` has fourteen subcommands. This is the quick reference; run `retalk
+`retalk` has thirteen subcommands. This is the quick reference; run `retalk
 <command> --help` for the full text, and see [STANDARD.md](STANDARD.md) for the
 JSON each one emits. Most commands work entirely on your local store — only the
 ones that touch a mailbox reach the relay.
@@ -80,8 +80,7 @@ ones that touch a mailbox reach the relay.
 | `id` | Print this identity's user id (its public-key fingerprint). | no |
 | `add` | Save a peer's user id under a local name. | no |
 | `verify` | Record a saved peer's public keys (explicit first contact). | yes¹ |
-| `contacts` | List saved peers. | no |
-| `show` | Print one saved peer as a shareable Contact card (JSON). | no |
+| `contacts` | List saved peers, or `--show` one as a Contact card. | no |
 | `share` | Send a contact to a peer (an introduction). | yes |
 | `import` | Save a contact from a card, or from the contact-inbox. | no |
 | `block` | Drop a sender's mail before decryption, or `--list` blocks. | no |
@@ -132,18 +131,16 @@ is recorded.
 
 - `--identity-key KEY` / `--signing-key KEY` — record keys you already hold (offline) instead of fetching from the relay; pass both together.
 
-**`retalk contacts`** — list saved peers, one per line as tab-separated `NAME`, `FINGERPRINT`, and `STATUS` (verified or unverified), sorted by name.
+**`retalk contacts`** — list saved peers, one per line as tab-separated `NAME`, `FINGERPRINT`, and `STATUS` (verified or unverified), sorted by name. With `--show`, print just one contact instead of the whole list — its status row, or its full **Contact card** with `--json`. That card is the shareable form `share` sends and `import` ingests, so you can also pipe or paste it out-of-band; keys are included only when the contact is verified, and the fingerprint pins them, so a card is safe to share in the clear.
 
-- `--json` — one [Contact](STANDARD.md) object per line.
+- `--json` — emit [Contact](STANDARD.md) objects instead of status rows (one per line; with `--show`, the full card).
+- `--show CONTACT` — print just this contact (a saved peer name or a raw 32-hex user id, even one you haven't saved) rather than the whole list.
+- `--as NAME` — with `--show`: recommended nickname to put in the card (default: the saved peer name).
 
-### Sharing contacts — `show`, `share`, `import`
+### Sharing contacts — `share`, `import`
 
-**`retalk show CONTACT`** — print one saved peer as a Contact card (the JSON that
-`share` sends and `import` ingests), so you can also hand it over any out-of-band
-channel. Keys are included only when the contact is verified; the fingerprint
-pins them, so a card is safe to share in the clear.
-
-- `--as NAME` — recommended nickname to put in the card (default: the saved peer name).
+To get a contact's card for sharing, use `retalk contacts --show CONTACT --json`
+(above). `share` sends that card over the relay; `import` saves one you receive.
 
 **`retalk share CONTACT --peer PEER`** — introduce `CONTACT` to `--peer` by
 sending its card, encrypted, over the relay. The recipient sees it in `receive`

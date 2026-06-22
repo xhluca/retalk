@@ -209,7 +209,7 @@ retalk id                          # print my user ID
 retalk add bob <bob-user-id>       # save a peer (name + fingerprint)
 retalk verify bob                  # fetch & record "bob"'s keys (optional)
 retalk contacts                    # list saved peers and verified status
-retalk show bob                    # print "bob" as a shareable Contact card (JSON)
+retalk contacts --show bob --json  # print "bob" as a shareable Contact card (JSON)
 retalk share --peer carol bob      # send "bob"'s card to "carol" (an introduction)
 retalk import '<card json>'        # save a contact someone shared with you
 retalk import --inbox --list       # contacts peers shared (saved by `receive`)
@@ -240,15 +240,15 @@ its user ID together with a **recommended nickname** — instead of making them
 copy a fingerprint by hand.
 
 ```sh
-retalk show bob                      # print "bob" as a Contact card (one JSON line)
+retalk contacts --show bob --json    # print "bob" as a Contact card (one JSON line)
 retalk share --peer carol bob        # send that card to "carol" over the relay
 retalk share --peer carol bob --as bobby   # recommend a different nickname
 ```
 
-`show` prints the contact as a JSON **card** — its fingerprint, the recommended
-nickname, and (if you have verified it) its keys. `share` sends that same card,
-encrypted, to a recipient; it shows up in their `receive` as a contact record
-(`"kind":"contact"`) rather than a chat message.
+`contacts --show bob --json` prints the contact as a JSON **card** — its
+fingerprint, the recommended nickname, and (if you have verified it) its keys.
+`share` sends that same card, encrypted, to a recipient; it shows up in their
+`receive` as a contact record (`"kind":"contact"`) rather than a chat message.
 
 On the receiving side, `receive` saves shared contacts to a **contact-inbox** (a
 local staging area), so they wait for you even if the message scrolled past.
@@ -263,16 +263,17 @@ retalk import --inbox bob --as bobby  # save just "bob", under a nickname of you
 Each staged card records who introduced it. `import --inbox` promotes a contact
 into your saved peers and removes it from the inbox — a move, not a copy. Pass
 `retalk receive --no-save-contacts` to skip staging. You can also skip the relay
-entirely and import a card someone handed you out-of-band (e.g. `retalk show`
-output): `retalk import '<card json>'`, or `retalk import --as bobby '<card>'`.
+entirely and import a card someone handed you out-of-band (e.g. `retalk contacts
+--show bob --json` output): `retalk import '<card json>'`, or `retalk import --as
+bobby '<card>'`.
 
 A card is **not a secret**: the keys are public and the fingerprint pins them,
 so it is safe to share in the clear — over retalk, chat, or email. `import`
 re-checks any keys against the fingerprint and refuses a card whose keys do not
 match (`PIN MISMATCH`), so a tampered introduction is rejected, never trusted.
 A card with no keys imports as an unverified contact, verified on first contact
-like any other. `show` + `import` also copy a contact between two of your own
-identities without going through the relay at all.
+like any other. `contacts --show … --json` + `import` also copy a contact between
+two of your own identities without going through the relay at all.
 
 ### Saving a message history
 

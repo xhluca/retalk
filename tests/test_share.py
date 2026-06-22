@@ -1,18 +1,19 @@
-"""`retalk show` emits a contact as a card; `retalk share` sends it to a peer;
-`retalk import` saves a received card.
+"""`retalk contacts --show C --json` emits a contact as a card; `retalk share`
+sends it to a peer; `retalk import` saves a received card.
 
 A "contact card" is the Contact object of docs/STANDARD.md: a peer's
-fingerprint + a recommended nickname, plus its keys when verified. `show`
-prints one for a saved peer (the out-of-band, copy/paste form); `share`
-encrypts the same card and sends it to a recipient over the relay, who sees it
-in `receive` as a contact record and saves it with `import`. A card is not a
-secret -- `import` re-checks any keys against the fingerprint, so a tampered
-card is refused with PIN MISMATCH, never trusted.
+fingerprint + a recommended nickname, plus its keys when verified. `contacts
+--show C --json` prints one for a saved peer (the out-of-band, copy/paste form);
+`share` encrypts the same card and sends it to a recipient over the relay, who
+sees it in `receive` as a contact record and saves it with `import`. A card is
+not a secret -- `import` re-checks any keys against the fingerprint, so a
+tampered card is refused with PIN MISMATCH, never trusted.
 
 Asserts:
-  1. `show <peer>` prints the saved peer's card; a verified peer carries keys
-     (verified=true), an unverified one has empty keys; `--as` overrides the
-     recommended nickname; an unknown contact fails loudly.
+  1. `contacts --show <peer> --json` prints the saved peer's card; a verified
+     peer carries keys (verified=true), an unverified one has empty keys; `--as`
+     overrides the recommended nickname; an unknown contact fails loudly; and
+     `--show` without `--json` prints just the status row.
   2. Relay round-trip: alice `share`s bob with carol; carol `receive`s a contact
      record ({"kind":"contact","card":{...}}) carrying bob's recommended
      nickname and keys, and `import`s it -> carol now has bob as a verified
@@ -110,9 +111,11 @@ class TestShare(unittest.TestCase):
                 b_sk = self.contacts(a)["bob"]["signing_key"]
                 self.assertTrue(b_ik and b_sk)
 
-                # 1. show: a verified peer's card carries keys; --as renames;
-                #    a raw fingerprint resolves to the saved peer; unknown fails
-                card = json.loads(self.cli("show", "bob", "--dir", a).stdout)
+                # 1. contacts --show --json: a verified peer's card carries keys;
+                #    --as renames; a raw fingerprint resolves to the saved peer;
+                #    unknown fails; without --json it is just the status row
+                card = json.loads(self.cli("contacts", "--show", "bob", "--json",
+                                           "--dir", a).stdout)
                 self.assertEqual(set(card), {"fingerprint", "name",
                                              "identity_key", "signing_key",
                                              "verified"})
@@ -121,12 +124,18 @@ class TestShare(unittest.TestCase):
                                   card["verified"]),
                                  (bid, "bob", b_ik, b_sk, True))
                 self.assertEqual(
-                    json.loads(self.cli("show", "bob", "--as", "bobby",
+                    json.loads(self.cli("contacts", "--show", "bob", "--json",
+                                        "--as", "bobby",
                                         "--dir", a).stdout)["name"], "bobby")
                 self.assertEqual(
-                    json.loads(self.cli("show", bid, "--dir", a).stdout)["name"],
+                    json.loads(self.cli("contacts", "--show", bid, "--json",
+                                        "--dir", a).stdout)["name"],
                     "bob")  # raw id resolves to the saved contact
-                self.cli("show", "nobody", "--dir", a, expect=2)
+                self.cli("contacts", "--show", "nobody", "--dir", a, expect=2)
+                # without --json, --show prints the single status row
+                self.assertEqual(
+                    self.cli("contacts", "--show", "bob", "--dir", a).stdout,
+                    f"bob\t{bid}\tverified\n")
 
                 # 2. share bob with carol over the relay; carol also gets a chat
                 #    message, so the two record kinds must stay distinguishable
@@ -184,8 +193,8 @@ class TestShare(unittest.TestCase):
                             "--dir", c)
                 self.assertIn("bobby", self.contacts(c))
                 self.assertTrue(self.contacts(c)["bobby"]["verified"])
-                print("PASS: show emits a card; share+receive+import round-trips; "
-                      "tampered cards refused")
+                print("PASS: contacts --show emits a card; share+receive+import "
+                      "round-trips; tampered cards refused")
             finally:
                 server.terminate()
                 server.wait(timeout=10)
