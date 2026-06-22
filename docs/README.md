@@ -69,7 +69,7 @@ conventions.
 
 ## Command reference
 
-`retalk` has thirteen subcommands. This is the quick reference; run `retalk
+`retalk` has twelve subcommands. This is the quick reference; run `retalk
 <command> --help` for the full text, and see [STANDARD.md](STANDARD.md) for the
 JSON each one emits. Most commands work entirely on your local store — only the
 ones that touch a mailbox reach the relay.
@@ -80,11 +80,10 @@ ones that touch a mailbox reach the relay.
 | `id` | Print this identity's user id (its public-key fingerprint). | no |
 | `add` | Save a peer's user id under a local name. | no |
 | `verify` | Record a saved peer's public keys (explicit first contact). | yes¹ |
-| `contacts` | List saved peers, or `--show` one as a Contact card. | no |
+| `contacts` | List saved peers; `--show` one as a Contact card, `--remove` one. | no |
 | `share` | Send a contact to a peer (an introduction). | yes |
 | `import` | Save a contact from a card, or from the contact-inbox. | no |
-| `block` | Drop a sender's mail before decryption, or `--list` blocks. | no |
-| `unblock` | Stop dropping a blocked sender. | no |
+| `block` | Drop a sender's mail before decryption; `--remove` to undo, `--list` to view. | no |
 | `send` | Encrypt and send one message. | yes |
 | `receive` | Fetch, decrypt, and print pending messages. | yes |
 | `history` | Replay messages saved by `receive --save-messages`. | no |
@@ -135,6 +134,7 @@ is recorded.
 
 - `--json` — emit [Contact](STANDARD.md) objects instead of status rows (one per line; with `--show`, the full card).
 - `--show CONTACT` — print just this contact (a saved peer name or a raw 32-hex user id, even one you haven't saved) rather than the whole list.
+- `--remove CONTACT` — delete a saved peer (a name or user id) — the inverse of `add`; a fingerprint drops every name pinned to it.
 - `--as NAME` — with `--show`: recommended nickname to put in the card (default: the saved peer name).
 
 ### Sharing contacts — `share`, `import`
@@ -160,9 +160,9 @@ unverified.
 - `--json` — with `--inbox --list`, emit one JSON object per staged contact.
 - `--as NAME` — nickname to save under (required when the card has no name).
 
-### Filtering senders — `block`, `unblock`
+### Filtering senders — `block`
 
-Both filters drop senders during `receive` before any decryption, so a dropped
+These filters drop senders during `receive` before any decryption, so a dropped
 sender never makes you spend a one-time key. See [Filtering who can reach
 you](#filtering-who-can-reach-you) for the full model (including the signed
 negative acks that keep refused mail from resurrecting).
@@ -170,10 +170,9 @@ negative acks that keep refused mail from resurrecting).
 **`retalk block [PEER]`** — block a sender (saved name or raw id); their incoming
 mail is dropped, unread, and nothing is sent to the server or the peer.
 
+- `--remove` — with a `PEER`, take that sender back off the block list (so `receive` delivers their mail again); removing one that isn't blocked is a no-op.
 - `--list` — print the block list instead of blocking (omit `PEER`).
 - `--json` — with `--list`, emit one `{fingerprint, name}` object per line.
-
-**`retalk unblock PEER`** — remove a sender from the block list, so `receive` delivers their mail again. Unblocking someone not blocked is a no-op.
 
 ### Messaging — `send`, `receive`, `history`
 
@@ -290,7 +289,7 @@ one of your one-time keys:
 ```sh
 retalk block bob              # drop "bob"'s mail (by saved name or 32-hex id)
 retalk block --list           # list blocked senders (--json for objects)
-retalk unblock bob            # stop dropping "bob"
+retalk block --remove bob     # stop dropping "bob"
 
 retalk receive --all --peers-only   # accept only senders you `retalk add`ed
 ```

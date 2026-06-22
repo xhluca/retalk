@@ -199,6 +199,34 @@ class TestShare(unittest.TestCase):
                 server.terminate()
                 server.wait(timeout=10)
 
+    def test_contacts_remove(self):
+        """contacts --remove deletes a saved peer by name or fingerprint (the
+        inverse of add); unknown fails; --show and --remove are exclusive.
+        All offline -- no relay needed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            self.tmp = tmp
+            a = os.path.join(tmp, "alice")
+            self.cli("init", "--dir", a, "--display-name", "alice")
+            bid, cid = "b" * 32, "c" * 32
+            self.cli("add", "bob", bid, "--dir", a)
+            self.cli("add", "carol", cid, "--dir", a)
+            self.assertEqual(set(self.contacts(a)), {"bob", "carol"})
+
+            # remove by name, then by fingerprint
+            self.cli("contacts", "--remove", "bob", "--dir", a)
+            self.assertEqual(set(self.contacts(a)), {"carol"})
+            self.cli("contacts", "--remove", cid, "--dir", a)
+            self.assertEqual(self.contacts(a), {})
+
+            # removing an unknown contact fails loudly
+            self.cli("contacts", "--remove", "ghost", "--dir", a, expect=2)
+            # --show and --remove are mutually exclusive
+            self.cli("add", "bob", bid, "--dir", a)
+            self.cli("contacts", "--show", "bob", "--remove", "bob",
+                     "--dir", a, expect=2)
+            print("PASS: contacts --remove deletes by name and fingerprint; "
+                  "--show/--remove conflict refused")
+
     def inbox(self, d):
         return [json.loads(l) for l in self.cli(
             "import", "--inbox", "--list", "--json", "--dir", d

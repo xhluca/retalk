@@ -332,6 +332,23 @@ def cmd_add(args):
 def cmd_contacts(args):
     d = _resolve_store(args)
     store_db = d / STORE_FILE
+    # --remove NAME-OR-ID: delete a saved peer (the inverse of `add`). Resolve
+    # by saved name, or by fingerprint (dropping every name pinned to it).
+    if args.remove is not None:
+        if args.show is not None:
+            _die("pass --show to view a contact or --remove to delete one, "
+                 "not both")
+        peers = _saved_peers(store_db)
+        target = args.remove
+        names = ([target] if target in peers else
+                 [n for n, (fp, _ik, _sk) in peers.items() if fp == target])
+        if not names:
+            _die(f"no saved contact '{target}' to remove")
+        for n in names:
+            _store_sql(store_db, "DELETE FROM peers WHERE name=?", n)
+        print(f"removed contact '{names[0]}' ({peers[names[0]][0]})",
+              file=sys.stderr)
+        return
     # --show NAME-OR-ID: just that one contact. As a Contact card with --json
     # (the shareable form `share` sends and `import` ingests), else a single
     # status row. --as relabels the card's recommended nickname.
@@ -532,9 +549,9 @@ def cmd_block(args):
     d = _resolve_store(args)
     store_db = d / STORE_FILE
     if args.list:
-        if args.peer is not None:
-            _die("give a peer to block, or --list to show the block list, "
-                 "not both")
+        if args.peer is not None or args.remove:
+            _die("give a peer (to block, or --remove to unblock), or --list to "
+                 "show the block list -- not both")
         names = {fp: name for name, (fp, _ik, _sk)
                  in _saved_peers(store_db).items()}
         for fp in sorted(_blocked_set(store_db)):
@@ -545,20 +562,18 @@ def cmd_block(args):
                 print(f"{fp}\t{name}" if name else fp)
         return
     if args.peer is None:
-        _die("block needs a peer to block, or --list to show the block list")
+        _die("block needs a peer (to block, or with --remove to unblock), "
+             "or --list to show the block list")
     fp = _peer_to_id(args.peer, store_db)
     _blocked_set(store_db)  # ensure the table exists
-    _store_sql(store_db, "INSERT OR IGNORE INTO blocked(fingerprint) VALUES(?)", fp)
-    print(f"blocked {args.peer} ({fp})", file=sys.stderr)
-
-
-def cmd_unblock(args):
-    d = _resolve_store(args)
-    store_db = d / STORE_FILE
-    fp = _peer_to_id(args.peer, store_db)
-    _blocked_set(store_db)  # ensure the table exists
-    _store_sql(store_db, "DELETE FROM blocked WHERE fingerprint=?", fp)
-    print(f"unblocked {args.peer} ({fp})", file=sys.stderr)
+    if args.remove:
+        # the inverse of a plain block -- formerly `retalk unblock`
+        _store_sql(store_db, "DELETE FROM blocked WHERE fingerprint=?", fp)
+        print(f"unblocked {args.peer} ({fp})", file=sys.stderr)
+    else:
+        _store_sql(store_db,
+                   "INSERT OR IGNORE INTO blocked(fingerprint) VALUES(?)", fp)
+        print(f"blocked {args.peer} ({fp})", file=sys.stderr)
 
 
 def cmd_send(args):
@@ -718,7 +733,7 @@ quickstart:
 
 run `retalk <command> --help` for the full story of each command.""")
     sub = p.add_subparsers(dest="command", required=True,
-                           metavar="{init,id,add,contacts,share,import,verify,block,unblock,send,receive,history}")
+                           metavar="{init,id,add,contacts,share,import,verify,block,send,receive,history}")
 
     sp = sub.add_parser(
         "init", parents=[common], formatter_class=raw,
@@ -840,7 +855,7 @@ examples:
 
     sp = sub.add_parser(
         "contacts", parents=[common], formatter_class=raw,
-        help="list saved peers, or --show one as a Contact card",
+        help="list saved peers; --show one as a Contact card, --remove one",
         description="""\
 List the peers you have saved with `retalk add`, one per line as
 NAME<tab>FINGERPRINT<tab>STATUS (verified or unverified), sorted by name. These
@@ -860,7 +875,10 @@ the other side import it. --show also accepts a raw 32-hex user id you have not
 saved, emitting a minimal (unverified) card; --as relabels the recommended
 nickname the recipient sees.
 
-No passphrase and no server contact -- this only reads your local peers
+Pass --remove NAME-OR-ID to delete a saved peer (the inverse of `retalk add`);
+a fingerprint drops every name pinned to it. Removing nothing is an error.
+
+No passphrase and no server contact -- this only reads/writes your local peers
 table. Prints nothing when you have saved no peers.""",
         epilog="""\
 examples:
@@ -870,7 +888,8 @@ examples:
   retalk contacts --show bob       bob's status row (name, id, verified?)
   retalk contacts --show bob --json          bob's full Contact card, one JSON line
   retalk contacts --show bob --json --as bobby   recommend the nickname 'bobby'
-  retalk contacts --show bob --json | retalk import --dir ./carol   copy bob over""")
+  retalk contacts --show bob --json | retalk import --dir ./carol   copy bob over
+  retalk contacts --remove bob     forget the saved peer 'bob'""")
     sp.add_argument("--json", action="store_true",
                     help="emit Contact objects (see docs/STANDARD.md: name, "
                          "fingerprint, identity_key, signing_key, verified) "
@@ -879,6 +898,9 @@ examples:
                     help="print just this contact (a saved peer name or a "
                          "32-hex user id) instead of the whole list; add --json "
                          "for its shareable Contact card")
+    sp.add_argument("--remove", metavar="CONTACT",
+                    help="delete this saved peer (a name or 32-hex user id) "
+                         "from your contacts; the inverse of `retalk add`")
     sp.add_argument("--as", dest="as_name", metavar="NAME",
                     help="with --show: recommended nickname to put in the card "
                          "(default: the saved peer name)")
@@ -973,7 +995,7 @@ examples:
 
     sp = sub.add_parser(
         "block", parents=[common], formatter_class=raw,
-        help="silently drop a sender's incoming messages (or --list them)",
+        help="silently drop a sender's messages (--remove to undo, --list them)",
         description="""\
 Block a sender: their incoming messages are dropped during `receive` before
 any decryption happens, so a blocked sender can never even consume one of your
@@ -981,38 +1003,28 @@ one-time keys. The block is local to this identity's store and is never sent to
 the server or the peer; their mail simply stays on the server, unread.
 
 Name the sender by a saved peer name (from `retalk add`) or a raw 32-hex user
-id. Pass --list (instead of a peer) to print the current block list, one per
-line with the saved peer name if any; --json emits one object per line. Unblock
-later with `retalk unblock`.""",
+id. Pass --remove with the same name/id to take a sender back off the block list
+(so `receive` delivers their messages again); removing one that is not blocked
+is a no-op. Pass --list (instead of a peer) to print the current block list, one
+per line with the saved peer name if any; --json emits one object per line.""",
         epilog="""\
 examples:
   retalk block bob                              block a saved peer
   retalk block f1041c25c87351d8550b31cc6b13ab04   block by raw id
+  retalk block --remove bob                     unblock a sender
   retalk block --list                           show the block list
   retalk block --list --json     one {"fingerprint","name"} object per line""")
     sp.add_argument("peer", nargs="?",
-                    help="saved peer name or 32-hex user id to block; omit "
-                         "with --list")
+                    help="saved peer name or 32-hex user id to block (or, with "
+                         "--remove, to unblock); omit with --list")
+    sp.add_argument("--remove", action="store_true",
+                    help="remove the named sender from the block list instead "
+                         "of adding one")
     sp.add_argument("--list", action="store_true",
                     help="list blocked senders instead of blocking one")
     sp.add_argument("--json", action="store_true",
                     help="with --list: emit one JSON object per blocked sender")
     sp.set_defaults(fn=cmd_block)
-
-    sp = sub.add_parser(
-        "unblock", parents=[common], formatter_class=raw,
-        help="stop dropping a previously blocked sender",
-        description="""\
-Remove a sender from the block list, so `receive` delivers their messages
-again. Name them by a saved peer name or a raw 32-hex user id. Unblocking
-someone who is not blocked is a no-op. List current blocks with
-`retalk block --list`.""",
-        epilog="""\
-examples:
-  retalk unblock bob
-  retalk unblock f1041c25c87351d8550b31cc6b13ab04""")
-    sp.add_argument("peer", help="saved peer name or 32-hex user id to unblock")
-    sp.set_defaults(fn=cmd_unblock)
 
     sp = sub.add_parser(
         "sync", parents=[common], formatter_class=raw,
