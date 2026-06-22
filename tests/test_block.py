@@ -10,7 +10,7 @@ suites use):
   2. In peers-only mode an unsaved (unknown) sender is skipped while a saved
      peer's message is still delivered. Again, no key is consumed for the
      unknown sender.
-  3. The CLI `block`/`unblock`/`blocked` commands round-trip, and
+  3. The CLI `block`/`block --remove`/`block --list` commands round-trip, and
      `receive --peers-only` drops an unknown sender while delivering a peer.
 
 Uses port 8770 (see tests/README.md for the port registry).
@@ -205,13 +205,13 @@ class TestBlockCLI(unittest.TestCase):
         self.cli("add", "bob", bid, "--dir", a)
         self.cli("receive", "--all", "--dir", a)  # alice publishes keys
 
-        # block / block --list / unblock round-trip (by name and by raw id)
+        # block / block --list / block --remove round-trip (by name and raw id)
         self.cli("block", "bob", "--dir", a)
         self.cli("block", cid, "--dir", a)
         listed = {json.loads(l)["fingerprint"]
                   for l in self.cli("block", "--list", "--json", "--dir", a).stdout.splitlines()}
         self.assertEqual(listed, {bid, cid}, listed)
-        self.cli("unblock", "bob", "--dir", a)
+        self.cli("block", "--remove", "bob", "--dir", a)
         listed = {json.loads(l)["fingerprint"]
                   for l in self.cli("block", "--list", "--json", "--dir", a).stdout.splitlines()}
         self.assertEqual(listed, {cid}, listed)
@@ -232,7 +232,7 @@ class TestBlockCLI(unittest.TestCase):
 
         # unblock carol, but with --peers-only she's still unknown -> dropped.
         # Target carol so only her mail is read (and dropped).
-        self.cli("unblock", cid, "--dir", a)
+        self.cli("block", "--remove", cid, "--dir", a)
         self.cli("send", "--peer", aid, "first knock from carol", "--dir", c)
         out = self.cli("receive", "--peer", cid, "--peers-only", "--dir", a).stdout
         self.assertEqual(out, "", f"unknown carol surfaced in peers-only: {out!r}")
@@ -247,8 +247,9 @@ class TestBlockCLI(unittest.TestCase):
         out = self.cli("receive", "--all", "--peers-only", "--dir", a).stdout
         texts = [json.loads(l)["text"] for l in out.splitlines()]
         self.assertEqual(texts, ["second knock from carol"], texts)
-        print("PASS: CLI block/block --list/unblock + --peers-only; server-side nack "
-              "keeps a send-only sender's refused mail from resurrecting")
+        print("PASS: CLI block/block --list/block --remove + --peers-only; "
+              "server-side nack keeps a send-only sender's refused mail from "
+              "resurrecting")
 
 
 if __name__ == "__main__":
