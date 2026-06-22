@@ -67,6 +67,153 @@ can pipe retalk into other tools without parsing ad-hoc output.
 → [STANDARD.md](STANDARD.md) — the JSON contract: objects, fields, and
 conventions.
 
+## Command reference
+
+`retalk` has fourteen subcommands. This is the quick reference; run `retalk
+<command> --help` for the full text, and see [STANDARD.md](STANDARD.md) for the
+JSON each one emits. Most commands work entirely on your local store — only the
+ones that touch a mailbox reach the relay.
+
+| Command | What it does | Relay? |
+| --- | --- | --- |
+| `init` | Create a new identity (keypair + store). The only command that creates one. | no |
+| `id` | Print this identity's user id (its public-key fingerprint). | no |
+| `add` | Save a peer's user id under a local name. | no |
+| `verify` | Record a saved peer's public keys (explicit first contact). | yes¹ |
+| `contacts` | List saved peers. | no |
+| `show` | Print one saved peer as a shareable Contact card (JSON). | no |
+| `share` | Send a contact to a peer (an introduction). | yes |
+| `import` | Save a contact from a card, or from the contact-inbox. | no |
+| `block` | Drop a sender's mail before decryption, or `--list` blocks. | no |
+| `unblock` | Stop dropping a blocked sender. | no |
+| `send` | Encrypt and send one message. | yes |
+| `receive` | Fetch, decrypt, and print pending messages. | yes |
+| `history` | Replay messages saved by `receive --save-messages`. | no |
+| `sync` | Reconcile keys and resend the outbox against the relay. | yes |
+
+¹ `verify` reaches the relay only when fetching keys; with `--identity-key`/`--signing-key` it stays offline.
+
+### Options every command shares
+
+Identity selection (first match wins — retalk never guesses which user you mean):
+
+- `--dir DIR` — use the identity in directory `DIR`.
+- `-u`, `--user NAME` — the user under `~/.local/share/retalk/NAME/` (or the `RETALK_USER` env var).
+- `--relay URL` — relay for this call (overrides `RETALK_RELAY` and the URL saved at init).
+- `--api-key KEY` — relay access key, sent as `Authorization: Bearer` (overrides `RETALK_API_KEY`).
+- `--passphrase SECRET` — unlocks the store; prefer the `RETALK_PASSPHRASE` env var, since a value passed here is visible in the process list. Omit it for a `--no-passphrase` identity.
+
+Results go to stdout; banners and errors go to stderr, so pipes stay clean.
+There is no interactive prompt — commands never block waiting on a human.
+
+### Identity — `init`, `id`
+
+**`retalk init`** — create a new identity: generate a keypair, encrypt it with
+your passphrase, and write `store.db` under `--user NAME` or `--dir DIR`. Prints
+the new user id. Offline; keys publish automatically on first send/receive.
+
+- `--display-name NAME` — name attached to your messages (peers see it as unverified `~NAME`). Defaults to the user name.
+- `--no-passphrase` — store keys unencrypted, protected only by file permissions.
+
+**`retalk id`** — print this identity's user id (sha256 of its public keys); it holds no secret and is safe to post publicly.
+
+- `--json` — emit `{fingerprint, identity_key, name}`.
+
+### Contacts — `add`, `verify`, `contacts`
+
+**`retalk add NAME FINGERPRINT`** — save a peer's 32-hex user id under a local
+name, so `send NAME …` works and their mail displays as `NAME`. The name is
+yours alone and never travels over the network.
+
+**`retalk verify PEER`** — record a saved peer's public keys, making explicit the
+key exchange that otherwise happens on first message. Keys are checked against
+the saved fingerprint; a mismatch is refused with **PIN MISMATCH** and nothing
+is recorded.
+
+- `--identity-key KEY` / `--signing-key KEY` — record keys you already hold (offline) instead of fetching from the relay; pass both together.
+
+**`retalk contacts`** — list saved peers, one per line as tab-separated `NAME`, `FINGERPRINT`, and `STATUS` (verified or unverified), sorted by name.
+
+- `--json` — one [Contact](STANDARD.md) object per line.
+
+### Sharing contacts — `show`, `share`, `import`
+
+**`retalk show CONTACT`** — print one saved peer as a Contact card (the JSON that
+`share` sends and `import` ingests), so you can also hand it over any out-of-band
+channel. Keys are included only when the contact is verified; the fingerprint
+pins them, so a card is safe to share in the clear.
+
+- `--as NAME` — recommended nickname to put in the card (default: the saved peer name).
+
+**`retalk share CONTACT --peer PEER`** — introduce `CONTACT` to `--peer` by
+sending its card, encrypted, over the relay. The recipient sees it in `receive`
+and saves it with `import`. Delivery is tracked like `send`; prints a
+`{id, to, shared}` receipt.
+
+- `--peer PEER` — the recipient (required): a saved peer name or a raw user id.
+- `--as NAME` — override the recommended nickname (default: the contact's saved name).
+
+**`retalk import [CARD]`** — save a contact from a Contact card: the `CARD`
+argument, or stdin when it is omitted or `-`. Keys must hash to the card's
+fingerprint or import refuses with **PIN MISMATCH**; a keyless card is saved
+unverified.
+
+- `--inbox` — import from the contact-inbox (cards that `receive` staged when peers shared contacts) instead of a `CARD`. Plain `--inbox` promotes and removes every staged contact (a move); `--inbox NAME-OR-ID` does just the one match; a staged card that fails its key check is reported and left in the inbox.
+- `--list` — with `--inbox`, list the staged contacts and import nothing.
+- `--json` — with `--inbox --list`, emit one JSON object per staged contact.
+- `--as NAME` — nickname to save under (required when the card has no name).
+
+### Filtering senders — `block`, `unblock`
+
+Both filters drop senders during `receive` before any decryption, so a dropped
+sender never makes you spend a one-time key. See [Filtering who can reach
+you](#filtering-who-can-reach-you) for the full model (including the signed
+negative acks that keep refused mail from resurrecting).
+
+**`retalk block [PEER]`** — block a sender (saved name or raw id); their incoming
+mail is dropped, unread, and nothing is sent to the server or the peer.
+
+- `--list` — print the block list instead of blocking (omit `PEER`).
+- `--json` — with `--list`, emit one `{fingerprint, name}` object per line.
+
+**`retalk unblock PEER`** — remove a sender from the block list, so `receive` delivers their mail again. Unblocking someone not blocked is a no-op.
+
+### Messaging — `send`, `receive`, `history`
+
+**`retalk send --peer PEER TEXT`** — encrypt `TEXT` for one peer and upload the
+ciphertext. First contact performs the key handshake automatically; a served key
+that doesn't match the peer's fingerprint (or your verified keys) is refused with
+**PIN MISMATCH**. Delivery is tracked in your outbox until the peer acks; prints
+a `{id, to}` receipt.
+
+- `--peer PEER` — recipient (required): a saved peer name or a raw user id.
+
+**`retalk receive`** — fetch, decrypt, ack, and print pending messages as NDJSON.
+A shared contact arrives as a contact record (`{…, "kind": "contact", "card":
+{…}}`) and is also staged to the contact-inbox for `import --inbox`. Name a
+target with `--peer` or `--all` (one is required, not both).
+
+- `--peer PEER` — read only this sender's mail.
+- `--all` — read every sender (the whole mailbox).
+- `--follow` — keep polling every 2s and run key maintenance every 60s until ctrl-c.
+- `--peers-only` — accept only saved peers; unknown senders are dropped before decryption. Blocked senders are always dropped regardless.
+- `--no-save-contacts` — do not stage shared contacts to the contact-inbox (staging is on by default).
+- `--save-messages` — also keep a local copy of each chat message, sealed with this identity's key, for `history`. Off by default; on a `--no-passphrase` identity the seal is not real encryption, since the store key is public.
+
+**`retalk history`** — replay messages saved by `receive --save-messages`,
+oldest first, as NDJSON in the same shape `receive` emits. Each body is decrypted
+from its at-rest seal on the way out, so this needs the passphrase but never the
+relay.
+
+- `--peer PEER` — show only this sender's saved messages.
+
+### Maintenance — `sync`
+
+**`retalk sync`** — run one reconciliation pass against the relay: republish your
+keys if it has forgotten them, replenish one-time keys, rotate a stale fallback
+key, and resend unacknowledged outbox mail. `send` and `sync` resend; `receive`
+never does — so run `sync` from cron or a timer for a mostly-listening client.
+
 ## Library usage
 
 Everything the CLI does is available from Python through the `User` class. A

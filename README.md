@@ -488,6 +488,8 @@ the server trust model, the data format, and deployment guides. Start at the
 index, or jump straight to a topic:
 
 - [docs/README.md](docs/README.md) -- documentation index and reference hub.
+- [docs/README.md#command-reference](docs/README.md#command-reference) -- every
+  CLI subcommand, what it does, and its flags.
 - [docs/auth.md](docs/auth.md) -- signed requests and the exact wire format.
 - [docs/server.md](docs/server.md) -- what the relay stores, and what a hostile
   server can and cannot do.
