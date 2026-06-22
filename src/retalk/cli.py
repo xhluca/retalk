@@ -132,6 +132,65 @@ def _blocked_set(store_db: Path) -> set:
             _store_sql(store_db, "SELECT fingerprint FROM blocked")}
 
 
+# Columns of a staged shared contact, in select order. The card fields mirror
+# a Contact (docs/STANDARD.md); from_fp/from_name record who introduced it.
+_INBOX_COLS = ("fingerprint", "name", "identity_key", "signing_key",
+               "from_fp", "from_name", "msg_id", "ts")
+
+
+def _received_contacts(store_db: Path) -> list[dict]:
+    """The contact-inbox: cards received via `retalk share` and saved by
+    `retalk receive`, awaiting `retalk import --inbox`. One row per contact
+    (keyed by fingerprint, newest share wins), sorted by recommended name."""
+    _store_sql(store_db, "CREATE TABLE IF NOT EXISTS received_contacts("
+               "fingerprint TEXT PRIMARY KEY, name TEXT, identity_key TEXT, "
+               "signing_key TEXT, from_fp TEXT, from_name TEXT, msg_id TEXT, "
+               "ts REAL)")
+    rows = _store_sql(store_db, f"SELECT {', '.join(_INBOX_COLS)} "
+                                "FROM received_contacts ORDER BY name")
+    return [dict(zip(_INBOX_COLS, r)) for r in rows]
+
+
+def _stage_contact(store_db: Path, rec: dict):
+    """Save one received contact record (`receive`) into the inbox, replacing
+    any earlier card for the same fingerprint. Ignores a malformed card."""
+    card = rec.get("card") or {}
+    fp = card.get("fingerprint", "")
+    if not ID_RE.match(fp):
+        return
+    _received_contacts(store_db)  # ensure the table exists
+    _store_sql(store_db,
+               "INSERT INTO received_contacts("
+               "fingerprint, name, identity_key, signing_key, from_fp, "
+               "from_name, msg_id, ts) VALUES(?,?,?,?,?,?,?,?) "
+               "ON CONFLICT(fingerprint) DO UPDATE SET name=excluded.name, "
+               "identity_key=excluded.identity_key, "
+               "signing_key=excluded.signing_key, from_fp=excluded.from_fp, "
+               "from_name=excluded.from_name, msg_id=excluded.msg_id, "
+               "ts=excluded.ts",
+               fp, card.get("name") or "", card.get("identity_key") or "",
+               card.get("signing_key") or "", rec.get("from") or "",
+               rec.get("name") or "", rec.get("id") or "", time.time())
+
+
+def _ensure_messages(store_db: Path):
+    _store_sql(store_db, "CREATE TABLE IF NOT EXISTS messages("
+               "msg_id TEXT PRIMARY KEY, from_fp TEXT, from_name TEXT, "
+               "body TEXT, ts REAL)")
+
+
+def _save_message(store_db: Path, u, rec: dict):
+    """Persist one chat message (`receive --save-messages`) with its body
+    sealed at rest by the identity's key (see User.encrypt_at_rest)."""
+    _ensure_messages(store_db)
+    _store_sql(store_db,
+               "INSERT OR IGNORE INTO messages(msg_id, from_fp, from_name, "
+               "body, ts) VALUES(?,?,?,?,?)",
+               rec.get("id") or "", rec.get("from") or "",
+               rec.get("name") or "", u.encrypt_at_rest(rec.get("text") or ""),
+               time.time())
+
+
 def _open_user(args, need_server: bool = True, banner: bool = True) -> User:
     d = _resolve_store(args)
     store_db = d / STORE_FILE
@@ -174,6 +233,35 @@ def _peer_to_id(peer: str, store_db: Path) -> str:
         return peer
     _die(f"unknown peer '{peer}': `retalk add {peer} <user-id>` first, "
          "or pass a 32-hex user id")
+
+
+def _build_card(store_db: Path, contact: str, as_name: str | None) -> dict:
+    """Build a Contact card (see docs/STANDARD.md) for `contact` -- a saved
+    peer name or a raw 32-hex fingerprint -- to `show` or `share`.
+
+    The recommended nickname is `as_name` if given, else the saved peer name,
+    else "". The identity_key/signing_key are filled in only when the contact
+    is a verified saved peer; otherwise they stay "" and the card is shared
+    unverified (the recipient verifies on first contact, as always)."""
+    peers = _saved_peers(store_db)
+    if contact in peers:                      # a saved peer name
+        fp, ik, sk = peers[contact]
+        name = as_name or contact
+    elif ID_RE.match(contact):                # a raw fingerprint
+        match = [(n, ik, sk) for n, (pfp, ik, sk) in peers.items()
+                 if pfp == contact]
+        if match:                             # ...that is also a saved peer
+            saved_name, ik, sk = match[0]
+            name = as_name or saved_name
+        else:                                 # ...not saved: keys unknown
+            name, ik, sk = (as_name or ""), None, None
+        fp = contact
+    else:
+        _die(f"unknown contact '{contact}': save it with "
+             f"`retalk add {contact} <user-id>`, or pass a 32-hex user id")
+    return {"fingerprint": fp, "name": name,
+            "identity_key": ik or "", "signing_key": sk or "",
+            "verified": bool(ik and sk)}
 
 
 # ---------- commands ----------
@@ -296,9 +384,162 @@ def cmd_verify(args):
     print(f"verified {name} ({fp}) from {source}", file=sys.stderr)
 
 
+def cmd_show(args):
+    d = _resolve_store(args)
+    card = _build_card(d / STORE_FILE, args.contact, args.as_name)
+    print(json.dumps(card))
+
+
+def cmd_share(args):
+    store_db = _resolve_store(args) / STORE_FILE
+    card = _build_card(store_db, args.contact, args.as_name)
+    to = _peer_to_id(args.peer, store_db)
+    u = _open_user(args)
+
+    u.sync()                       # keys + resend the unacked outbox along with this one
+    mid = u.share(to, card)
+    print(json.dumps({"id": mid, "to": to, "shared": card["fingerprint"]}))
+    label = card["name"] or card["fingerprint"]
+    print(f"shared contact '{label}' ({card['fingerprint']}) with {args.peer}",
+          file=sys.stderr)
+
+
+def _save_card(store_db: Path, card: dict, as_name: str | None) -> tuple:
+    """Validate a Contact card and save it as a local peer (like `add`, plus a
+    checked `verify` when the card carries keys). Returns (name, fingerprint,
+    verified). Raises ValueError(message) on a bad card -- callers decide
+    whether that aborts (single import) or just skips one (--inbox)."""
+    if not isinstance(card, dict):
+        raise ValueError("card must be a JSON object (see `retalk show`)")
+    fp = card.get("fingerprint", "")
+    if not ID_RE.match(fp):
+        raise ValueError("card has no valid fingerprint (expected 32 hex "
+                         "characters)")
+    name = as_name or card.get("name") or ""
+    if not name:
+        raise ValueError("card has no recommended nickname -- pass `--as NAME` "
+                         "to choose one")
+    if ID_RE.match(name):
+        raise ValueError("nickname looks like a user id -- give it a human "
+                         "name with `--as`")
+    ik, sk = card.get("identity_key") or "", card.get("signing_key") or ""
+    if ik or sk:
+        if not (ik and sk):
+            raise ValueError("card has only one key: a verified card needs both "
+                             "identity_key and signing_key, or neither")
+        got = fingerprint(ik, sk)
+        if got != fp:
+            raise ValueError(f"PIN MISMATCH: the card's keys hash to {got}, not "
+                             f"{fp} -- refusing a contact whose keys do not "
+                             "match its id")
+    _saved_peers(store_db)  # ensure the table exists
+    # save name + fingerprint (like `add`); re-adding a name resets its keys
+    _store_sql(store_db,
+               "INSERT INTO peers(name, fingerprint, identity_key, signing_key) "
+               "VALUES(?,?,NULL,NULL) ON CONFLICT(name) DO UPDATE SET "
+               "fingerprint=excluded.fingerprint, "
+               "identity_key=NULL, signing_key=NULL", name, fp)
+    if ik and sk:           # record the keys (like a checked `verify`)
+        _store_sql(store_db, "UPDATE peers SET identity_key=?, signing_key=? "
+                             "WHERE fingerprint=?", ik, sk, fp)
+    return name, fp, bool(ik and sk)
+
+
+def _list_inbox(store_db: Path, as_json: bool):
+    """Show the contact-inbox without importing anything."""
+    for row in _received_contacts(store_db):
+        verified = bool(row["identity_key"] and row["signing_key"])
+        if as_json:
+            print(json.dumps({**row, "verified": verified}))
+        else:
+            via = row["from_name"] or row["from_fp"] or "?"
+            print(f"{row['name']}\t{row['fingerprint']}\t"
+                  f"{'verified' if verified else 'unverified'}\tfrom {via}")
+
+
+def _import_inbox(store_db: Path, selector: str | None, as_name: str | None):
+    """Promote staged contacts (saved by `receive`) into the saved peers, then
+    delete the imported rows from the inbox -- a move. With `selector` (a staged
+    name or fingerprint) only that contact is imported; otherwise all are. A
+    card refused (PIN MISMATCH) is reported and left in the inbox."""
+    rows = _received_contacts(store_db)
+    if selector is not None:
+        rows = [r for r in rows
+                if selector in (r["name"], r["fingerprint"])]
+        if not rows:
+            _die(f"no staged contact matching '{selector}' "
+                 "(see `retalk import --inbox --list`)")
+    if as_name and len(rows) != 1:
+        _die("--as needs exactly one contact: name the staged contact to import")
+    if not rows:
+        print("import --inbox: inbox empty", file=sys.stderr)
+        return
+    imported = refused = 0
+    for r in rows:
+        card = {"fingerprint": r["fingerprint"], "name": r["name"],
+                "identity_key": r["identity_key"], "signing_key": r["signing_key"]}
+        try:
+            name, fp, verified = _save_card(store_db, card, as_name)
+        except ValueError as e:
+            print(f"retalk: kept staged (not imported): {e}", file=sys.stderr)
+            refused += 1
+            continue
+        _store_sql(store_db, "DELETE FROM received_contacts WHERE fingerprint=?",
+                   r["fingerprint"])
+        imported += 1
+        print(f"imported contact '{name}' ({fp}) "
+              f"[{'verified' if verified else 'unverified'}]", file=sys.stderr)
+    print(f"import --inbox: {imported} imported, {refused} refused",
+          file=sys.stderr)
+    if refused:
+        sys.exit(2)
+
+
+def cmd_import(args):
+    store_db = _resolve_store(args) / STORE_FILE
+    if args.inbox:
+        if args.list:
+            if args.as_name:
+                _die("--as has no meaning with --list (nothing is imported)")
+            _list_inbox(store_db, args.json)
+            return
+        _import_inbox(store_db, args.card, args.as_name)
+        return
+    if args.list:
+        _die("--list only applies to --inbox")
+    raw = args.card
+    if raw is None or raw == "-":
+        raw = sys.stdin.read()
+    try:
+        card = json.loads(raw)
+    except json.JSONDecodeError as e:
+        _die(f"card is not valid JSON: {e}")
+    try:
+        name, fp, verified = _save_card(store_db, card, args.as_name)
+    except ValueError as e:
+        _die(str(e))
+    print(f"imported contact '{name}' ({fp}) "
+          f"[{'verified' if verified else 'unverified'}]", file=sys.stderr)
+
+
 def cmd_block(args):
     d = _resolve_store(args)
     store_db = d / STORE_FILE
+    if args.list:
+        if args.peer is not None:
+            _die("give a peer to block, or --list to show the block list, "
+                 "not both")
+        names = {fp: name for name, (fp, _ik, _sk)
+                 in _saved_peers(store_db).items()}
+        for fp in sorted(_blocked_set(store_db)):
+            if args.json:
+                print(json.dumps({"fingerprint": fp, "name": names.get(fp, "")}))
+            else:
+                name = names.get(fp)
+                print(f"{fp}\t{name}" if name else fp)
+        return
+    if args.peer is None:
+        _die("block needs a peer to block, or --list to show the block list")
     fp = _peer_to_id(args.peer, store_db)
     _blocked_set(store_db)  # ensure the table exists
     _store_sql(store_db, "INSERT OR IGNORE INTO blocked(fingerprint) VALUES(?)", fp)
@@ -312,18 +553,6 @@ def cmd_unblock(args):
     _blocked_set(store_db)  # ensure the table exists
     _store_sql(store_db, "DELETE FROM blocked WHERE fingerprint=?", fp)
     print(f"unblocked {args.peer} ({fp})", file=sys.stderr)
-
-
-def cmd_blocked(args):
-    d = _resolve_store(args)
-    store_db = d / STORE_FILE
-    names = {fp: name for name, (fp, _ik, _sk) in _saved_peers(store_db).items()}
-    for fp in sorted(_blocked_set(store_db)):
-        if args.json:
-            print(json.dumps({"fingerprint": fp, "name": names.get(fp, "")}))
-        else:
-            name = names.get(fp)
-            print(f"{fp}\t{name}" if name else fp)
 
 
 def cmd_send(args):
@@ -343,27 +572,54 @@ def cmd_receive(args):
         _die("receive needs a target: --peer PEER for one sender, or --all "
              "for every sender")
     u = _open_user(args)
-    to = None if args.all else _peer_to_id(args.peer,
-                                           _resolve_store(args) / STORE_FILE)
+    store_db = _resolve_store(args) / STORE_FILE
+    to = None if args.all else _peer_to_id(args.peer, store_db)
 
-    def emit(batch):
-        for m in batch:                      # standard message objects
+    if args.save_messages and _meta(store_db, "no_passphrase") == "1":
+        print("retalk: warning: --save-messages on a --no-passphrase identity "
+              "stores message bodies with no real protection (its store key is "
+              "a public constant); the folder's file permissions are the only "
+              "guard", file=sys.stderr)
+
+    def handle(batch):
+        for m in batch:                      # standard message / contact objects
+            if args.save_contacts and m.get("kind") == "contact":
+                _stage_contact(store_db, m)  # to the inbox for `import --inbox`
+            elif args.save_messages and "text" in m:
+                _save_message(store_db, u, m)  # sealed copy for `retalk history`
             print(json.dumps(m), flush=True)
 
     try:
         u.sync(resend=False)          # reachable + fresh keys; reading never resends
-        emit(u.receive(to))
+        handle(u.receive(to))
         if not args.follow:
             return
         last_sync = time.monotonic()
         while True:
             time.sleep(2)
-            emit(u.receive(to))
+            handle(u.receive(to))
             if time.monotonic() - last_sync > 60:
                 u.sync(resend=False)  # key upkeep only; resends belong to send / `retalk sync`
                 last_sync = time.monotonic()
     except KeyboardInterrupt:
         pass
+
+
+def cmd_history(args):
+    u = _open_user(args, need_server=False, banner=False)
+    store_db = _resolve_store(args) / STORE_FILE
+    _ensure_messages(store_db)
+    peer_fp = _peer_to_id(args.peer, store_db) if args.peer else None
+    where = "WHERE from_fp=? " if peer_fp else ""
+    rows = _store_sql(store_db,
+                      "SELECT msg_id, from_fp, from_name, body FROM messages "
+                      f"{where}ORDER BY ts", *([peer_fp] if peer_fp else []))
+    # prefer the current saved-peer name; fall back to the label stored at receive
+    names = {fp: name for name, (fp, _ik, _sk) in _saved_peers(store_db).items()}
+    for msg_id, from_fp, from_name, body in rows:
+        print(json.dumps({"id": msg_id, "from": from_fp,
+                          "name": names.get(from_fp) or from_name,
+                          "text": u.decrypt_at_rest(body)}), flush=True)
 
 
 def cmd_sync(args):
@@ -456,7 +712,7 @@ quickstart:
 
 run `retalk <command> --help` for the full story of each command.""")
     sub = p.add_subparsers(dest="command", required=True,
-                           metavar="{init,id,add,contacts,verify,block,unblock,blocked,send,receive}")
+                           metavar="{init,id,add,contacts,show,share,import,verify,block,unblock,send,receive,history}")
 
     sp = sub.add_parser(
         "init", parents=[common], formatter_class=raw,
@@ -604,8 +860,125 @@ examples:
     sp.set_defaults(fn=cmd_contacts)
 
     sp = sub.add_parser(
+        "show", parents=[common], formatter_class=raw,
+        help="print one saved peer as a shareable Contact card (JSON)",
+        description="""\
+Print one contact as a Contact card (JSON, see docs/STANDARD.md) on stdout:
+{"fingerprint", "name", "identity_key", "signing_key", "verified"}. This is the
+shareable form of a saved peer -- the same object `retalk share` sends over the
+relay and `retalk import` ingests, so you can also hand it over any out-of-band
+channel (paste it, pipe it) and have the other side import it.
+
+Name the contact by a saved peer name (from `retalk add`) or a raw 32-hex user
+id. The card's `name` is the recommended nickname the recipient sees: the saved
+peer name, or whatever you pass with `--as`. The identity_key/signing_key are
+included only when the contact is verified (`retalk verify`); otherwise they are
+"" and the card is unverified -- the recipient verifies it on first contact, as
+usual. The keys are not secret, and the fingerprint pins them, so a card is safe
+to share in the clear.
+
+No passphrase and no server contact -- this only reads your local peers table.""",
+        epilog="""\
+examples:
+  retalk show bob                  bob's Contact card as one JSON line
+  retalk show bob --as bobby       recommend the nickname 'bobby' instead
+  retalk show bob | retalk import --dir ./carol   copy bob to another identity""")
+    sp.add_argument("contact",
+                    help="a saved peer name (from `retalk add`) or a 32-hex "
+                         "user id to emit as a Contact card")
+    sp.add_argument("--as", dest="as_name", metavar="NAME",
+                    help="recommended nickname to put in the card "
+                         "(default: the saved peer name)")
+    sp.set_defaults(fn=cmd_show)
+
+    sp = sub.add_parser(
+        "share", parents=[common], formatter_class=raw,
+        help="send a saved contact to a peer (an introduction)",
+        description="""\
+Introduce one of your contacts to a peer: build that contact's Contact card
+(the same JSON `retalk show` prints) and send it, encrypted, to the recipient
+over the relay. The recipient sees it in `retalk receive` as a contact record
+and saves it with `retalk import`, under the nickname you recommend.
+
+`--peer` is the recipient: a saved peer name (from `retalk add`) or a raw
+32-hex user id. The positional CONTACT is the contact you are sharing, likewise
+a saved peer name or a raw user id; `--as NAME` overrides the recommended
+nickname (default: the contact's saved name). The card carries the contact's
+keys only if you have verified them; either way the recipient re-checks the
+keys against the fingerprint, so a tampered card is refused, never trusted.
+
+Like `send`, delivery is tracked: the card stays in your outbox until the
+recipient's client acknowledges it. Prints a JSON receipt on stdout --
+{"id", "to", "shared"} -- where `shared` is the shared contact's fingerprint.""",
+        epilog="""\
+examples:
+  retalk share --peer carol bob              introduce bob to carol
+  retalk share --peer carol bob --as bobby   recommend the nickname 'bobby'
+  retalk share --peer carol f1041c25c87351d8550b31cc6b13ab04 --as dave""")
+    sp.add_argument("--peer", metavar="PEER", required=True,
+                    help="recipient of the introduction: a saved peer name "
+                         "(from `retalk add`) or a raw 32-hex user id")
+    sp.add_argument("contact",
+                    help="the contact to share: a saved peer name or a 32-hex "
+                         "user id")
+    sp.add_argument("--as", dest="as_name", metavar="NAME",
+                    help="recommended nickname to put in the card "
+                         "(default: the contact's saved name)")
+    sp.set_defaults(fn=cmd_share)
+
+    sp = sub.add_parser(
+        "import", parents=[common], formatter_class=raw,
+        help="save a contact from a shared Contact card",
+        description="""\
+Save a contact from a Contact card -- the JSON that `retalk show` prints and
+`retalk share` sends (the `card` object of a received contact record). The card
+is saved as a peer under its recommended nickname, exactly as if you had run
+`retalk add` (and `retalk verify`, when the card carries keys).
+
+The card comes from the CARD argument, or from stdin when CARD is omitted or
+"-". The nickname is the card's `name`, or `--as NAME` to choose your own
+(required when the card has no name). If the card includes keys, they must hash
+to its fingerprint -- otherwise import refuses with PIN MISMATCH and saves
+nothing; a card with no keys is saved as an unverified contact (verified on
+first contact).
+
+With --inbox, import draws instead from the contact-inbox: the cards that
+`retalk receive` saved when peers shared contacts with you (`retalk share`).
+Plain `import --inbox` promotes every staged contact into your saved peers and
+removes it from the inbox (a move); `import --inbox NAME-OR-ID` imports just the
+one matching a staged name or fingerprint; `import --inbox --list` shows the
+inbox without importing anything. A staged card that fails its key check is
+reported and left in the inbox. The same PIN-MISMATCH rule applies.
+
+No passphrase and no server contact -- this only reads/writes local tables.""",
+        epilog="""\
+examples:
+  retalk import '{"fingerprint":"f104...","name":"bob","identity_key":"..","signing_key":".."}'
+  retalk import --as bobby '<card json>'     save it under a nickname of your own
+  retalk import --inbox --list               show contacts peers shared with you
+  retalk import --inbox                       save all of them as peers
+  retalk import --inbox bob --as bobby        save just "bob", under your own name""")
+    sp.add_argument("card", nargs="?",
+                    help="without --inbox: the Contact card as a JSON string "
+                         "(omit or '-' to read stdin). With --inbox: an optional "
+                         "staged name or fingerprint to import just that one")
+    sp.add_argument("--as", dest="as_name", metavar="NAME",
+                    help="nickname to save the contact under "
+                         "(default: the card's recommended name)")
+    sp.add_argument("--inbox", action="store_true",
+                    help="import from the contact-inbox (cards `receive` saved) "
+                         "rather than from a CARD")
+    sp.add_argument("--list", action="store_true",
+                    help="with --inbox: list the staged contacts and import "
+                         "nothing")
+    sp.add_argument("--json", action="store_true",
+                    help="with --inbox --list: emit one JSON object per staged "
+                         "contact")
+    sp.set_defaults(fn=cmd_import)
+
+    sp = sub.add_parser(
         "block", parents=[common], formatter_class=raw,
-        help="silently drop a sender's incoming messages",
+        help="silently drop a sender's incoming messages (or --list them)",
         description="""\
 Block a sender: their incoming messages are dropped during `receive` before
 any decryption happens, so a blocked sender can never even consume one of your
@@ -613,13 +986,22 @@ one-time keys. The block is local to this identity's store and is never sent to
 the server or the peer; their mail simply stays on the server, unread.
 
 Name the sender by a saved peer name (from `retalk add`) or a raw 32-hex user
-id. Unblock later with `retalk unblock`; list current blocks with
-`retalk blocked`.""",
+id. Pass --list (instead of a peer) to print the current block list, one per
+line with the saved peer name if any; --json emits one object per line. Unblock
+later with `retalk unblock`.""",
         epilog="""\
 examples:
   retalk block bob                              block a saved peer
-  retalk block f1041c25c87351d8550b31cc6b13ab04   block by raw id""")
-    sp.add_argument("peer", help="saved peer name or 32-hex user id to block")
+  retalk block f1041c25c87351d8550b31cc6b13ab04   block by raw id
+  retalk block --list                           show the block list
+  retalk block --list --json     one {"fingerprint","name"} object per line""")
+    sp.add_argument("peer", nargs="?",
+                    help="saved peer name or 32-hex user id to block; omit "
+                         "with --list")
+    sp.add_argument("--list", action="store_true",
+                    help="list blocked senders instead of blocking one")
+    sp.add_argument("--json", action="store_true",
+                    help="with --list: emit one JSON object per blocked sender")
     sp.set_defaults(fn=cmd_block)
 
     sp = sub.add_parser(
@@ -628,27 +1010,14 @@ examples:
         description="""\
 Remove a sender from the block list, so `receive` delivers their messages
 again. Name them by a saved peer name or a raw 32-hex user id. Unblocking
-someone who is not blocked is a no-op.""",
+someone who is not blocked is a no-op. List current blocks with
+`retalk block --list`.""",
         epilog="""\
 examples:
   retalk unblock bob
   retalk unblock f1041c25c87351d8550b31cc6b13ab04""")
     sp.add_argument("peer", help="saved peer name or 32-hex user id to unblock")
     sp.set_defaults(fn=cmd_unblock)
-
-    sp = sub.add_parser(
-        "blocked", parents=[common], formatter_class=raw,
-        help="list blocked senders",
-        description="""\
-List the fingerprints currently blocked for this identity, one per line
-(with the saved peer name, if any). No server contact.""",
-        epilog="""\
-examples:
-  retalk blocked
-  retalk blocked --json     one {"fingerprint","name"} object per line""")
-    sp.add_argument("--json", action="store_true",
-                    help="emit one JSON object per blocked sender")
-    sp.set_defaults(fn=cmd_blocked)
 
     sp = sub.add_parser(
         "sync", parents=[common], formatter_class=raw,
@@ -709,8 +1078,11 @@ examples:
         description="""\
 Fetch pending messages from the server, decrypt them, and print each as one
 JSON object per line (NDJSON) on stdout -- see docs/STANDARD.md for the fields
-({"id", "from", "name", "text"}). Each decrypted message is acknowledged back
-to its sender (encrypted, like everything else).
+({"id", "from", "name", "text"}). A contact shared with `retalk share` arrives
+as a contact record instead ({"id", "from", "name", "kind": "contact", "card":
+{...}}); it is also saved to the contact-inbox (unless --no-save-contacts) for
+`retalk import --inbox`. Each decrypted message is acknowledged back to its
+sender (encrypted, like everything else).
 
 Say whose messages to read: pass --peer PEER (a saved name or 32-hex user id)
 to read just that sender, or --all to drain every sender. Targeting one peer
@@ -735,9 +1107,12 @@ examples:
   retalk receive --all --follow        live tail of all senders + key upkeep
   retalk receive --all --peers-only    drop mail from senders you never added
   retalk receive --all | jq .text      pipe the JSON lines to jq
+  retalk receive --all ; retalk import --inbox --list   read, then see staged contacts
 
 each line is a JSON message object (see docs/STANDARD.md): "id", "from",
-"name", "text".""")
+"name", "text" -- or a contact record with "kind":"contact" and "card".
+Contacts peers share are also saved to the contact-inbox (see
+`retalk import --inbox`); pass --no-save-contacts to skip that.""")
     sp.add_argument("--peer", metavar="PEER",
                     help="read only this peer's messages (a saved peer name "
                          "or a 32-hex user id); use --all for every sender")
@@ -753,7 +1128,40 @@ each line is a JSON message object (see docs/STANDARD.md): "id", "from",
                          "any decryption, so they never consume a one-time "
                          "key. Blocked senders (`retalk block`) are always "
                          "dropped regardless of this flag")
-    sp.set_defaults(fn=cmd_receive)
+    sp.add_argument("--no-save-contacts", dest="save_contacts",
+                    action="store_false",
+                    help="do not save contacts that peers share with you "
+                         "(`retalk share`) to the contact-inbox; by default they "
+                         "are staged there for `retalk import --inbox`")
+    sp.add_argument("--save-messages", action="store_true",
+                    help="also keep a local copy of each chat message, sealed "
+                         "with this identity's key, for `retalk history`. Off by "
+                         "default (retalk keeps no message log otherwise). On a "
+                         "--no-passphrase identity the seal is not real "
+                         "encryption -- the store key is public")
+    sp.set_defaults(fn=cmd_receive, save_contacts=True)
+
+    sp = sub.add_parser(
+        "history", parents=[common], formatter_class=raw,
+        help="replay messages saved by `receive --save-messages`",
+        description="""\
+Print the messages this identity has saved with `retalk receive
+--save-messages`, oldest first, as one JSON object per line (NDJSON) -- the same
+Message shape `receive` emits ({"id", "from", "name", "text"}, see
+docs/STANDARD.md). Each body is decrypted from its at-rest seal on the way out,
+so this needs the identity's passphrase but never the relay.
+
+retalk keeps no message log unless you opt in with `receive --save-messages`;
+with `--peer` only that sender's saved messages are shown.""",
+        epilog="""\
+examples:
+  retalk history                 every saved message, oldest first
+  retalk history --peer bob      only messages saved from bob
+  retalk history | jq -r .text   just the text of each""")
+    sp.add_argument("--peer", metavar="PEER",
+                    help="show only this sender's saved messages (a saved peer "
+                         "name or a 32-hex user id)")
+    sp.set_defaults(fn=cmd_history)
 
     args = p.parse_args()
     args.fn(args)

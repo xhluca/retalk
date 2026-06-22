@@ -230,6 +230,33 @@ class User:
         return fingerprint(acct.curve25519_key.to_base64(),
                            acct.ed25519_key.to_base64())
 
+    # ---------- at-rest sealing (optional local copies) ----------
+
+    def _at_rest_key(self):
+        """A self-encryption keypair derived from the store key, for sealing
+        optional local copies of messages (`retalk receive --save-messages`).
+        It is only as strong as the passphrase: a --no-passphrase identity
+        derives the store key from a public constant, so its at-rest copies
+        are not meaningfully encrypted (the caller is expected to warn)."""
+        seed = hashlib.sha256(b"retalk:at-rest|" + self._store_key).digest()
+        return v.Curve25519SecretKey.from_bytes(seed)
+
+    def encrypt_at_rest(self, text: str) -> str:
+        """Seal `text` for local storage, returning a blob that only this
+        identity (with its passphrase) can open. The blob is the JSON triple
+        [ciphertext, mac, ephemeral_key] (each base64). Reverse with
+        decrypt_at_rest."""
+        dec = v.PkDecryption.from_key(self._at_rest_key())
+        msg = v.PkEncryption.from_key(dec.public_key).encrypt(text.encode())
+        return json.dumps([base64.b64encode(b).decode()
+                           for b in (msg.ciphertext, msg.mac, msg.ephemeral_key)])
+
+    def decrypt_at_rest(self, blob: str) -> str:
+        """Open a blob produced by encrypt_at_rest."""
+        dec = v.PkDecryption.from_key(self._at_rest_key())
+        ct, mac, eph = (base64.b64decode(p) for p in json.loads(blob))
+        return dec.decrypt(v.Message(ct, mac, eph)).decode()
+
     def publish(self, n: int = 100, rotate_fallback: bool = False):
         """Publish identity, signing, and n fresh one-time keys to the
         server. This is also all the onboarding a server needs — there is no
@@ -318,6 +345,26 @@ class User:
             self._send_envelope(to, payload, record_outbox=True)
             return mid
 
+    def share(self, to: str, card: dict) -> str:
+        """Encrypt and send a contact card to a peer user ID, introducing a
+        third user. Like send(), the ciphertext is kept in the local outbox
+        until the peer acknowledges decrypting it.
+
+        `card` is a Contact object (see docs/STANDARD.md): the introduced
+        user's "fingerprint" plus a recommended "name" (nickname), and the
+        "identity_key"/"signing_key" when the sharer has them. The card is
+        not a secret -- the recipient re-checks the keys against the
+        fingerprint on import, so a tampered card is refused, not trusted.
+
+        Returns the message id (see docs/STANDARD.md) -- the same id the
+        recipient sees, so the two sides can be correlated."""
+        with self._locked():
+            mid = uuid.uuid4().hex
+            payload = {"id": mid, "kind": "contact", "name": self.name,
+                       "card": card}
+            self._send_envelope(to, payload, record_outbox=True)
+            return mid
+
     def _send_envelope(self, to: str, payload: dict, record_outbox: bool):
         session = self._load_session(to)
         if session is None:
@@ -400,8 +447,9 @@ class User:
 
     def receive(self, peer: str | None = None) -> list[dict]:
         """Fetch and decrypt pending messages, acknowledging each to its
-        sender. Returns a list of message dicts (see docs/STANDARD.md):
-        {"id", "from", "name", "text"}.
+        sender. Returns a list of dicts (see docs/STANDARD.md): a chat message
+        is {"id", "from", "name", "text"}; a contact shared with `retalk share`
+        is {"id", "from", "name", "kind": "contact", "card": {...}}.
 
         With `peer` (a user id) set, only that sender's messages are fetched;
         everyone else's stays in the server mailbox for a later receive."""
@@ -473,6 +521,12 @@ class User:
                     sender, {"id": data["id"], "kind": "ack"}, record_outbox=False)
                 name = self.names.get(sender) or (
                     f"~{data['name']}" if data.get("name") else "")
-                out.append({"id": data["id"], "from": sender,
-                            "name": name, "text": data["text"]})
+                if data.get("kind") == "contact":
+                    # a shared contact card (`retalk share`): a distinct record
+                    # so a consumer never mistakes a card for a chat message
+                    out.append({"id": data["id"], "from": sender, "name": name,
+                                "kind": "contact", "card": data.get("card", {})})
+                else:
+                    out.append({"id": data["id"], "from": sender,
+                                "name": name, "text": data["text"]})
         return out

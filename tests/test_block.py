@@ -205,15 +205,15 @@ class TestBlockCLI(unittest.TestCase):
         self.cli("add", "bob", bid, "--dir", a)
         self.cli("receive", "--all", "--dir", a)  # alice publishes keys
 
-        # block/blocked/unblock round-trip (by name and by raw id)
+        # block / block --list / unblock round-trip (by name and by raw id)
         self.cli("block", "bob", "--dir", a)
         self.cli("block", cid, "--dir", a)
         listed = {json.loads(l)["fingerprint"]
-                  for l in self.cli("blocked", "--json", "--dir", a).stdout.splitlines()}
+                  for l in self.cli("block", "--list", "--json", "--dir", a).stdout.splitlines()}
         self.assertEqual(listed, {bid, cid}, listed)
         self.cli("unblock", "bob", "--dir", a)
         listed = {json.loads(l)["fingerprint"]
-                  for l in self.cli("blocked", "--json", "--dir", a).stdout.splitlines()}
+                  for l in self.cli("block", "--list", "--json", "--dir", a).stdout.splitlines()}
         self.assertEqual(listed, {cid}, listed)
 
         # re-block carol by name? she has no saved name; block already done by
@@ -247,7 +247,7 @@ class TestBlockCLI(unittest.TestCase):
         out = self.cli("receive", "--all", "--peers-only", "--dir", a).stdout
         texts = [json.loads(l)["text"] for l in out.splitlines()]
         self.assertEqual(texts, ["second knock from carol"], texts)
-        print("PASS: CLI block/unblock/blocked + --peers-only; server-side nack "
+        print("PASS: CLI block/block --list/unblock + --peers-only; server-side nack "
               "keeps a send-only sender's refused mail from resurrecting")
 
 

@@ -209,22 +209,90 @@ retalk id                          # print my user ID
 retalk add bob <bob-user-id>       # save a peer (name + fingerprint)
 retalk verify bob                  # fetch & record "bob"'s keys (optional)
 retalk contacts                    # list saved peers and verified status
+retalk show bob                    # print "bob" as a shareable Contact card (JSON)
+retalk share --peer carol bob      # send "bob"'s card to "carol" (an introduction)
+retalk import '<card json>'        # save a contact someone shared with you
+retalk import --inbox --list       # contacts peers shared (saved by `receive`)
+retalk import --inbox              # save all of them as peers
 retalk send --peer bob "hello"     # send one encrypted message
 retalk receive --all               # read every sender (one JSON line each)
 retalk receive --peer bob          # read only messages from "bob"
 retalk receive --all --follow      # keep polling all senders; maintain keys
+retalk receive --all --save-messages   # also keep a sealed local copy
+retalk history                     # replay saved messages (needs --save-messages)
 retalk block eve                   # drop a sender's mail before decryption
 retalk unblock eve                 # stop dropping that sender
-retalk blocked                     # list blocked senders
+retalk block --list                # list blocked senders
 retalk receive --all --peers-only  # accept only saved peers (drop strangers)
 ```
 
 Use `receive --all` deliberately, not as a routine poll: it drains and acknowledges *every* sender's mail at once and deletes it from the relay. For ongoing receipt prefer a single long-lived `retalk receive --all --follow` (one reader that owns the drain), or `retalk receive --peer NAME` for one sender. Two concurrent `receive --all` readers split the mail between them, so don't run a bare `--all` while a `--follow` reader is going.
 
-`block`/`unblock`/`blocked` and `--peers-only` are local filters that drop a
-sender during `receive` *before* any decryption, so a blocked or unknown
+`block`/`unblock`/`block --list` and `--peers-only` are local filters that drop
+a sender during `receive` *before* any decryption, so a blocked or unknown
 sender can never make you consume a one-time key. Nothing is sent to the
 server or the peer.
+
+### Sharing contacts
+
+Once you have saved a peer, you can introduce it to someone else — pass along
+its user ID together with a **recommended nickname** — instead of making them
+copy a fingerprint by hand.
+
+```sh
+retalk show bob                      # print "bob" as a Contact card (one JSON line)
+retalk share --peer carol bob        # send that card to "carol" over the relay
+retalk share --peer carol bob --as bobby   # recommend a different nickname
+```
+
+`show` prints the contact as a JSON **card** — its fingerprint, the recommended
+nickname, and (if you have verified it) its keys. `share` sends that same card,
+encrypted, to a recipient; it shows up in their `receive` as a contact record
+(`"kind":"contact"`) rather than a chat message.
+
+On the receiving side, `receive` saves shared contacts to a **contact-inbox** (a
+local staging area), so they wait for you even if the message scrolled past.
+`import --inbox` then moves them into your real contacts:
+
+```sh
+retalk import --inbox --list          # see who has been shared with you
+retalk import --inbox                 # save all of them as peers (and clear the inbox)
+retalk import --inbox bob --as bobby  # save just "bob", under a nickname of your own
+```
+
+Each staged card records who introduced it. `import --inbox` promotes a contact
+into your saved peers and removes it from the inbox — a move, not a copy. Pass
+`retalk receive --no-save-contacts` to skip staging. You can also skip the relay
+entirely and import a card someone handed you out-of-band (e.g. `retalk show`
+output): `retalk import '<card json>'`, or `retalk import --as bobby '<card>'`.
+
+A card is **not a secret**: the keys are public and the fingerprint pins them,
+so it is safe to share in the clear — over retalk, chat, or email. `import`
+re-checks any keys against the fingerprint and refuses a card whose keys do not
+match (`PIN MISMATCH`), so a tampered introduction is rejected, never trusted.
+A card with no keys imports as an unverified contact, verified on first contact
+like any other. `show` + `import` also copy a contact between two of your own
+identities without going through the relay at all.
+
+### Saving a message history
+
+By default `retalk receive` keeps **no** message log: it decrypts each message,
+prints it, and forgets it (pipe the output somewhere if you want a record).
+Opt in with `--save-messages` to also keep a local copy, and read it back with
+`retalk history`:
+
+```sh
+retalk receive --all --save-messages   # decrypt, print, and keep a copy
+retalk history                         # replay saved messages, oldest first
+retalk history --peer bob              # just bob's
+```
+
+Saved bodies are **sealed at rest** with a key derived from the identity's
+passphrase (the same secret that protects your keys), so the SQLite file does
+not hold plaintext; `history` unseals them on the way out. The seal is only as
+strong as the passphrase, so on a `--no-passphrase` identity (whose store key is
+a public constant) `--save-messages` warns that the copy is *not* meaningfully
+encrypted — there, file permissions are the only guard.
 
 ### Selecting the user
 

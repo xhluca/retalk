@@ -145,7 +145,7 @@ one of your one-time keys:
 
 ```sh
 retalk block bob              # drop "bob"'s mail (by saved name or 32-hex id)
-retalk blocked                # list blocked senders (--json for objects)
+retalk block --list           # list blocked senders (--json for objects)
 retalk unblock bob            # stop dropping "bob"
 
 retalk receive --all --peers-only   # accept only senders you `retalk add`ed
