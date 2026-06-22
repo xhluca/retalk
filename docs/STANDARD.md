@@ -62,9 +62,9 @@ as the `id` string.
 
 Emitted by `retalk contacts --json` -- one object per saved peer (created with
 `retalk add`), sorted by name. The same object is the **contact card** that
-`retalk show` prints, `retalk share` sends (inside a shared-contact record,
-below), and `retalk import` ingests -- so a contact can be copied between
-identities verbatim.
+`retalk contacts --show CONTACT --json` prints, `retalk share` sends (inside a
+shared-contact record, below), and `retalk import` ingests -- so a contact can
+be copied between identities verbatim.
 
 | field          | type    | description |
 |----------------|---------|-------------|
