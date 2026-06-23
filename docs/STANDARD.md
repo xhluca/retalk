@@ -24,7 +24,8 @@ consume retalk data should follow it.
 ### Message
 
 Emitted by `retalk receive` -- one object per decrypted message -- and returned
-by `User.receive()` (one dict per message).
+by `User.receive()` (one dict per message). `retalk history` replays saved
+copies (kept by `receive --save-messages`) in this same shape, oldest first.
 
 | field  | type   | description |
 |--------|--------|-------------|
