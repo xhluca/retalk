@@ -116,6 +116,9 @@ the new user id. Offline; keys publish automatically on first send/receive.
 **`retalk id`** — print this identity's user id (sha256 of its public keys); it holds no secret and is safe to post publicly.
 
 - `--json` — emit `{fingerprint, identity_key, name}`.
+- `--card` — emit your OWN **Contact card** as JSON — `{fingerprint, name, identity_key, signing_key, verified, relay}` — the shareable form of your identity (your address + keys + the relay you use). A peer saves it with `retalk import`; pipe it out-of-band or `retalk id --card | retalk import --dir ./them`.
+- `--invite-message` — render that card as a copy-paste **invite** for onboarding a peer out-of-band: install retalk, set the relay, and `retalk add` you, plus a prompt to send their id back.
+- `--as NAME` — with `--card`/`--invite-message`, the nickname you suggest the peer save you under (default: your display name).
 
 ### Contacts — `add`, `verify`, `contacts`
 

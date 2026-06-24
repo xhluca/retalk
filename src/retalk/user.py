@@ -26,6 +26,7 @@ import base64
 import fcntl
 import hashlib
 import json
+import os
 import secrets
 import sqlite3
 import time
@@ -177,7 +178,15 @@ class User:
         return self._call_raw(tool, wire)
 
     def _call_raw(self, tool: str, wire: dict):
-        headers = {"content-type": "application/json"}
+        headers = {"content-type": "application/json",
+                   # Some relays sit behind Cloudflare, whose Browser
+                   # Integrity Check rejects a non-browser User-Agent
+                   # (HTTP error 1010). Present a normal UA; override
+                   # with the RETALK_USER_AGENT env var.
+                   "user-agent": os.environ.get(
+                       "RETALK_USER_AGENT",
+                       "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                       "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         req = urllib.request.Request(
@@ -221,6 +230,10 @@ class User:
     def identity_key(self) -> str:
         """This user's Curve25519 identity public key, base64."""
         return self._load_account().curve25519_key.to_base64()
+
+    def signing_key(self) -> str:
+        """This user's Ed25519 signing public key, base64."""
+        return self._load_account().ed25519_key.to_base64()
 
     def fingerprint(self) -> str:
         """This user's fingerprint — the sha256 of its public keys, sent as

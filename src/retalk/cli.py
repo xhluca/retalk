@@ -299,9 +299,48 @@ def cmd_init(args):
     print(u.fingerprint())
 
 
+def _self_card(u, as_name):
+    """This user's OWN Contact card (see docs/STANDARD.md), plus the `relay` it
+    uses -- the shareable form of your own identity ("share a personal user").
+    A peer saves it with `retalk import`; the extra `relay` field tells them
+    where to reach you and is ignored by clients that do not use it."""
+    card = {"fingerprint": u.fingerprint(), "name": as_name or u.name or "",
+            "identity_key": u.identity_key(), "signing_key": u.signing_key(),
+            "verified": True}
+    if u.server_url:
+        card["relay"] = u.server_url
+    return card
+
+
+def _invite_message(u, as_name):
+    """Render this user's own card as a copy-paste invite for onboarding a peer
+    out-of-band (chat, email, ...): how to install retalk, point at the relay,
+    and add you. Tool-agnostic -- plain retalk, no wrapper assumptions."""
+    c = _self_card(u, as_name)
+    name = c["name"] or "me"
+    relay = c.get("relay") or "<the relay URL we will share>"
+    return "\n".join([
+        "Let's talk over retalk -- end-to-end-encrypted messages over an "
+        "untrusted relay.",
+        "",
+        "1. Install:  pipx install retalk    (or: uv tool install retalk)",
+        f"2. Use our relay:  export RETALK_RELAY={relay}",
+        f"3. Add me:  retalk add {name} {c['fingerprint']}",
+        "4. Send me your own id back (run: retalk id) so I can add you.",
+        "",
+        f"relay:       {relay}",
+        f"add me as:   {name}",
+        f"fingerprint: {c['fingerprint']}",
+    ])
+
+
 def cmd_id(args):
     u = _open_user(args, need_server=False, banner=False)
-    if args.json:
+    if getattr(args, "invite_message", False):
+        print(_invite_message(u, getattr(args, "as_name", None)))
+    elif getattr(args, "card", False):
+        print(json.dumps(_self_card(u, getattr(args, "as_name", None))))
+    elif args.json:
         print(json.dumps({"fingerprint": u.fingerprint(),
                           "identity_key": u.identity_key(),
                           "name": u.name}))
@@ -783,15 +822,36 @@ server to hand out substitute keys for you. Sharing it is therefore
 sharing your address and your key fingerprint in one string. It contains
 no secret — it is safe to post publicly.
 
-Needs your secret (to open the store) but never contacts the server.""",
+Needs your secret (to open the store) but never contacts the server.
+
+--card prints your OWN Contact card (your address + keys + relay) as JSON for a
+peer to `retalk import`; --invite-message renders that card as a copy-paste
+message that walks a new peer through installing retalk, setting the relay, and
+adding you.""",
         epilog="""\
 examples:
   retalk id                    id of the default identity
   retalk id --dir ./alice      id of a project-local identity
-  retalk id --json             {"fingerprint", "identity_key", "name"}""")
+  retalk id --json             {"fingerprint", "identity_key", "name"}
+  retalk id --card             your own Contact card (incl. relay) as JSON
+  retalk id --card | retalk import --dir ./bob   hand yourself to another identity
+  retalk id --invite-message   a copy-paste invite to onboard a peer out-of-band
+  retalk id --invite-message --as bob   suggest the name the peer saves you as""")
     sp.add_argument("--json", action="store_true",
                     help="emit JSON with fingerprint, identity_key (base64 "
                          "Curve25519 public key), and name")
+    sp.add_argument("--card", action="store_true",
+                    help="emit your OWN Contact card as JSON (fingerprint, name, "
+                         "identity_key, signing_key, verified, relay) -- the "
+                         "shareable form of your identity; a peer saves it with "
+                         "`retalk import`")
+    sp.add_argument("--invite-message", dest="invite_message",
+                    action="store_true",
+                    help="render your card as a copy-paste invite (install + "
+                         "relay + add-me steps) to onboard a peer out-of-band")
+    sp.add_argument("--as", dest="as_name", metavar="NAME",
+                    help="with --card/--invite-message: the nickname you suggest "
+                         "the peer save you under (default: your display name)")
     sp.set_defaults(fn=cmd_id)
 
     sp = sub.add_parser(
