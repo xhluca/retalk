@@ -941,7 +941,7 @@ a fingerprint drops every name pinned to it. Removing nothing is an error.
 No passphrase and no server contact -- this only reads/writes your local peers
 table. Prints nothing when you have saved no peers.""",
         epilog="""\
-examples:
+examples:  (each assumes a selected user: RETALK_USER set, or add -u NAME / --dir DIR)
   retalk contacts                  list saved peers as NAME<tab>FINGERPRINT<tab>STATUS
   retalk contacts --json           one Contact object (see docs/STANDARD.md) per line
   retalk contacts --json | jq .    pretty-print every contact
