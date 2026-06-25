@@ -154,6 +154,12 @@ server.example.com {
 
 </details>
 
+> [!NOTE]
+> Don't want to run your own relay yet? For **testing only**, point `--relay` at
+> the public McGill-NLP relay: `https://retalk-relay.mcgill-nlp.org`. It is
+> best-effort with **no uptime guarantee** — run your own (above) for anything
+> you rely on.
+
 ## Create a user
 
 A retalk identity is a **user**, selected by name with `--user NAME` (short:
