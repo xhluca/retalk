@@ -36,6 +36,20 @@ prekeys and rotate the fallback automatically.
 → [olm.md](olm.md) — one-time prekeys, fallback keys, replenishment, and
 rotation.
 
+## Key maintenance
+
+Users publish one-time prekeys so peers can start encrypted sessions while
+the user is offline.
+
+`maintain()` keeps that server-side public key material healthy:
+
+- it uploads 100 new one-time keys when fewer than 20 remain unclaimed,
+- it rotates the reusable fallback key daily, and
+- it resends unacknowledged outbox messages.
+
+The fallback key is only used when the one-time key pool is empty. It keeps
+new sessions available, but rotation limits how long the reusable key lives.
+
 ## The server and its trust model
 
 The relay stores only public key material and ciphertext (deleted on delivery).
@@ -45,6 +59,45 @@ users or silently swap their keys.
 
 → [server.md](server.md) — database tables, what the server sees, why mailbox
 calls are authenticated, and exactly what a hostile server can and cannot do.
+
+## Delivery
+
+retalk aims for at-least-once delivery with de-duplication, so a flaky or
+replaced server never silently loses mail. Each message carries an ID inside the
+encrypted envelope; when the recipient decrypts it their client returns an
+encrypted acknowledgement, and only then does the relay drop the ciphertext.
+
+Senders keep ciphertext in a local outbox until it is acknowledged.
+`maintain()` resends anything unacknowledged for more than 2 minutes, and
+`retalk receive --all --follow` runs `maintain()` once a minute.
+
+For example, send to a peer who is offline and watch it arrive on their next
+poll:
+
+```sh
+# "alice": ciphertext is uploaded to the relay AND kept in "alice"'s local outbox
+retalk send --peer bob "are you there?"
+
+# "bob", later: decrypt, print, and ack -- after which the relay deletes it
+retalk receive --peer alice    # -> {... "name":"alice","text":"are you there?"}
+
+# "alice": "bob"'s ack arrives, so the message leaves "alice"'s outbox
+retalk receive --all
+```
+
+Leaving a sender in `--follow` resends unacknowledged messages on its own:
+
+```sh
+# anything "bob" hasn't acked is re-uploaded about once a minute until it lands
+retalk receive --all --follow
+```
+
+This is also what makes server loss or migration recoverable -- point clients at
+a fresh relay and keep going:
+
+- clients republish missing public keys on their next request,
+- senders re-upload unacknowledged outbox messages, and
+- recipients drop duplicate ciphertext they have already processed.
 
 ## Running a server on the internet
 
@@ -405,3 +458,33 @@ plaintext or your block list.
 
 → [CONTRIBUTING.md](CONTRIBUTING.md) — development setup, running the tests,
 and cutting a release.
+
+## Test
+
+Run the full test suite from the repository root:
+
+```sh
+uv run python -m unittest discover -s tests -v
+```
+
+The tests use stdlib `unittest` and start their own local servers on ports
+8767-8769. They keep all state in temporary directories and do not touch real
+stores.
+
+CI runs the same discovery on every push and pull request. See
+[tests/README.md](../tests/README.md).
+
+Coverage includes:
+
+- bidirectional encrypted delivery,
+- no plaintext in the server database,
+- delivered mail deletion,
+- key substitution refusal with `PIN MISMATCH`,
+- fallback-key session setup when one-time keys are drained,
+- key replenishment and fallback rotation,
+- in-flight messages across fallback rotation,
+- concurrent sends from two processes sharing one store,
+- migration to a fresh server,
+- delivery acknowledgements and outbox recovery,
+- duplicate rejection, and
+- replayed, stale, and cross-server signed-request rejection.

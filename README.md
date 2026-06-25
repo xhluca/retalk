@@ -1,8 +1,6 @@
 # retalk
 
-Retalk is a small, self-hosted message bus for AI agents, services, and
-people. Messages are end-to-end encrypted. The server only relays encrypted
-blobs and publishes public keys.
+Retalk is a lightweight and self-hostable messaging CLI for people and AI agents, encrypted via `vodozemac`.
 
 The short version:
 
@@ -17,56 +15,136 @@ HTTP+JSON and the Python standard library.
 
 ## Install
 
+<details>
+<summary>Want to isolate your install? Create a virtual environment</summary>
+
+A virtual environment keeps retalk and its dependencies separate from your
+system Python. Create and activate one, then use any method below:
+
+```sh
+python -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
+```
+
+</details>
+
+<table>
+<thead><tr><th>Method</th><th>Command</th></tr></thead>
+<tbody>
+
+<tr>
+<td>
+
+`pip`
+
+</td>
+<td>
+
+```sh
+pip install retalk
+```
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`pipx` (direct run)
+
+</td>
+<td>
+
+```sh
+pipx run retalk --help
+```
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`uv` (full project install)
+
+</td>
+<td>
+
 ```sh
 uv add retalk
 ```
 
-This installs the Python library:
+</td>
+</tr>
 
-```python
-from retalk import User
-```
+<tr>
+<td>
 
-It also installs two commands:
+`uv` (install CLI global)
 
-- `retalk` - user CLI
-- `retalk-server` - relay server
-
-For a global CLI install, use:
+</td>
+<td>
 
 ```sh
 uv tool install retalk
 ```
 
-For one-off runs:
+</td>
+</tr>
+
+<tr>
+<td>
+
+`uvx` (direct run)
+
+</td>
+<td>
 
 ```sh
 uvx retalk --help
 ```
 
-### Other install options
+</td>
+</tr>
 
-With pip or pipx:
+<tr>
+<td>
 
-```sh
-pip install retalk    # into the active environment, so `import retalk` works there
-pipx install retalk   # isolated global install of just the CLIs, onto your PATH
-```
+`pip` (install from git)
 
-Use `pip` when you want the library available inside a project. Use `pipx` when
-you only want the `retalk` / `retalk-server` commands available everywhere: it
-keeps them in their own isolated environment (like `uv tool install`) instead
-of adding retalk to whatever environment happens to be active.
-
-Install the latest unreleased code straight from the repository:
+</td>
+<td>
 
 ```sh
-uv add git+https://github.com/xhluca/retalk        # into a uv project
-pip install git+https://github.com/xhluca/retalk   # into the active environment
+pip install git+https://github.com/xhluca/retalk
 ```
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`uv` (install from git)
+
+</td>
+<td>
+
+```sh
+uv add git+https://github.com/xhluca/retalk
+```
+
+</td>
+</tr>
+
+</tbody>
+</table>
+
+The installation gives you the Python library (`import retalk`) and CLI
+commands: `retalk` (user CLI) and `retalk-server` (launching relay server).
 
 <details>
-<summary>From a development clone</summary>
+<summary>Installing from a development clone</summary>
 
 ```sh
 git clone https://github.com/xhluca/retalk
@@ -347,59 +425,6 @@ Machine B does the same with the user "bob" and "Alice"'s user ID.
 With `RETALK_USER` exported, later commands know which user to act as without
 repeating `--user`.
 
-## Delivery
-
-retalk aims for at-least-once delivery with de-duplication, so a flaky or
-replaced server never silently loses mail. Each message carries an ID inside the
-encrypted envelope; when the recipient decrypts it their client returns an
-encrypted acknowledgement, and only then does the relay drop the ciphertext.
-
-Senders keep ciphertext in a local outbox until it is acknowledged.
-`maintain()` resends anything unacknowledged for more than 2 minutes, and
-`retalk receive --all --follow` runs `maintain()` once a minute.
-
-For example, send to a peer who is offline and watch it arrive on their next
-poll:
-
-```sh
-# "alice": ciphertext is uploaded to the relay AND kept in "alice"'s local outbox
-retalk send --peer bob "are you there?"
-
-# "bob", later: decrypt, print, and ack -- after which the relay deletes it
-retalk receive --peer alice    # -> {... "name":"alice","text":"are you there?"}
-
-# "alice": "bob"'s ack arrives, so the message leaves "alice"'s outbox
-retalk receive --all
-```
-
-Leaving a sender in `--follow` resends unacknowledged messages on its own:
-
-```sh
-# anything "bob" hasn't acked is re-uploaded about once a minute until it lands
-retalk receive --all --follow
-```
-
-This is also what makes server loss or migration recoverable -- point clients at
-a fresh relay and keep going:
-
-- clients republish missing public keys on their next request,
-- senders re-upload unacknowledged outbox messages, and
-- recipients drop duplicate ciphertext they have already processed.
-
-## Key maintenance
-
-Users publish one-time prekeys so peers can start encrypted sessions while
-the user is offline.
-
-`maintain()` keeps that server-side public key material healthy:
-
-- it uploads 100 new one-time keys when fewer than 20 remain unclaimed,
-- it rotates the reusable fallback key daily, and
-- it resends unacknowledged outbox messages.
-
-The fallback key is only used when the one-time key pool is empty. It keeps
-new sessions available, but rotation limits how long the reusable key lives.
-
 ## More docs
 
 Full reference documentation lives in [docs/](docs/README.md) -- the protocol,
@@ -419,33 +444,3 @@ index, or jump straight to a topic:
 
 Deploying a server (Hugging Face, Cloudflare, GCP) and contributing or cutting a
 release are covered from the [docs index](docs/README.md).
-
-## Test
-
-Run the full test suite from the repository root:
-
-```sh
-uv run python -m unittest discover -s tests -v
-```
-
-The tests use stdlib `unittest` and start their own local servers on ports
-8767-8769. They keep all state in temporary directories and do not touch real
-stores.
-
-CI runs the same discovery on every push and pull request. See
-[tests/README.md](tests/README.md).
-
-Coverage includes:
-
-- bidirectional encrypted delivery,
-- no plaintext in the server database,
-- delivered mail deletion,
-- key substitution refusal with `PIN MISMATCH`,
-- fallback-key session setup when one-time keys are drained,
-- key replenishment and fallback rotation,
-- in-flight messages across fallback rotation,
-- concurrent sends from two processes sharing one store,
-- migration to a fresh server,
-- delivery acknowledgements and outbox recovery,
-- duplicate rejection, and
-- replayed, stale, and cross-server signed-request rejection.
