@@ -59,6 +59,86 @@ that terminates TLS for you, or put your own TLS proxy in front:
 - [server/gcp.md](server/gcp.md) — a small Google Cloud VM, with locked-down
   SSH, per-month cost notes, scaling, and teardown.
 
+## Creating a user
+
+A retalk identity is a **user**, selected by name with `--user NAME` (short:
+`-u`) and stored under `~/.local/share/retalk/NAME/`. Run this once on each
+machine, supplying a passphrase that encrypts the private keys at rest — via
+`--passphrase` or the `RETALK_PASSPHRASE` env var (preferred, since a flag
+value is visible in the process list):
+
+```sh
+export RETALK_PASSPHRASE="correct horse battery staple"
+retalk init --user alice --display-name alice-1 --relay https://server.example.com
+```
+
+Every later command must say which user it acts as — retalk never guesses.
+Name it per command, or set it once in the environment:
+
+```sh
+retalk id --user alice           # name the user on the command, or...
+export RETALK_USER=alice          # ...set it once for the shell
+retalk id                         # now acts as "alice"
+```
+
+`init` prints the user ID. There is no interactive prompt — a command with no
+passphrase fails fast instead of blocking, so the CLI stays scriptable. For
+agents or throwaway identities, `--no-passphrase` skips encryption (the keys
+are then protected only by file permissions):
+
+```sh
+retalk init --user agent-1 --no-passphrase --relay https://server.example.com
+```
+
+The choice is remembered: later commands on a `--no-passphrase` identity need
+no passphrase, while an encrypted identity always requires one.
+
+Then exchange user IDs out-of-band and save your peer:
+
+```sh
+retalk add bob <bob-user-id>   # an "incomplete" contact: just name + fingerprint
+retalk verify bob              # optional: fetch & record "bob"'s keys now
+```
+
+`add` stores only the name and fingerprint. The peer's actual keys are fetched
+from the relay and checked against that fingerprint automatically the first
+time you message them. `retalk verify` makes that step explicit — it fetches
+the keys now (or takes them via `--identity-key`/`--signing-key`), checks they
+hash to the fingerprint, and records them so they show up in `retalk contacts`.
+It is optional: messaging works on the fingerprint alone.
+
+Common commands (with `RETALK_USER=alice` exported):
+
+```sh
+retalk id                          # print my user ID
+retalk add bob <bob-user-id>       # save a peer (name + fingerprint)
+retalk verify bob                  # fetch & record "bob"'s keys (optional)
+retalk contacts                    # list saved peers and verified status
+retalk contacts --show bob --json  # print "bob" as a shareable Contact card (JSON)
+retalk contacts --remove bob       # forget a saved peer
+retalk share --peer carol bob      # send "bob"'s card to "carol" (an introduction)
+retalk import '<card json>'        # save a contact someone shared with you
+retalk import --inbox --list       # contacts peers shared (saved by `receive`)
+retalk import --inbox              # save all of them as peers
+retalk send --peer bob "hello"     # send one encrypted message
+retalk receive --all               # read every sender (one JSON line each)
+retalk receive --peer bob          # read only messages from "bob"
+retalk receive --all --follow      # keep polling all senders; maintain keys
+retalk receive --all --save-messages   # also keep a sealed local copy
+retalk history                     # replay saved messages (needs --save-messages)
+retalk block eve                   # drop a sender's mail before decryption
+retalk block --remove eve          # stop dropping that sender
+retalk block --list                # list blocked senders
+retalk receive --all --peers-only  # accept only saved peers (drop strangers)
+```
+
+Use `receive --all` deliberately, not as a routine poll: it drains and acknowledges *every* sender's mail at once and deletes it from the relay. For ongoing receipt prefer a single long-lived `retalk receive --all --follow` (one reader that owns the drain), or `retalk receive --peer NAME` for one sender. Two concurrent `receive --all` readers split the mail between them, so don't run a bare `--all` while a `--follow` reader is going.
+
+`block`/`block --remove`/`block --list` and `--peers-only` are local filters
+that drop a sender during `receive` *before* any decryption, so a blocked or
+unknown sender can never make you consume a one-time key. Nothing is sent to the
+server or the peer.
+
 ## Data format
 
 The CLI and library exchange newline-delimited JSON in one stable shape, so you
