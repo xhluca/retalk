@@ -16,6 +16,8 @@ Run from the repo root:
   .venv/bin/python tests/test_hardening.py         (this file directly)
 """
 
+from __future__ import annotations
+
 import json
 import os
 import socket

@@ -17,6 +17,8 @@ Run from the repo root:
   .venv/bin/python tests/test_admin_api_keys.py
 """
 
+from __future__ import annotations
+
 import base64
 import hashlib
 import json

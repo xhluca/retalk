@@ -1,14 +1,10 @@
 version = 1
 revision = 3
-requires-python = ">=3.10"
-resolution-markers = [
-    "python_full_version >= '3.11'",
-    "python_full_version < '3.11'",
-]
+requires-python = ">=3.9"
 
 [[package]]
 name = "retalk"
-version = "0.0.4"
+version = "0.0.5"
 source = { editable = "." }
 dependencies = [
     { name = "vodozemac" },
@@ -106,6 +102,16 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/74/f7/f4ffba3e6a02729ccd15676ca99d4f968d8e4097775cebbd421bafc3fb02/vodozemac-0.9.0.post2-cp314-cp314t-musllinux_1_2_armv7l.whl", hash = "sha256:958ce6863ec696ed94e7ca63c4656e7866ed399ec1fa8faa490d4ab61d9381c1", size = 1039723, upload-time = "2026-02-16T11:20:38.644Z" },
     { url = "https://files.pythonhosted.org/packages/c4/4d/5347fbfc833f729f7fe70dee19efe2b779b752986adc641edc0417e265b8/vodozemac-0.9.0.post2-cp314-cp314t-musllinux_1_2_i686.whl", hash = "sha256:cdffbce3fdb146f37297fa08f3342fd272bc25ef52bb02bccbef93ad54028ff7", size = 1017331, upload-time = "2026-02-16T11:21:25.421Z" },
     { url = "https://files.pythonhosted.org/packages/c4/74/2a1cc1b7268780fa2cb8eddbec4176248a7732c3ae80557b0c14dc20e5b0/vodozemac-0.9.0.post2-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:7e55493d129d63d7843e1d72e8782d653688318000d3c1c4bf2faf5b5c407b8a", size = 982985, upload-time = "2026-02-16T11:21:26.679Z" },
+    { url = "https://files.pythonhosted.org/packages/3f/b0/b0739cca475a7b12ef2277eb209d17be4773d3af8b63d8dc141a6811e051/vodozemac-0.9.0.post2-cp39-cp39-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:eb79048e356fbb6b21df88e0f7178d0226e4b23a56dd8e19b5142f5e7e58e474", size = 746196, upload-time = "2026-02-16T11:20:04.547Z" },
+    { url = "https://files.pythonhosted.org/packages/65/26/5c70a75cdc118c08c879f5fbef47ea5719966e17a6ec5d7a712216c3b042/vodozemac-0.9.0.post2-cp39-cp39-manylinux_2_17_armv7l.manylinux2014_armv7l.whl", hash = "sha256:cc774ba25e54ef129a75a3a240937f2ca32b189f224c8c8c710310afafb35b73", size = 769336, upload-time = "2026-02-16T11:20:22.006Z" },
+    { url = "https://files.pythonhosted.org/packages/14/92/d791fb43b80f8a7cf434f700f762e74c09b290258dea24fa9d0d268e6350/vodozemac-0.9.0.post2-cp39-cp39-manylinux_2_17_ppc64le.manylinux2014_ppc64le.whl", hash = "sha256:53769847ff5ad8f438df444c423f78a7b9df7ee7eef3026f7469ae8b70d726d9", size = 917931, upload-time = "2026-02-16T11:20:59.008Z" },
+    { url = "https://files.pythonhosted.org/packages/6b/0f/d43c874f311cc97fc08fc597940dd477d04a919b5cb1d0c10a2e8be101c0/vodozemac-0.9.0.post2-cp39-cp39-manylinux_2_17_s390x.manylinux2014_s390x.whl", hash = "sha256:f7a61efba9d6b478024287bfe73e09b169f329dc628c20c7f8cd738ca0d26199", size = 771771, upload-time = "2026-02-16T11:22:15Z" },
+    { url = "https://files.pythonhosted.org/packages/29/e0/16e009724d11e07d317988b292e3d89191dd445f346b8c87ec30a6a626a4/vodozemac-0.9.0.post2-cp39-cp39-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:01c0cd70961839c17c3b7b722da2b06d98ca6f14e867241d881c6c0ef87e3eed", size = 775638, upload-time = "2026-02-16T11:21:31.537Z" },
+    { url = "https://files.pythonhosted.org/packages/3e/86/8d5b30cb88b7e97dc59efbaf7cf03b8d2d30a143b43f8197908b58768919/vodozemac-0.9.0.post2-cp39-cp39-manylinux_2_5_i686.manylinux1_i686.whl", hash = "sha256:53906f5a6e4180bf187388a8a8b41d8ba71af4eb7693c4ab29d952d322a1b19e", size = 836222, upload-time = "2026-02-16T11:21:01.315Z" },
+    { url = "https://files.pythonhosted.org/packages/d1/d3/ef975b613b6e10e74961d871f4d925579d3212c5339a7ddad12e948bd970/vodozemac-0.9.0.post2-cp39-cp39-musllinux_1_2_aarch64.whl", hash = "sha256:0a1b95d4532c98ce837cb46b7edc0e3ce0de4cd8525cca19d0ca6408cda50aaa", size = 923320, upload-time = "2026-02-16T11:21:15.074Z" },
+    { url = "https://files.pythonhosted.org/packages/41/9a/abfecf5033aab4df987fd989b4625f83474548f1c5692e73e2003f64e2c9/vodozemac-0.9.0.post2-cp39-cp39-musllinux_1_2_armv7l.whl", hash = "sha256:9269366f95f6a2157e4b3931d084eb553ea4bfc742e0a04c91e958bdd8a75b78", size = 1043454, upload-time = "2026-02-16T11:22:16.305Z" },
+    { url = "https://files.pythonhosted.org/packages/39/dd/fb77e2515636b6851ff79b1ec963d4af64b2017ef880efcee8b1fbc97cfb/vodozemac-0.9.0.post2-cp39-cp39-musllinux_1_2_i686.whl", hash = "sha256:1b48f52fd24a6b5e87ff639ae76ed82ddfe58517e5080db25456b5037970d2d9", size = 1022041, upload-time = "2026-02-16T11:21:49.013Z" },
+    { url = "https://files.pythonhosted.org/packages/8c/66/04917a01dcb03e8045ca6d4ff98873ade3f61e591561bd1923dcd6fbe21f/vodozemac-0.9.0.post2-cp39-cp39-musllinux_1_2_x86_64.whl", hash = "sha256:d7b17e7cdac8dbc904717e318d6dc3da514c2087971c3da379f6fcf72c3bd32d", size = 987768, upload-time = "2026-02-16T11:21:42.308Z" },
     { url = "https://files.pythonhosted.org/packages/7c/ec/0a473a83464828848572f22fb7679ea1dd3d5ddcc29954f7e411d4552ecb/vodozemac-0.9.0.post2-pp311-pypy311_pp73-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:52754826e8cc379d8875d0ace225d08f4f814749396ed7cca38a907bfd877b15", size = 743961, upload-time = "2026-02-16T11:20:39.716Z" },
     { url = "https://files.pythonhosted.org/packages/8e/c4/164d143fefcb8c6a48d08b97651f60a19268405f5b531c0d0813e4992e0e/vodozemac-0.9.0.post2-pp311-pypy311_pp73-manylinux_2_17_armv7l.manylinux2014_armv7l.whl", hash = "sha256:39ed43ce02cf3386fcebfde0aca112c7685e822328579a7fa289fe6faec75513", size = 765803, upload-time = "2026-02-16T11:20:23.342Z" },
     { url = "https://files.pythonhosted.org/packages/5e/95/feac26529e45c307b5e7e83a03edc35b347e8a4d7ea8941dc5f38dad91cd/vodozemac-0.9.0.post2-pp311-pypy311_pp73-manylinux_2_17_ppc64le.manylinux2014_ppc64le.whl", hash = "sha256:c1efdb9ce59191eb49ee3b482a5b94db1dd28fd638b9f09fc27864f1b819f1aa", size = 916507, upload-time = "2026-02-16T11:21:10.057Z" },

@@ -38,13 +38,13 @@ source .venv/bin/activate        # Windows: .venv\Scripts\activate
 <tr>
 <td>
 
-`pip`
+`pip3`
 
 </td>
 <td>
 
 ```sh
-pip install retalk
+pip3 install retalk
 ```
 
 </td>
@@ -113,13 +113,13 @@ uvx retalk --help
 <tr>
 <td>
 
-`pip` (install from git)
+`pip3` (install from git)
 
 </td>
 <td>
 
 ```sh
-pip install git+https://github.com/xhluca/retalk
+pip3 install git+https://github.com/xhluca/retalk
 ```
 
 </td>
@@ -157,7 +157,7 @@ uv run retalk --help
 uv run python -m unittest discover -s tests
 ```
 
-Without uv, run `pip install -e .` inside the clone.
+Without uv, run `pip3 install -e .` inside the clone.
 
 </details>
 

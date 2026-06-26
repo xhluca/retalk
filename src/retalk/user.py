@@ -22,6 +22,8 @@ A per-store file lock serializes operations, so multiple processes may
 safely share one store.
 """
 
+from __future__ import annotations
+
 import base64
 import fcntl
 import hashlib

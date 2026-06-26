@@ -15,6 +15,8 @@ The relay URL comes from --relay, RETALK_RELAY, or the value saved at
 init. Identity banners go to stderr so stdout stays clean for --json.
 """
 
+from __future__ import annotations
+
 import argparse
 import getpass
 import importlib.resources

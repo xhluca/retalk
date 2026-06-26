@@ -59,6 +59,8 @@ or read mail, which stay protected by the per-request signatures and E2E
 encryption. See docs/auth.md and docs/server.md.
 """
 
+from __future__ import annotations
+
 import base64
 import hashlib
 import hmac

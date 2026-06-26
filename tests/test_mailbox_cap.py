@@ -16,6 +16,8 @@ Uses port 8770 (see tests/README.md for the port registry).
 Run from the repo root: uv run python -m unittest discover -s tests
 """
 
+from __future__ import annotations
+
 import os
 import socket
 import sqlite3
