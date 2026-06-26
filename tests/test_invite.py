@@ -15,7 +15,7 @@ class TestInvite(unittest.TestCase):
 
     def cli(self, *cmd, stdin=None, expect=0):
         env = dict(os.environ, RETALK_PASSPHRASE="cli-secret",
-                   XDG_DATA_HOME=os.path.join(self.tmp, "xdg"))
+                   RETALK_HOME=os.path.join(self.tmp, "store"))
         env.pop("RETALK_USER", None)
         env.pop("RETALK_RELAY", None)
         r = subprocess.run([sys.executable, "-m", "retalk.cli", *cmd],

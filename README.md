@@ -13,6 +13,9 @@ The short version:
 Retalk uses `vodozemac` for Olm encryption. Everything else uses plain
 HTTP+JSON and the Python standard library.
 
+## Quickstart
+
+
 ## Install
 
 <details>
@@ -184,7 +187,7 @@ plaintext, private keys, or self-chosen names.
   Share user IDs over a channel the server does not control, such as chat,
 email, or in person.
 
-Display names work differently:
+Display names (`--display-name`) are optional and work differently:
 
 - A user's self-chosen name is encrypted inside each message. The server does
   not see it. Clients show it with a `~` prefix because it is not verified.
@@ -228,6 +231,7 @@ The flags that configure it:
 
 For internet use, put TLS in front of the relay.
 
+## More Usage
 
 ### Sharing contacts
 
@@ -293,17 +297,17 @@ encrypted — there, file permissions are the only guard.
 
 ### Selecting the user
 
-Each user's identity lives in its own folder (`~/.local/share/retalk/NAME/`).
+Each user's identity lives in its own folder (`~/.retalk/NAME/`).
 retalk never guesses which user you mean; every command resolves it in order:
 
 1. `--dir DIR`               an explicit identity directory (wins if given)
-2. `--user NAME` / `-u NAME`   the user named NAME (~/.local/share/retalk/NAME/)
+2. `--user NAME` / `-u NAME`   the user named NAME (~/.retalk/NAME/)
 3. `RETALK_USER` env var     the same, set once for the shell
 4. otherwise: an error — nothing is created or guessed.
 
 Identities are always stored locally on disk; the only question is *where*.
 `--user NAME` keeps them in the shared home location
-(`~/.local/share/retalk/NAME/`), good when one person has a few named users.
+(`~/.retalk/NAME/`), good when one person has a few named users.
 `--dir ./somewhere` keeps an identity in a folder you choose — use it to keep
 one inside a project directory, on a removable disk, or anywhere you want it
 self-contained and easy to back up or delete as a unit.
@@ -343,7 +347,7 @@ short:
 
 ```sh
 # create the user "alice"; --passphrase encrypts her keys, --relay is saved in the store
-retalk init --user alice --display-name alice --passphrase alice-secret --relay http://127.0.0.1:8766
+retalk init --user alice --passphrase alice-secret --relay http://127.0.0.1:8766
 
 # point this terminal at "alice" so later commands don't repeat themselves:
 export RETALK_USER=alice               # which user to act as (replaces --user)
@@ -361,7 +365,7 @@ receiving come next, under **Exchange a message** below.
 Same steps with the user "bob" and his own passphrase:
 
 ```sh
-retalk init --user bob --display-name bob --passphrase bob-secret --relay http://127.0.0.1:8766
+retalk init --user bob --passphrase bob-secret --relay http://127.0.0.1:8766
 export RETALK_USER=bob
 export RETALK_PASSPHRASE=bob-secret
 retalk add alice <alice-id>   # paste "alice"'s ID from terminal 2

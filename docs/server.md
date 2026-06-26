@@ -45,7 +45,7 @@ proxy listens publicly and forwards to a local `--host`/`--port`, so
 | flag | env var | meaning |
 |------|---------|---------|
 | `--relay` | `RETALK_RELAY` | relay URL to talk to (must equal the server's `--audience`); `init` can save one per identity |
-| `--user` / `-u` | `RETALK_USER` | which identity to act as (`~/.local/share/retalk/NAME/`) |
+| `--user` / `-u` | `RETALK_USER` | which identity to act as (`~/.retalk/NAME/`) |
 | `--dir` | — | use an identity in an explicit directory instead of by user name |
 | `--passphrase` | `RETALK_PASSPHRASE` | unlocks the identity's keys at rest |
 | `--no-passphrase` | — | open/create an identity with no passphrase (file-permission protected only) |

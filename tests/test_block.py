@@ -172,7 +172,7 @@ class TestBlockCLI(unittest.TestCase):
         env = dict(os.environ,
                    RETALK_PASSPHRASE=secret,
                    RETALK_RELAY=f"http://127.0.0.1:{CLI_PORT}",
-                   XDG_DATA_HOME=os.path.join(self.tmp, "xdg"))
+                   RETALK_HOME=os.path.join(self.tmp, "store"))
         env.pop("RETALK_USER", None)
         if env_extra:
             env.update(env_extra)

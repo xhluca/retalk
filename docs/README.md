@@ -115,7 +115,7 @@ that terminates TLS for you, or put your own TLS proxy in front:
 ## Creating a user
 
 A retalk identity is a **user**, selected by name with `--user NAME` (short:
-`-u`) and stored under `~/.local/share/retalk/NAME/`. Run this once on each
+`-u`) and stored under `~/.retalk/NAME/`. Run this once on each
 machine, supplying a passphrase that encrypts the private keys at rest — via
 `--passphrase` or the `RETALK_PASSPHRASE` env var (preferred, since a flag
 value is visible in the process list):
@@ -229,7 +229,7 @@ ones that touch a mailbox reach the relay.
 Identity selection (first match wins — retalk never guesses which user you mean):
 
 - `--dir DIR` — use the identity in directory `DIR`.
-- `-u`, `--user NAME` — the user under `~/.local/share/retalk/NAME/` (or the `RETALK_USER` env var).
+- `-u`, `--user NAME` — the user under `~/.retalk/NAME/` (or the `RETALK_USER` env var).
 - `--relay URL` — relay for this call (overrides `RETALK_RELAY` and the URL saved at init).
 - `--api-key KEY` — relay access key, sent as `Authorization: Bearer` (overrides `RETALK_API_KEY`).
 - `--passphrase SECRET` — unlocks the store; prefer the `RETALK_PASSPHRASE` env var, since a value passed here is visible in the process list. Omit it for a `--no-passphrase` identity.

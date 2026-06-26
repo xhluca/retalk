@@ -45,7 +45,7 @@ class TestCLI(unittest.TestCase):
         env = dict(os.environ,
                    RETALK_PASSPHRASE=secret,
                    RETALK_RELAY=f"http://127.0.0.1:{PORT}",
-                   XDG_DATA_HOME=os.path.join(self.tmp, "xdg"))
+                   RETALK_HOME=os.path.join(self.tmp, "store"))
         env.pop("RETALK_USER", None)
         res = subprocess.run([sys.executable, "-m", "retalk.cli", *cmd],
                              capture_output=True, text=True, env=env)

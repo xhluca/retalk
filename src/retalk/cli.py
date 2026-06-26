@@ -16,6 +16,8 @@ init. Identity banners go to stderr so stdout stays clean for --json.
 """
 
 import argparse
+import getpass
+import importlib.resources
 import json
 import os
 import re
@@ -31,13 +33,106 @@ ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
 
 def _data_home() -> Path:
-    return Path(os.environ.get("XDG_DATA_HOME",
-                               Path.home() / ".local" / "share")) / "retalk"
+    return Path(os.environ.get("RETALK_HOME", Path.home() / ".retalk"))
+
+
+def _config() -> dict:
+    """Owner-wide defaults from `~/.retalk/config.json` (a JSON object), applied
+    to every identity as the LAST fallback. Empty when missing or malformed.
+    RETALK_HOME relocates it with the rest of the store."""
+    try:
+        cfg = json.loads((_data_home() / "config.json").read_text())
+        return cfg if isinstance(cfg, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_config(cfg: dict):
+    _data_home().mkdir(parents=True, exist_ok=True)
+    p = _data_home() / "config.json"
+    p.write_text(json.dumps(cfg, indent=2) + "\n")
+    try:
+        p.chmod(0o600)
+    except OSError:
+        pass
+
+
+def _default_relay() -> str:
+    """Owner-wide default relay URL (the "relay" key of config.json). The last
+    fallback after --relay, RETALK_RELAY, and the per-identity saved relay."""
+    return _config().get("relay") or ""
+
+
+def _packaged_config() -> str:
+    """The default config.json shipped inside the wheel. `init` copies it to
+    ~/.retalk/config.json on first run; after that the user's copy wins, so a
+    new default in a later version only affects fresh installs."""
+    try:
+        return (importlib.resources.files("retalk") / "config.json").read_text()
+    except (FileNotFoundError, ModuleNotFoundError, OSError, TypeError):
+        return ""
+
+
+def _ensure_config() -> None:
+    """Seed ~/.retalk/config.json from the packaged default when the user has no
+    config yet. Called by `init`; existing configs are left untouched."""
+    p = _data_home() / "config.json"
+    if p.exists():
+        return
+    text = _packaged_config()
+    if not text:
+        return
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+        p.chmod(0o600)
+    except OSError:
+        pass
+
+
+def _local_home() -> Path:
+    """Project-local store: `.retalk/` at the git root, else the current dir.
+    Mirrors agent-talk's local scope. Used only when auto-naming a new identity
+    (see `_next_default_user`), never for `--user` resolution."""
+    cwd = Path.cwd()
+    for d in (cwd, *cwd.parents):
+        if (d / ".git").exists():
+            return d / ".retalk"
+    return cwd / ".retalk"
+
+
+def _next_default_user() -> str:
+    """Name for `retalk init` when no user is given: the OS login user plus the
+    next free numeric suffix (e.g. alice-1, alice-2). Scans existing identities
+    in BOTH the global (~/.retalk) and project-local (.retalk) stores so repeated
+    inits never reuse a number. Kept separate to stay self-contained."""
+    try:
+        base = getpass.getuser()
+    except Exception:
+        base = "user"
+    pat = re.compile(rf"^{re.escape(base)}-(\d+)$")
+    highest, seen = 0, set()
+    for home in (_data_home(), _local_home()):
+        rp = home.resolve()
+        if rp in seen or not home.is_dir():
+            continue
+        seen.add(rp)
+        for child in home.iterdir():
+            m = pat.match(child.name)
+            if m and (child / STORE_FILE).exists():   # only real identities count
+                highest = max(highest, int(m.group(1)))
+    return f"{base}-{highest + 1}"
 
 
 def _die(msg: str, code: int = 2):
     print(f"retalk: {msg}", file=sys.stderr)
     sys.exit(code)
+
+
+def _style(text: str, code: str) -> str:
+    """Wrap text in an ANSI SGR code, but only when stderr is a TTY -- so piped
+    or redirected output stays clean (and copying yields the raw text)."""
+    return f"\033[{code}m{text}\033[0m" if sys.stderr.isatty() else text
 
 
 def _resolve_store(args, creating: bool = False) -> Path:
@@ -196,7 +291,7 @@ def _open_user(args, need_server: bool = True, banner: bool = True) -> User:
     store_db = d / STORE_FILE
     secret, _ = _resolve_passphrase(args, store_db=store_db)
     server = (getattr(args, "relay", None) or os.environ.get("RETALK_RELAY")
-              or _meta(store_db, "server_url") or "")
+              or _meta(store_db, "server_url") or _default_relay())
     if need_server and not server:
         _die("no relay URL: pass --relay, set RETALK_RELAY, or save one "
              "at init time")
@@ -267,12 +362,21 @@ def _build_card(store_db: Path, contact: str, as_name: str | None) -> dict:
 # ---------- commands ----------
 
 def cmd_init(args):
+    # Resolve the passphrase FIRST: a missing one must fail before we announce a
+    # name, seed config, or create any directory -- otherwise a bare `init` with
+    # no passphrase leaves a stray empty identity dir.
+    secret, disabled = _resolve_passphrase(args, creating=True)
+    _ensure_config()   # seed ~/.retalk/config.json from the packaged default
+    # No selector? Auto-name the new identity <login>-<n> (init only).
+    if not args.dir and not args.user and not os.environ.get("RETALK_USER"):
+        args.user = _next_default_user()
+        print('No user specified, defaulting to automatically generated '
+              f'"{args.user}".', file=sys.stderr)
     d = _resolve_store(args, creating=True)
     if (d / STORE_FILE).exists():
         _die(f"an identity already exists at {d}")
     d.mkdir(parents=True, exist_ok=True)
-    secret, disabled = _resolve_passphrase(args, creating=True)
-    server = args.relay or os.environ.get("RETALK_RELAY") or ""
+    server = args.relay or os.environ.get("RETALK_RELAY") or _default_relay()
     # default the display name to the chosen user name (--user / RETALK_USER),
     # so `init --user alice` labels messages 'alice' without repeating it;
     # an identity selected only by --dir has no user name, so stays unnamed.
@@ -293,10 +397,36 @@ def cmd_init(args):
         d.chmod(0o700)
     except OSError:
         pass
-    print(f"created identity at {d}", file=sys.stderr)
-    print("user id (share out-of-band; it is address + pin in one):",
-          file=sys.stderr)
-    print(u.fingerprint())
+    home = str(Path.home())
+    shown = str(d).replace(home, "~", 1) if str(d).startswith(home) else str(d)
+    err = sys.stderr
+    print(f'created identity "{display or d.name}" at {shown}', file=err)
+    if disabled:
+        print(_style(
+            "\n⚠ Keys are stored UNENCRYPTED — anyone who can read this folder "
+            "can impersonate you.\n"
+            "  Use --passphrase (or RETALK_PASSPHRASE) for any identity whose "
+            "privacy matters.", "1;31"), file=err)
+    print(f"\nFingerprint: {u.fingerprint()}", file=err)
+    print("Relay:       "
+          + (server or "(none — set one with: retalk config --relay <url>)"),
+          file=err)
+    print("\nShare the following message with your peer so they can add you:\n"
+          + _style(_invite_message(u, None), "2"), file=err)
+    # bare id on stdout for scripts/pipes; skipped interactively (shown above)
+    if not sys.stdout.isatty():
+        print(u.fingerprint())
+
+
+def cmd_config(args):
+    cfg = _config()
+    if args.relay is not None:                 # --relay given (maybe empty)
+        if args.relay:
+            cfg["relay"] = args.relay
+        else:
+            cfg.pop("relay", None)             # --relay "" clears it
+        _write_config(cfg)
+    print(json.dumps(cfg, indent=2))
 
 
 def _self_card(u, as_name):
@@ -307,30 +437,34 @@ def _self_card(u, as_name):
     card = {"fingerprint": u.fingerprint(), "name": as_name or u.name or "",
             "identity_key": u.identity_key(), "signing_key": u.signing_key(),
             "verified": True}
-    if u.server_url:
-        card["relay"] = u.server_url
+    relay = u.server_url or _default_relay()
+    if relay:
+        card["relay"] = relay
     return card
 
 
 def _invite_message(u, as_name):
-    """Render this user's own card as a copy-paste invite for onboarding a peer
-    out-of-band (chat, email, ...): how to install retalk, point at the relay,
-    and add you. Tool-agnostic -- plain retalk, no wrapper assumptions."""
+    """Render this user's card as a copy-paste shell snippet that onboards a
+    peer: install retalk, create their identity, point at the relay, and add
+    you. Plain `#` comments + commands, so the whole block pastes into a shell
+    and runs -- no quoting prefixes to strip out."""
     c = _self_card(u, as_name)
     name = c["name"] or "me"
-    relay = c.get("relay") or "<the relay URL we will share>"
+    relay = c.get("relay") or "<relay-url>"
     return "\n".join([
-        "Let's talk over retalk -- end-to-end-encrypted messages over an "
-        "untrusted relay.",
-        "",
-        "1. Install:  pipx install retalk    (or: uv tool install retalk)",
-        f"2. Use our relay:  export RETALK_RELAY={relay}",
-        f"3. Add me:  retalk add {name} {c['fingerprint']}",
-        "4. Send me your own id back (run: retalk id) so I can add you.",
-        "",
-        f"relay:       {relay}",
-        f"add me as:   {name}",
-        f"fingerprint: {c['fingerprint']}",
+        "```bash",
+        "# Let's talk over retalk (CLI-based messaging).",
+        "# 1. Install retalk:",
+        "pipx install retalk                  # or: uv tool install retalk",
+        "# 2. Point at our relay:",
+        f"export RETALK_RELAY={relay}",
+        "# 3. Create your identity:",
+        "retalk init",
+        "# 4. Add me as a contact:",
+        f"retalk add {name} {c['fingerprint']}",
+        "# 5. Send me YOUR id back (paste the output to me) so I can add you:",
+        "retalk id",
+        "```",
     ])
 
 
@@ -705,7 +839,7 @@ def main():
                         "(created earlier by `retalk init --dir DIR`)")
     g.add_argument("-u", "--user", metavar="NAME",
                    help="act as the user named NAME, stored under "
-                        "~/.local/share/retalk/NAME/. Overrides RETALK_USER")
+                        "~/.retalk/NAME/. Overrides RETALK_USER")
     g.add_argument("--relay", metavar="URL",
                    help="relay URL for this invocation; overrides the "
                         "RETALK_RELAY env var and the URL saved at init")
@@ -739,7 +873,7 @@ server does not control (chat, email, in person).""",
         epilog="""\
 which user every command acts as (first match wins):
   1. --dir DIR           an explicit identity directory
-  2. --user / -u NAME    the user named NAME (~/.local/share/retalk/NAME/)
+  2. --user / -u NAME    the user named NAME (~/.retalk/NAME/)
   3. RETALK_USER env     same as --user, as an environment variable
   4. otherwise: error — retalk never guesses which user you mean.
 Only `retalk init` ever creates an identity; other commands fail loudly when
@@ -755,6 +889,7 @@ environment variables:
   RETALK_PASSPHRASE  unlocks your keys (alternative to --passphrase)
   RETALK_RELAY       relay to talk to (init can save one per identity instead)
   RETALK_API_KEY     relay access key, if the relay requires one (init can save it)
+  RETALK_HOME        where named identities are stored (default ~/.retalk/)
 
 output conventions:
   stdout carries results (ids, messages, --json lines); everything else —
@@ -784,7 +919,7 @@ new USER ID on stdout — share it with peers out-of-band; it is both your
 address and the fingerprint they verify you by.
 
 The location is mandatory: --user NAME (stored under
-~/.local/share/retalk/NAME/) or --dir DIR (an explicit path). The folder will
+~/.retalk/NAME/) or --dir DIR (an explicit path). The folder will
 contain store.db — keys (encrypted), sessions, saved peers, and the
 outbox of not-yet-acknowledged messages. Back it up to keep the identity;
 delete it to destroy the identity.
@@ -1229,6 +1364,24 @@ examples:
                     help="show only this sender's saved messages (a saved peer "
                          "name or a 32-hex user id)")
     sp.set_defaults(fn=cmd_history)
+
+    sp = sub.add_parser(
+        "config", formatter_class=raw,
+        help="show or set owner-wide defaults (e.g. the default relay)",
+        description="""\
+Read or write owner-wide defaults in ~/.retalk/config.json (a JSON object).
+These apply to every identity as the LAST fallback: a --relay flag, RETALK_RELAY,
+and a relay saved in an identity all override them. With no flags, print the
+current config. RETALK_HOME relocates the file with the rest of the store.""",
+        epilog="""\
+examples:
+  retalk config                                    show owner-wide config
+  retalk config --relay https://relay.example.com  set the default relay
+  retalk config --relay ""                         clear the default relay""")
+    sp.add_argument("--relay", metavar="URL",
+                    help="set the owner-wide default relay URL; pass an empty "
+                         "string to clear it")
+    sp.set_defaults(fn=cmd_config)
 
     args = p.parse_args()
     args.fn(args)

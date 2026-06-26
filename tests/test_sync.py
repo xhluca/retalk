@@ -251,7 +251,7 @@ class TestSyncCLI(unittest.TestCase):
     def cli(self, *cmd, secret="cli", expect=0):
         env = dict(os.environ, RETALK_PASSPHRASE=secret,
                    RETALK_RELAY=f"http://127.0.0.1:{CLI_PORT}",
-                   XDG_DATA_HOME=os.path.join(self.tmp, "xdg"))
+                   RETALK_HOME=os.path.join(self.tmp, "store"))
         env.pop("RETALK_USER", None)
         res = subprocess.run([sys.executable, "-m", "retalk.cli", *cmd],
                              capture_output=True, text=True, env=env)

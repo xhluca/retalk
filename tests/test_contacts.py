@@ -58,7 +58,7 @@ class TestContacts(unittest.TestCase):
     def cli(self, *cmd, secret="cli-secret", expect=0):
         env = dict(os.environ,
                    RETALK_PASSPHRASE=secret,
-                   XDG_DATA_HOME=os.path.join(self.tmp, "xdg"))
+                   RETALK_HOME=os.path.join(self.tmp, "store"))
         env.pop("RETALK_USER", None)
         if getattr(self, "relay", None):
             env["RETALK_RELAY"] = self.relay
