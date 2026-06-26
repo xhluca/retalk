@@ -69,7 +69,7 @@ encrypted acknowledgement, and only then does the relay drop the ciphertext.
 
 Senders keep ciphertext in a local outbox until it is acknowledged.
 `maintain()` resends anything unacknowledged for more than 2 minutes, and
-`retalk receive --all --follow` runs `maintain()` once a minute.
+`retalk receive --peer bob --follow` runs `maintain()` once a minute.
 
 For example, send to a peer who is offline and watch it arrive on their next
 poll:
@@ -82,14 +82,14 @@ retalk send --peer bob "are you there?"
 retalk receive --peer alice    # -> {... "name":"alice","text":"are you there?"}
 
 # "alice": "bob"'s ack arrives, so the message leaves "alice"'s outbox
-retalk receive --all
+retalk receive --peer bob
 ```
 
 Leaving a sender in `--follow` resends unacknowledged messages on its own:
 
 ```sh
 # anything "bob" hasn't acked is re-uploaded about once a minute until it lands
-retalk receive --all --follow
+retalk receive --peer bob --follow
 ```
 
 This is also what makes server loss or migration recoverable -- point clients at
@@ -174,18 +174,17 @@ retalk import '<card json>'        # save a contact someone shared with you
 retalk import --inbox --list       # contacts peers shared (saved by `receive`)
 retalk import --inbox              # save all of them as peers
 retalk send --peer bob "hello"     # send one encrypted message
-retalk receive --all               # read every sender (one JSON line each)
 retalk receive --peer bob          # read only messages from "bob"
-retalk receive --all --follow      # keep polling all senders; maintain keys
-retalk receive --all --save-messages   # also keep a sealed local copy
+retalk receive --peer bob --follow      # keep polling "bob"; maintain keys
+retalk receive --peer bob --save-messages   # also keep a sealed local copy
 retalk history                     # replay saved messages (needs --save-messages)
 retalk block eve                   # drop a sender's mail before decryption
 retalk block --remove eve          # stop dropping that sender
 retalk block --list                # list blocked senders
-retalk receive --all --peers-only  # accept only saved peers (drop strangers)
+retalk receive --all --peers-only  # read all saved contacts at once (drop strangers)
 ```
 
-Use `receive --all` deliberately, not as a routine poll: it drains and acknowledges *every* sender's mail at once and deletes it from the relay. For ongoing receipt prefer a single long-lived `retalk receive --all --follow` (one reader that owns the drain), or `retalk receive --peer NAME` for one sender. Two concurrent `receive --all` readers split the mail between them, so don't run a bare `--all` while a `--follow` reader is going.
+Prefer `retalk receive --peer NAME` as your default — it reads just that sender and leaves everyone else's mail untouched. To read from all your saved contacts at once, `retalk receive --all --peers-only` drops strangers so you never spend a one-time key on someone you didn't add. Reach for a bare `receive --all` only deliberately: it drains and acknowledges *every* sender's mail at once — including strangers — and deletes it from the relay, so it is not a routine poll. For ongoing receipt prefer a single long-lived `retalk receive --peer NAME --follow`. Two concurrent `receive --all` readers split the mail between them, so don't run a bare `--all` while a `--follow` reader is going.
 
 `block`/`block --remove`/`block --list` and `--peers-only` are local filters
 that drop a sender during `receive` *before* any decryption, so a blocked or
@@ -248,8 +247,8 @@ the new user id. Offline; keys publish automatically on first send/receive.
 
 **`retalk id`** — print this identity's user id (sha256 of its public keys); it holds no secret and is safe to post publicly.
 
-- `--json` — emit `{fingerprint, identity_key, name}`.
-- `--card` — emit your OWN **Contact card** as JSON — `{fingerprint, name, identity_key, signing_key, verified, relay}` — the shareable form of your identity (your address + keys + the relay you use). A peer saves it with `retalk import`; pipe it out-of-band or `retalk id --card | retalk import --dir ./them`.
+- `--json` — emit your OWN **Contact card** as JSON — `{fingerprint, name, identity_key, signing_key, verified, relay}` — the shareable form of your identity (your address + keys + the relay you use). A peer saves it with `retalk import`; pipe it out-of-band or `retalk id --json | retalk import --dir ./them`.
+- `--card` — print that same Contact card in a **human-readable** form (use `--json` to pipe it to `retalk import`).
 - `--invite-message` — render that card as a copy-paste **invite** for onboarding a peer out-of-band: install retalk, set the relay, and `retalk add` you, plus a prompt to send their id back.
 - `--as NAME` — with `--card`/`--invite-message`, the nickname you suggest the peer save you under (default: your display name).
 
@@ -325,8 +324,8 @@ A shared contact arrives as a contact record (`{…, "kind": "contact", "card":
 {…}}`) and is also staged to the contact-inbox for `import --inbox`. Name a
 target with `--peer` or `--all` (one is required, not both).
 
-- `--peer PEER` — read only this sender's mail.
-- `--all` — read every sender (the whole mailbox).
+- `--peer PEER` — read only this sender's mail (the recommended default).
+- `--all` — read every sender (the whole mailbox). This drains and acks *every* sender at once, including strangers (each spends a one-time key), so prefer `--peer`; pair it with `--peers-only` to drop strangers.
 - `--follow` — keep polling every 2s and run key maintenance every 60s until ctrl-c.
 - `--peers-only` — accept only saved peers; unknown senders are dropped before decryption. Blocked senders are always dropped regardless.
 - `--no-save-contacts` — do not stage shared contacts to the contact-inbox (staging is on by default).
@@ -385,13 +384,13 @@ which runs just the key-upkeep half.
 and errors go to stderr (see [STANDARD.md](STANDARD.md)), so it composes with
 ordinary Unix tools.
 
-Drain the mailbox from cron:
+Poll one sender from cron:
 
 ```cron
-*/5 * * * * RETALK_PASSPHRASE=... retalk receive --all >> ~/inbox.jsonl 2>/dev/null
+*/5 * * * * RETALK_PASSPHRASE=... retalk receive --peer bob >> ~/inbox.jsonl 2>/dev/null
 ```
 
-Note: `receive --all` is a full mailbox drain — it reads, acks, and deletes every sender's mail at once. Use it sparingly. For ongoing receipt a single long-lived `retalk receive --all --follow` (or `retalk receive --peer NAME` for one sender) is better than repeated `--all` polls; two concurrent `--all` readers split the mail between them.
+Note: prefer `retalk receive --peer NAME` so you only read the sender you mean. A bare `receive --all` is a full mailbox drain — it reads, acks, and deletes *every* sender's mail at once, including strangers — so use it sparingly (add `--peers-only` to drop strangers). For ongoing receipt a single long-lived `retalk receive --peer NAME --follow` is better than repeated polls; two concurrent `receive --all` readers split the mail between them.
 
 Retry unacknowledged sends from cron — useful for a mostly-listening client
 that rarely calls `send` (every `send` already resends; `receive` never does):
@@ -403,13 +402,13 @@ that rarely calls `send` (every `send` already resends; `receive` never does):
 Pipe messages into another tool:
 
 ```sh
-retalk receive --all | jq -r .text
+retalk receive --peer bob | jq -r .text
 ```
 
 Tiny auto-responder:
 
 ```sh
-retalk receive --all --follow | while read -r msg; do
+retalk receive --peer bob --follow | while read -r msg; do
   sender=$(jq -r .from <<<"$msg")
   text=$(jq -r .text <<<"$msg")
   retalk send --peer "$sender" "you said: $text"

@@ -491,11 +491,11 @@ Trust IDs and saved peer names, not self-chosen names.
 Example:
 
 ```sh
-retalk receive --all --dir ./bob
+retalk receive --peer alice --dir ./bob
 # ~"alice": hello
 
 retalk add boss "$ALICE_ID" --dir ./bob
-retalk receive --all --dir ./bob
+retalk receive --peer boss --dir ./bob
 # "boss": are we still on for tomorrow?
 ```
 

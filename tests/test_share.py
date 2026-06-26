@@ -68,6 +68,9 @@ class TestShare(unittest.TestCase):
                    RETALK_RELAY=f"http://127.0.0.1:{PORT}",
                    RETALK_HOME=os.path.join(self.tmp, "store"))
         env.pop("RETALK_USER", None)
+        _h = os.path.join(self.tmp, "store"); os.makedirs(_h, exist_ok=True)
+        _c = os.path.join(_h, "config.json")
+        if not os.path.exists(_c): open(_c, "w").write("{}")  # hermetic: no default relay
         res = subprocess.run([sys.executable, "-m", "retalk.cli", *cmd],
                              capture_output=True, text=True, env=env,
                              input=getattr(self, "_stdin", None))

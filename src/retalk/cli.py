@@ -399,17 +399,29 @@ def cmd_init(args):
         d.chmod(0o700)
     except OSError:
         pass
+
+    # Publish keys to the relay so peers can reach you (unless --no-register).
+    # Best-effort: a failure never blocks init (keys also publish lazily on the
+    # first send/receive).
+    if server and not getattr(args, "no_register", False):
+        try:
+            u.sync(resend=False)
+        except Exception as e:
+            print(_style(f"\n(not registered on {server}: {e} — your keys will "
+                         "publish on first send/receive)", "2"), file=sys.stderr)
+
     home = str(Path.home())
     shown = str(d).replace(home, "~", 1) if str(d).startswith(home) else str(d)
     err = sys.stderr
-    print(f'created identity "{display or d.name}" at {shown}', file=err)
     if disabled:
         print(_style(
             "\n⚠ Keys are stored UNENCRYPTED — anyone who can read this folder "
             "can impersonate you.\n"
             "  Use --passphrase (or RETALK_PASSPHRASE) for any identity whose "
             "privacy matters.", "1;31"), file=err)
-    print(f"\nFingerprint: {u.fingerprint()}", file=err)
+    print(f"\nName:        {display or d.name}", file=err)
+    print(f"Path:        {shown}", file=err)
+    print(f"Fingerprint: {u.fingerprint()}", file=err)
     print("Relay:       "
           + (server or "(none — set one with: retalk config --relay <url>)"),
           file=err)
@@ -461,11 +473,10 @@ def _invite_message(u, as_name):
         "# 2. Point at our relay:",
         f"export RETALK_RELAY={relay}",
         "# 3. Create your identity:",
-        "retalk init",
+        "retalk init --passphrase <YOUR-PRIVATE-PASSPHRASE>",
         "# 4. Add me as a contact:",
         f"retalk add {name} {c['fingerprint']}",
-        "# 5. Send me YOUR id back (paste the output to me) so I can add you:",
-        "retalk id",
+        "# 5. Send me YOUR fingerprint back (shown by retalk init above) so I can add you.",
         "```",
     ])
 
@@ -474,14 +485,30 @@ def cmd_id(args):
     u = _open_user(args, need_server=False, banner=False)
     if getattr(args, "invite_message", False):
         print(_invite_message(u, getattr(args, "as_name", None)))
-    elif getattr(args, "card", False):
+    elif getattr(args, "card", False):                 # human-readable card
+        c = _self_card(u, getattr(args, "as_name", None))
+        print(f"Name:         {c['name'] or '(unnamed)'}")
+        print(f"Fingerprint:  {c['fingerprint']}")
+        if c.get("relay"):
+            print(f"Relay:        {c['relay']}")
+        print(f"Verified:     {'yes' if c.get('verified') else 'no'}")
+        print(f"Identity key: {c['identity_key']}")
+        print(f"Signing key:  {c['signing_key']}")
+    elif args.json:                                    # full Contact card as JSON
         print(json.dumps(_self_card(u, getattr(args, "as_name", None))))
-    elif args.json:
-        print(json.dumps({"fingerprint": u.fingerprint(),
-                          "identity_key": u.identity_key(),
-                          "name": u.name}))
     else:
         print(u.fingerprint())
+
+
+def _suggest_free_name(taken: set, name: str) -> str:
+    """Suggest a free local name near `name` when it's taken: bob -> bob-1,
+    bob-1 -> bob-2, and so on."""
+    m = re.match(r"^(.*)-(\d+)$", name)
+    base, n = (m.group(1), int(m.group(2))) if m else (name, 0)
+    while True:
+        n += 1
+        if f"{base}-{n}" not in taken:
+            return f"{base}-{n}"
 
 
 def cmd_add(args):
@@ -491,17 +518,30 @@ def cmd_add(args):
     if ID_RE.match(args.name):
         _die("peer name looks like a user id — give it a human name")
     store_db = d / STORE_FILE
-    _saved_peers(store_db)  # ensure the table exists
+    existing = _saved_peers(store_db)         # ensure the table + current peers
+    replacing = args.name in existing
+    if replacing and not getattr(args, "override", False):
+        alt = _suggest_free_name(set(existing), args.name)
+        _die(f"a contact named '{args.name}' already exists "
+             f"(-> {existing[args.name][0]}). Pick another name (e.g. '{alt}'), "
+             f"or pass --override to replace it")
     # store name + fingerprint only; keys are recorded later by `retalk verify`.
-    # re-adding a name resets any recorded keys, since the fingerprint may have
-    # changed and the old keys would no longer match it.
+    # --override resets any recorded keys, since the fingerprint may have changed
+    # and the old keys would no longer match it.
     _store_sql(store_db,
                "INSERT INTO peers(name, fingerprint, identity_key, signing_key) "
                "VALUES(?,?,NULL,NULL) ON CONFLICT(name) DO UPDATE SET "
                "fingerprint=excluded.fingerprint, "
                "identity_key=NULL, signing_key=NULL",
                args.name, args.fingerprint)
-    print(f"added {args.name} -> {args.fingerprint}", file=sys.stderr)
+    n = args.name
+    print(f"{'Replaced' if replacing else 'Added'} '{n}' in your contacts "
+          f"({args.fingerprint}).", file=sys.stderr)
+    print("Next:", file=sys.stderr)
+    print(f"  retalk verify {n}            — check their keys against the relay",
+          file=sys.stderr)
+    print(f'  retalk send --peer {n} "hi"  — send them a message', file=sys.stderr)
+    print( "  retalk contacts              — see all saved peers", file=sys.stderr)
 
 
 def cmd_contacts(args):
@@ -771,6 +811,13 @@ def cmd_receive(args):
     store_db = _resolve_store(args) / STORE_FILE
     to = None if args.all else _peer_to_id(args.peer, store_db)
 
+    if args.all and not getattr(args, "peers_only", False):
+        print(_style(
+            "\n⚠ receive --all reads and ACKs mail from EVERY sender — including "
+            "ones you never added, each consuming a one-time key.\n"
+            "  Prefer --peer <name> for a saved contact, or add --peers-only to "
+            "drop strangers.", "1;31"), file=sys.stderr)
+
     if args.save_messages and _meta(store_db, "no_passphrase") == "1":
         print("retalk: warning: --save-messages on a --no-passphrase identity "
               "stores message bodies with no real protection (its store key is "
@@ -827,6 +874,17 @@ def cmd_sync(args):
     if summary["resent"]:
         done.append(f"resent={summary['resent']}")
     print("synced" + (f" ({', '.join(done)})" if done else " (up to date)"),
+          file=sys.stderr)
+
+
+def cmd_register(args):
+    u = _open_user(args)
+    summary = u.sync(resend=False)        # publish keys + OTKs, no outbox resend
+    print(json.dumps(summary))
+    done = [k for k in ("republished", "replenished", "fallback_rotated")
+            if summary[k]]
+    print(f"registered {u.name or u.fingerprint()} on {u.server_url}"
+          + (f" ({', '.join(done)})" if done else " (already current)"),
           file=sys.stderr)
 
 
@@ -905,11 +963,12 @@ quickstart:
   export RETALK_USER=alice           # so later commands know which user
   retalk add bob <bob's user id>
   retalk send --peer bob "hello"
-  retalk receive --all --follow
+  retalk send -u alice --peer bob "hello"    # or name the user inline (no env var)
+  retalk receive --peer bob --follow
 
 run `retalk <command> --help` for the full story of each command.""")
     sub = p.add_subparsers(dest="command", required=True,
-                           metavar="{init,id,add,contacts,share,import,verify,block,send,receive,history}")
+                           metavar="{init,register,id,add,contacts,share,import,verify,block,sync,send,receive,history}")
 
     sp = sub.add_parser(
         "init", parents=[common], formatter_class=raw,
@@ -945,6 +1004,10 @@ examples:
                          "it marked '~NAME' because it is not verified — "
                          "only their locally saved peer name for you is. "
                          "Defaults to the --user / RETALK_USER name")
+    sp.add_argument("--no-register", action="store_true",
+                    help="don't publish keys to the relay after creating the "
+                         "identity (stay offline; keys publish on first "
+                         "send/receive, or run `retalk register` later)")
     sp.set_defaults(fn=cmd_init)
 
     sp = sub.add_parser(
@@ -969,19 +1032,19 @@ adding you.""",
 examples:
   retalk id                    id of the default identity
   retalk id --dir ./alice      id of a project-local identity
-  retalk id --json             {"fingerprint", "identity_key", "name"}
-  retalk id --card             your own Contact card (incl. relay) as JSON
-  retalk id --card | retalk import --dir ./bob   hand yourself to another identity
+  retalk id --card             your own Contact card, human-readable
+  retalk id --json             that same card as JSON (the shareable form)
+  retalk id --json | retalk import --dir ./bob   hand yourself to another identity
   retalk id --invite-message   a copy-paste invite to onboard a peer out-of-band
   retalk id --invite-message --as bob   suggest the name the peer saves you as""")
     sp.add_argument("--json", action="store_true",
-                    help="emit JSON with fingerprint, identity_key (base64 "
-                         "Curve25519 public key), and name")
-    sp.add_argument("--card", action="store_true",
                     help="emit your OWN Contact card as JSON (fingerprint, name, "
                          "identity_key, signing_key, verified, relay) -- the "
                          "shareable form of your identity; a peer saves it with "
                          "`retalk import`")
+    sp.add_argument("--card", action="store_true",
+                    help="print your OWN Contact card in a human-readable form "
+                         "(use --json to pipe it to `retalk import`)")
     sp.add_argument("--invite-message", dest="invite_message",
                     action="store_true",
                     help="render your card as a copy-paste invite (install + "
@@ -1000,9 +1063,10 @@ and incoming messages from that ID display as 'bob' instead of an
 unverified '~name'. The name is yours alone — it never travels over
 the network and the peer never learns it.
 
-Get the peer's ID out-of-band (they run `retalk id`). Adding an existing
-name overwrites it. No secret needed and no server contact — this only
-writes your local peers table.""",
+Get the peer's ID out-of-band (they run `retalk id`). If the name is already
+taken, `add` errors and suggests a free one; pass `--override` to replace the
+existing contact. No secret needed and no server contact — this only writes
+your local peers table.""",
         epilog="""\
 examples:
   retalk add bob f1041c25c87351d8550b31cc6b13ab04
@@ -1013,6 +1077,9 @@ run `retalk verify bob` to do that explicitly now and record the keys (see
 `retalk verify --help`).""")
     sp.add_argument("name", help="local name for this peer (e.g. 'bob')")
     sp.add_argument("fingerprint", help="the peer's 32-hex fingerprint (user id)")
+    sp.add_argument("--override", action="store_true",
+                    help="replace an existing contact of the same name "
+                         "(default: error if the name is already taken)")
     sp.set_defaults(fn=cmd_add)
 
     sp = sub.add_parser(
@@ -1242,6 +1309,20 @@ examples:
     sp.set_defaults(fn=cmd_sync)
 
     sp = sub.add_parser(
+        "register", parents=[common], formatter_class=raw,
+        help="publish this identity's keys to the relay (make it reachable)",
+        description="""\
+Publish your keys to the relay so peers can reach you: (re)publish your public
+keys, replenish one-time keys, and rotate the fallback if stale. `retalk init`
+does this automatically unless you pass --no-register; run `register` to (re)do
+it explicitly, e.g. after switching relays. Like `sync`, but it never resends
+the outbox.""",
+        epilog="""\
+examples:
+  retalk register             publish your keys to the relay""")
+    sp.set_defaults(fn=cmd_register)
+
+    sp = sub.add_parser(
         "send", parents=[common], formatter_class=raw,
         help="encrypt and send one message",
         description="""\
@@ -1289,8 +1370,10 @@ as a contact record instead ({"id", "from", "name", "kind": "contact", "card":
 sender (encrypted, like everything else).
 
 Say whose messages to read: pass --peer PEER (a saved name or 32-hex user id)
-to read just that sender, or --all to drain every sender. Targeting one peer
-leaves everyone else's mail in the mailbox for a later receive.
+to read just that sender -- this is the recommended default, and leaves
+everyone else's mail in the mailbox for a later receive. --all instead drains
+*every* sender at once, including strangers you never added (each spends a
+one-time key), so use it deliberately; add --peers-only to drop strangers.
 
 Without --follow: drain the mailbox once and exit (good for cron and
 scripts). With --follow: poll every 2 seconds until interrupted, and once
@@ -1306,12 +1389,11 @@ consume a one-time key): a blocked sender (`retalk block`) is always dropped,
 and with --peers-only only saved peers (`retalk add`) are accepted.""",
         epilog="""\
 examples:
-  retalk receive --all                 read every sender, once
-  retalk receive --peer bob            read only messages from bob
-  retalk receive --all --follow        live tail of all senders + key upkeep
-  retalk receive --all --peers-only    drop mail from senders you never added
-  retalk receive --all | jq .text      pipe the JSON lines to jq
-  retalk receive --all ; retalk import --inbox --list   read, then see staged contacts
+  retalk receive --peer bob            read only messages from bob (recommended)
+  retalk receive --peer bob --follow   live tail of bob + key upkeep
+  retalk receive --all --peers-only    read all saved contacts at once, drop strangers
+  retalk receive --peer bob | jq .text      pipe the JSON lines to jq
+  retalk receive --peer bob ; retalk import --inbox --list   read, then see staged contacts
 
 each line is a JSON message object (see docs/STANDARD.md): "id", "from",
 "name", "text" -- or a contact record with "kind":"contact" and "card".
@@ -1319,10 +1401,13 @@ Contacts peers share are also saved to the contact-inbox (see
 `retalk import --inbox`); pass --no-save-contacts to skip that.""")
     sp.add_argument("--peer", metavar="PEER",
                     help="read only this peer's messages (a saved peer name "
-                         "or a 32-hex user id); use --all for every sender")
+                         "or a 32-hex user id); the recommended default")
     sp.add_argument("--all", action="store_true",
                     help="read messages from every sender (the whole mailbox) "
-                         "instead of targeting one peer")
+                         "instead of targeting one peer. This drains and acks "
+                         "*every* sender at once, including strangers (each "
+                         "spends a one-time key), so prefer --peer; pair with "
+                         "--peers-only to drop strangers")
     sp.add_argument("--follow", action="store_true",
                     help="keep polling every 2s and maintain keys every "
                          "60s until ctrl-c")

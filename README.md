@@ -283,7 +283,7 @@ Opt in with `--save-messages` to also keep a local copy, and read it back with
 `retalk history`:
 
 ```sh
-retalk receive --all --save-messages   # decrypt, print, and keep a copy
+retalk receive --peer bob --save-messages   # decrypt, print, and keep a copy
 retalk history                         # replay saved messages, oldest first
 retalk history --peer bob              # just bob's
 ```
@@ -421,7 +421,7 @@ retalk init --user alice --relay https://server.example.com
 
 retalk add bob <bob-user-id>
 retalk send --peer bob "hello from across the internet"
-retalk receive --all --follow
+retalk receive --peer bob --follow
 ```
 
 Machine B does the same with the user "bob" and "Alice"'s user ID.

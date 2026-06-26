@@ -1,4 +1,4 @@
-"""`retalk id --card` emits your OWN Contact card (incl. the relay you use);
+"""`retalk id --json` emits your OWN Contact card (incl. the relay you use);
 `retalk id --invite-message` renders it as a copy-paste onboarding message. The
 self-card is a valid Contact card, so a peer can `retalk import` it."""
 import json
@@ -17,6 +17,9 @@ class TestInvite(unittest.TestCase):
         env = dict(os.environ, RETALK_PASSPHRASE="cli-secret",
                    RETALK_HOME=os.path.join(self.tmp, "store"))
         env.pop("RETALK_USER", None)
+        _h = os.path.join(self.tmp, "store"); os.makedirs(_h, exist_ok=True)
+        _c = os.path.join(_h, "config.json")
+        if not os.path.exists(_c): open(_c, "w").write("{}")  # hermetic: no default relay
         env.pop("RETALK_RELAY", None)
         r = subprocess.run([sys.executable, "-m", "retalk.cli", *cmd],
                            capture_output=True, text=True, env=env, input=stdin)
@@ -27,8 +30,8 @@ class TestInvite(unittest.TestCase):
         alice = os.path.join(self.tmp, "alice")
         self.cli("init", "--dir", alice, "--relay", "https://relay.example.com",
                  "--display-name", "alice")
-        # --card: your own Contact card, including the relay
-        card = json.loads(self.cli("id", "--dir", alice, "--card"))
+        # --json: your own Contact card as JSON, including the relay
+        card = json.loads(self.cli("id", "--dir", alice, "--json"))
         self.assertEqual(card["name"], "alice")
         self.assertTrue(card["verified"])
         self.assertEqual(card["relay"], "https://relay.example.com")

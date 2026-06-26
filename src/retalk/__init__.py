@@ -3,4 +3,4 @@
 from .user import PinMismatchError, User, canonical_hash, fingerprint
 
 __all__ = ["User", "PinMismatchError", "fingerprint", "canonical_hash"]
-__version__ = "0.0.5"
+__version__ = "0.0.6"

@@ -87,7 +87,7 @@ Defaults:
 - `min_otks=20`
 - `batch=100`
 
-`retalk receive --all --follow` runs this key upkeep — a `sync(resend=False)`
+`retalk receive --peer bob --follow` runs this key upkeep — a `sync(resend=False)`
 pass — every minute. Resending unacknowledged messages is a separate step
 (`send` and the explicit `retalk sync` command do it; `receive` never does).
 
