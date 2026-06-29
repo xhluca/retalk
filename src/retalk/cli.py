@@ -238,6 +238,37 @@ def _saved_peers(store_db: Path) -> dict:
                                  "signing_key FROM peers")}
 
 
+def _global_contacts_db() -> Path:
+    """The owner-wide contact list shared by every identity: a peers table at
+    ~/.retalk/contacts.db (RETALK_HOME relocates it). `add` writes here when no
+    identity is selected (or with --global)."""
+    return _data_home() / "contacts.db"
+
+
+def _effective_peers(store_db: Path) -> dict:
+    """The contacts an identity sees: the global list overlaid with this
+    identity's own. The identity's entries override global on the same
+    fingerprint OR the same local name; returns {fingerprint: (name, ik, sk)}."""
+    glob = _saved_peers(_global_contacts_db())
+    user = _saved_peers(store_db)
+    user_names = {nm for (nm, _i, _s) in user.values() if nm}
+    merged = {fp: v for fp, v in glob.items()
+              if fp not in user and (v[0] is None or v[0] not in user_names)}
+    merged.update(user)
+    return merged
+
+
+def _contact_db(store_db: Path, fp: str) -> Path | None:
+    """Which store actually holds the contact `fp` -- the identity's own store
+    if present there, else the global list, else None. Lets `verify`/`remove`
+    act on the right list."""
+    if fp in _saved_peers(store_db):
+        return store_db
+    if fp in _saved_peers(_global_contacts_db()):
+        return _global_contacts_db()
+    return None
+
+
 def _blocked_set(store_db: Path) -> set:
     _store_sql(store_db,
                "CREATE TABLE IF NOT EXISTS blocked(fingerprint TEXT PRIMARY KEY)")
@@ -313,7 +344,7 @@ def _open_user(args, need_server: bool = True, banner: bool = True) -> User:
     if need_server and not server:
         _die("no relay URL: pass --relay, set RETALK_RELAY, or save one "
              "at init time")
-    peers = _saved_peers(store_db)
+    peers = _effective_peers(store_db)
     identity_keys = {fp: ik for fp, (name, ik, _sk) in peers.items() if ik}
     names = {fp: name for fp, (name, _ik, _sk) in peers.items() if name}
     known = set(peers)
@@ -350,7 +381,7 @@ def _resolve_peer(peers: dict, arg: str) -> str | None:
 
 
 def _peer_to_id(peer: str, store_db: Path) -> str:
-    fp = _resolve_peer(_saved_peers(store_db), peer)
+    fp = _resolve_peer(_effective_peers(store_db), peer)
     if fp:
         return fp
     _die(f"unknown peer '{peer}': `retalk add {peer}` first, "
@@ -365,7 +396,7 @@ def _build_card(store_db: Path, contact: str, as_name: str | None) -> dict:
     else "". The identity_key/signing_key are filled in only when the contact
     is a verified saved peer; otherwise they stay "" and the card is shared
     unverified (the recipient verifies on first contact, as always)."""
-    peers = _saved_peers(store_db)            # {fingerprint: (name, ik, sk)}
+    peers = _effective_peers(store_db)            # {fingerprint: (name, ik, sk)}
     fp = _resolve_peer(peers, contact)
     if fp is None:
         _die(f"unknown contact '{contact}': save it with "
@@ -556,14 +587,28 @@ def _suggest_free_name(taken: set, name: str) -> str:
 
 
 def cmd_add(args):
-    d = _resolve_store(args)
     fp = args.fingerprint
     if not ID_RE.match(fp):
         _die("fingerprint must be 32 hex characters")
     name = args.name
     if name and ID_RE.match(name):
         _die("--name looks like a user id — give a human name")
-    store_db = d / STORE_FILE
+    # Target list: the GLOBAL list (shared by every identity) unless an identity
+    # is selected via --user/--dir/RETALK_USER. --global forces global and can't
+    # be combined with an explicit --user/--dir.
+    explicit_user = bool(getattr(args, "dir", None) or getattr(args, "user", None))
+    if getattr(args, "glob", False):
+        if explicit_user:
+            _die("--global and --user/--dir target different lists — pick one")
+        store_db = _global_contacts_db()
+        where = "the global contacts"
+    elif explicit_user or os.environ.get("RETALK_USER"):
+        store_db = _resolve_store(args) / STORE_FILE
+        where = "your contacts"
+    else:
+        store_db = _global_contacts_db()
+        where = "the global contacts"
+    store_db.parent.mkdir(parents=True, exist_ok=True)
     peers = _saved_peers(store_db)            # {fingerprint: (name, ik, sk)}
     # collision: a *different* peer already uses this local name
     if name:
@@ -588,7 +633,8 @@ def cmd_add(args):
                fp, name)
     ref = name or fp
     print(f"{'Updated' if had else 'Added'} contact "
-          f"{(repr(name) + ' ') if name else ''}({fp}).", file=sys.stderr)
+          f"{(repr(name) + ' ') if name else ''}({fp}) in {where}.",
+          file=sys.stderr)
     print("Next:", file=sys.stderr)
     print(f"  retalk verify {ref}            — check their keys against the relay",
           file=sys.stderr)
@@ -598,22 +644,28 @@ def cmd_add(args):
 
 
 def cmd_contacts(args):
-    d = _resolve_store(args)
-    store_db = d / STORE_FILE
-    # --remove NAME-OR-ID: delete a saved peer (the inverse of `add`), resolved
-    # by saved name or fingerprint.
+    # Works without an identity: then it shows/manages the GLOBAL list; with an
+    # identity it shows the merged view (global + that identity's own).
+    user_sel = bool(getattr(args, "dir", None) or getattr(args, "user", None)
+                    or os.environ.get("RETALK_USER"))
+    store_db = (_resolve_store(args) / STORE_FILE
+                if user_sel else _global_contacts_db())
+    view = _effective_peers(store_db) if user_sel else _saved_peers(store_db)
+    # --remove NAME-OR-ID: delete a contact (the inverse of `add`) from whichever
+    # list holds it (this identity's own, else the global list).
     if args.remove is not None:
         if args.show is not None:
             _die("pass --show to view a contact or --remove to delete one, "
                  "not both")
-        peers = _saved_peers(store_db)
-        fp = _resolve_peer(peers, args.remove)
-        if fp is None or fp not in peers:
+        fp = _resolve_peer(view, args.remove)
+        if fp is None or fp not in view:
             _die(f"no saved contact '{args.remove}' to remove")
-        nm = peers[fp][0]
-        _store_sql(store_db, "DELETE FROM peers WHERE fingerprint=?", fp)
-        print(f"removed contact {(repr(nm) + ' ') if nm else ''}({fp})",
-              file=sys.stderr)
+        target = (_contact_db(store_db, fp) or store_db) if user_sel else store_db
+        nm = _saved_peers(target).get(fp, (None,))[0]
+        _store_sql(target, "DELETE FROM peers WHERE fingerprint=?", fp)
+        scope = "the global" if target == _global_contacts_db() else "your"
+        print(f"removed contact {(repr(nm) + ' ') if nm else ''}({fp}) from "
+              f"{scope} contacts", file=sys.stderr)
         return
     # --show NAME-OR-ID: just that one contact. As a Contact card with --json
     # (the shareable form `share` sends and `import` ingests), else a single
@@ -626,7 +678,7 @@ def cmd_contacts(args):
             status = "verified" if card["verified"] else "unverified"
             print(f"{card['name']}\t{card['fingerprint']}\t{status}")
         return
-    for fp, (name, ik, sk) in sorted(_saved_peers(store_db).items(),
+    for fp, (name, ik, sk) in sorted(view.items(),
                                      key=lambda kv: (kv[1][0] or "~", kv[0])):
         verified = bool(ik and sk)
         if args.json:
@@ -641,13 +693,14 @@ def cmd_contacts(args):
 def cmd_verify(args):
     d = _resolve_store(args)
     store_db = d / STORE_FILE
-    peers = _saved_peers(store_db)
+    peers = _effective_peers(store_db)      # merged: global + this identity's own
     # the target must already be a saved contact (run `retalk add` first)
     fp = _resolve_peer(peers, args.peer)
     if fp is None or fp not in peers:
         _die(f"no saved contact '{args.peer}': add it first with "
              "`retalk add <fingerprint>`")
     name = peers[fp][0] or fp
+    target = _contact_db(store_db, fp) or store_db   # record where it lives
 
     if args.identity_key or args.signing_key:
         if not (args.identity_key and args.signing_key):
@@ -672,8 +725,8 @@ def cmd_verify(args):
                  f"{fp} -- possible MITM, refusing to record them")
         source = "the relay"
 
-    _store_sql(store_db, "UPDATE peers SET identity_key=?, signing_key=? "
-                         "WHERE fingerprint=?", ik, sk, fp)
+    _store_sql(target, "UPDATE peers SET identity_key=?, signing_key=? "
+                       "WHERE fingerprint=?", ik, sk, fp)
     print(f"verified {name} ({fp}) from {source}", file=sys.stderr)
 
 
@@ -820,7 +873,7 @@ def cmd_block(args):
             _die("give a peer (to block, or --remove to unblock), or --list to "
                  "show the block list -- not both")
         names = {fp: name for fp, (name, _ik, _sk)
-                 in _saved_peers(store_db).items()}
+                 in _effective_peers(store_db).items()}
         for fp in sorted(_blocked_set(store_db)):
             if args.json:
                 print(json.dumps({"fingerprint": fp, "name": names.get(fp, "")}))
@@ -910,7 +963,7 @@ def cmd_history(args):
                       "SELECT msg_id, from_fp, from_name, body FROM messages "
                       f"{where}ORDER BY ts", *([peer_fp] if peer_fp else []))
     # prefer the current saved-peer name; fall back to the label stored at receive
-    names = {fp: name for name, (fp, _ik, _sk) in _saved_peers(store_db).items()}
+    names = {fp: name for name, (fp, _ik, _sk) in _effective_peers(store_db).items()}
     for msg_id, from_fp, from_name, body in rows:
         print(json.dumps({"id": msg_id, "from": from_fp,
                           "name": names.get(from_fp) or from_name,
@@ -1143,6 +1196,10 @@ run `retalk verify <name-or-fingerprint>` to do that explicitly now (see
     sp.add_argument("--override", action="store_true",
                     help="reassign --name from another contact that already has "
                          "it (default: error if the name is taken)")
+    sp.add_argument("--global", dest="glob", action="store_true",
+                    help="save to the owner-wide global contact list shared by "
+                         "every identity (the default when no identity is "
+                         "selected); cannot be combined with --user/--dir")
     sp.set_defaults(fn=cmd_add)
 
     sp = sub.add_parser(
