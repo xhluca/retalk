@@ -98,7 +98,7 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(res.stdout.strip(), aid)
 
         # 4. full exchange: alice names bob, sends; bob receives
-        self.cli("add", "bob", bid, "--dir", alice_dir)
+        self.cli("add", bid, "--name", "bob", "--dir", alice_dir)
         res = self.cli("receive", "--all", "-u", "bob", secret="bob-secret")  # publishes bob
         self.assertEqual(res.stdout, "")
         self.cli("send", "--peer", "bob", "hello over the cli", "--dir", alice_dir)

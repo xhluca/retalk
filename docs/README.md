@@ -149,7 +149,7 @@ no passphrase, while an encrypted identity always requires one.
 Then exchange user IDs out-of-band and save your peer:
 
 ```sh
-retalk add bob <bob-user-id>   # an "incomplete" contact: just name + fingerprint
+retalk add <bob-user-id> --name bob   # an "incomplete" contact: just name + fingerprint
 retalk verify bob              # optional: fetch & record "bob"'s keys now
 ```
 
@@ -164,7 +164,7 @@ Common commands (with `RETALK_USER=alice` exported):
 
 ```sh
 retalk id                          # print my user ID
-retalk add bob <bob-user-id>       # save a peer (name + fingerprint)
+retalk add <bob-user-id> --name bob       # save a peer (name + fingerprint)
 retalk verify bob                  # fetch & record "bob"'s keys (optional)
 retalk contacts                    # list saved peers and verified status
 retalk contacts --show bob --json  # print "bob" as a shareable Contact card (JSON)
@@ -254,9 +254,12 @@ the new user id. Offline; keys publish automatically on first send/receive.
 
 ### Contacts — `add`, `verify`, `contacts`
 
-**`retalk add NAME FINGERPRINT`** — save a peer's 32-hex user id under a local
-name, so `send NAME …` works and their mail displays as `NAME`. The name is
-yours alone and never travels over the network.
+**`retalk add FINGERPRINT [--name NAME]`** — save a peer's 32-hex user id, with
+an optional local name (so `send NAME …` works and their mail displays as
+`NAME`). Without `--name` the contact has no label — address it by fingerprint
+or by the peer's own `~name`. A name already taken by another contact errors
+(suggesting a free one) unless `--override`. The name is yours alone and never
+travels over the network.
 
 **`retalk verify PEER`** — record a saved peer's public keys, making explicit the
 key exchange that otherwise happens on first message. Keys are checked against

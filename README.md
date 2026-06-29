@@ -192,7 +192,7 @@ Display names (`--display-name`) are optional and work differently:
 - A user's self-chosen name is encrypted inside each message. The server does
   not see it. Clients show it with a `~` prefix because it is not verified.
 - A peer name is your local label for a user ID, added with
-  `retalk add bob <id>`. It stays on your machine and takes priority over the
+  `retalk add <id> --name bob`. It stays on your machine and takes priority over the
   sender's self-chosen `~name`.
 
 
@@ -354,7 +354,7 @@ export RETALK_USER=alice               # which user to act as (replaces --user)
 export RETALK_PASSPHRASE=alice-secret  # unlocks her keys (replaces --passphrase)
 # RETALK_RELAY isn't needed: init saved the relay URL inside "alice"'s store
 
-retalk add bob <bob-id>                # save "bob"'s id (from terminal 3) as the peer "bob"
+retalk add <bob-id> --name bob                # save "bob"'s id (from terminal 3) as the peer "bob"
 ```
 
 `add` only needs `RETALK_USER` (no keys, no server contact). Sending and
@@ -368,7 +368,7 @@ Same steps with the user "bob" and his own passphrase:
 retalk init --user bob --passphrase bob-secret --relay http://127.0.0.1:8766
 export RETALK_USER=bob
 export RETALK_PASSPHRASE=bob-secret
-retalk add alice <alice-id>   # paste "alice"'s ID from terminal 2
+retalk add <alice-id> --name alice   # paste "alice"'s ID from terminal 2
 ```
 
 Two users with two different passphrases is exactly why each terminal sets its
@@ -419,7 +419,7 @@ export RETALK_PASSPHRASE="your-passphrase"   # or pass --no-passphrase to init
 retalk init --user alice --relay https://server.example.com
 # Share the printed user ID with "Bob" out-of-band.
 
-retalk add bob <bob-user-id>
+retalk add <bob-user-id> --name bob
 retalk send --peer bob "hello from across the internet"
 retalk receive --peer bob --follow
 ```
