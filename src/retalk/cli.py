@@ -427,12 +427,14 @@ def cmd_init(args):
     print("Relay:       "
           + (server or "(none — set one with: retalk config --relay <url>)"),
           file=err)
-    if getattr(args, "reply", False):
-        print("\nSend this reply back to whoever invited you so they can add you:\n"
-              + _invite_reply(u, None), file=err)
-    else:
-        print("\nShare the following message with your peer so they can add you:\n"
-              + _invite_message(u, None), file=err)
+    # Print BOTH onboarding snippets, labeled, so you can pick the right one:
+    #   - invite: you are inviting a peer who is NOT on retalk yet
+    #   - reply:  you are responding to an invite someone already sent you
+    print("\nTo INVITE a peer who is not on retalk yet, share this:\n"
+          + _invite_message(u, None), file=err)
+    print("\nOr, if you are REPLYING to an invite someone sent you, "
+          "send them this instead:\n"
+          + _invite_reply(u, None), file=err)
     # bare id on stdout for scripts/pipes; skipped interactively (shown above)
     if not sys.stdout.isatty():
         print(u.fingerprint())
@@ -485,11 +487,11 @@ def _invite_message(u, as_name):
         "# Let's talk over retalk, a CLI-based messaging",
         "# 1. Install retalk (if not installed yet):",
         "pip install -U retalk               # or: uv add retalk",
-        "# 2. Create your identity on our relay (prints a reply to send back to me):",
-        f"retalk init --relay {relay} --reply --passphrase <PRIVATE-PASSPHRASE>",
-        "# 3. Add me as a contact:",
-        f"retalk add {name} {c['fingerprint']}",
-        "# 4. Send me the reply that step 2 printed, so I can add you back.",
+        "# 2. Create your identity (pick any name; init also prints a reply to send me):",
+        f"retalk init --user <your-name> --relay {relay} --passphrase <PRIVATE-PASSPHRASE>",
+        "# 3. Add me as a contact (same name you chose above):",
+        f"retalk add --user <your-name> {name} {c['fingerprint']}",
+        "# 4. Send me the 'reply' block that step 2 printed, so I can add you back.",
     ])
 
 
@@ -500,8 +502,8 @@ def _invite_reply(u, as_name):
     c = _self_card(u, as_name)
     name = c["name"] or "me"
     return _bash_block([
-        "# Got your invite -- I'm set up on retalk. Add me back:",
-        f"retalk add {name} {c['fingerprint']}",
+        "# Got your invite -- I'm set up on retalk. Add me back (use your own user name):",
+        f"retalk add --user <your-name> {name} {c['fingerprint']}",
         "# Then we can message each other.",
     ])
 def cmd_id(args):
@@ -1033,10 +1035,6 @@ examples:
                     help="don't publish keys to the relay after creating the "
                          "identity (stay offline; keys publish on first "
                          "send/receive, or run `retalk register` later)")
-    sp.add_argument("--reply", action="store_true",
-                    help="after creating the identity, print the invite REPLY "
-                         "(your add-me line for whoever invited you) instead of "
-                         "a full invite -- use this when responding to an invite")
     sp.set_defaults(fn=cmd_init)
 
     sp = sub.add_parser(
