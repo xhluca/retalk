@@ -488,9 +488,9 @@ def _invite_message(u, as_name):
         "# 1. Install retalk (if not installed yet):",
         "pip install -U retalk               # or: uv add retalk",
         "# 2. Create your identity (pick any name; init also prints a reply to send me):",
-        f"retalk init --user <your-name> --relay {relay} --passphrase <PRIVATE-PASSPHRASE>",
+        f"retalk init --relay {relay} --passphrase <PRIVATE-PASSPHRASE> # -u <your-username>",
         "# 3. Add me as a contact (same name you chose above):",
-        f"retalk add --user <your-name> {name} {c['fingerprint']}",
+        f"retalk add {c['fingerprint']} # -u <your-username>",
         "# 4. Send me the 'reply' block that step 2 printed, so I can add you back.",
     ])
 
