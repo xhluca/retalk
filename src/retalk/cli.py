@@ -427,8 +427,12 @@ def cmd_init(args):
     print("Relay:       "
           + (server or "(none — set one with: retalk config --relay <url>)"),
           file=err)
-    print("\nShare the following message with your peer so they can add you:\n"
-          + _invite_message(u, None), file=err)
+    if getattr(args, "reply", False):
+        print("\nSend this reply back to whoever invited you so they can add you:\n"
+              + _invite_reply(u, None), file=err)
+    else:
+        print("\nShare the following message with your peer so they can add you:\n"
+              + _invite_message(u, None), file=err)
     # bare id on stdout for scripts/pipes; skipped interactively (shown above)
     if not sys.stdout.isatty():
         print(u.fingerprint())
@@ -481,11 +485,11 @@ def _invite_message(u, as_name):
         "# Let's talk over retalk, a CLI-based messaging",
         "# 1. Install retalk (if not installed yet):",
         "pip install -U retalk               # or: uv add retalk",
-        "# 2. Create your identity on our relay:",
-        f"retalk init --passphrase <YOUR-PRIVATE-PASSPHRASE> --relay {relay}",
+        "# 2. Create your identity on our relay (prints a reply to send back to me):",
+        f"retalk init --relay {relay} --reply --passphrase <PRIVATE-PASSPHRASE>",
         "# 3. Add me as a contact:",
         f"retalk add {name} {c['fingerprint']}",
-        "# 4. Send me YOUR fingerprint back (shown by retalk init above) so I can add you.",
+        "# 4. Send me the reply that step 2 printed, so I can add you back.",
     ])
 
 
@@ -1029,6 +1033,10 @@ examples:
                     help="don't publish keys to the relay after creating the "
                          "identity (stay offline; keys publish on first "
                          "send/receive, or run `retalk register` later)")
+    sp.add_argument("--reply", action="store_true",
+                    help="after creating the identity, print the invite REPLY "
+                         "(your add-me line for whoever invited you) instead of "
+                         "a full invite -- use this when responding to an invite")
     sp.set_defaults(fn=cmd_init)
 
     sp = sub.add_parser(
