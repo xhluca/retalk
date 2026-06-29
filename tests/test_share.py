@@ -108,7 +108,7 @@ class TestShare(unittest.TestCase):
                 self.cli("receive", "--all", "--dir", c)
 
                 # alice saves bob and records his keys from the relay
-                self.cli("add", "bob", bid, "--dir", a)
+                self.cli("add", bid, "--name", "bob", "--dir", a)
                 self.cli("verify", "bob", "--dir", a)
                 b_ik = self.contacts(a)["bob"]["identity_key"]
                 b_sk = self.contacts(a)["bob"]["signing_key"]
@@ -142,7 +142,7 @@ class TestShare(unittest.TestCase):
 
                 # 2. share bob with carol over the relay; carol also gets a chat
                 #    message, so the two record kinds must stay distinguishable
-                self.cli("add", "carol", cid, "--dir", a)
+                self.cli("add", cid, "--name", "carol", "--dir", a)
                 receipt = json.loads(
                     self.cli("share", "--peer", "carol", "bob", "--dir", a).stdout)
                 self.assertEqual(set(receipt), {"id", "to", "shared"})
@@ -211,8 +211,8 @@ class TestShare(unittest.TestCase):
             a = os.path.join(tmp, "alice")
             self.cli("init", "--dir", a, "--display-name", "alice")
             bid, cid = "b" * 32, "c" * 32
-            self.cli("add", "bob", bid, "--dir", a)
-            self.cli("add", "carol", cid, "--dir", a)
+            self.cli("add", bid, "--name", "bob", "--dir", a)
+            self.cli("add", cid, "--name", "carol", "--dir", a)
             self.assertEqual(set(self.contacts(a)), {"bob", "carol"})
 
             # remove by name, then by fingerprint
@@ -224,7 +224,7 @@ class TestShare(unittest.TestCase):
             # removing an unknown contact fails loudly
             self.cli("contacts", "--remove", "ghost", "--dir", a, expect=2)
             # --show and --remove are mutually exclusive
-            self.cli("add", "bob", bid, "--dir", a)
+            self.cli("add", bid, "--name", "bob", "--dir", a)
             self.cli("contacts", "--show", "bob", "--remove", "bob",
                      "--dir", a, expect=2)
             print("PASS: contacts --remove deletes by name and fingerprint; "
@@ -253,9 +253,9 @@ class TestShare(unittest.TestCase):
                                "--display-name", "carol").stdout.strip()
                 self.cli("receive", "--all", "--dir", b)  # bob/carol publish keys
                 self.cli("receive", "--all", "--dir", c)
-                self.cli("add", "bob", bid, "--dir", a)
+                self.cli("add", bid, "--name", "bob", "--dir", a)
                 self.cli("verify", "bob", "--dir", a)
-                self.cli("add", "carol", cid, "--dir", a)
+                self.cli("add", cid, "--name", "carol", "--dir", a)
 
                 # alice introduces bob to carol AND sends her a chat message
                 self.cli("share", "--peer", "carol", "bob", "--dir", a)

@@ -93,8 +93,8 @@ class TestContacts(unittest.TestCase):
 
             # 1. add saves an unverified contact; --identity-key is gone
             self.assertEqual(self.cli("contacts", "--dir", a).stdout, "")
-            self.cli("add", "bob", bid, "--dir", a)
-            self.cli("add", "bob", bid, "--identity-key", b_ik, "--dir", a,
+            self.cli("add", bid, "--name", "bob", "--dir", a)
+            self.cli("add", bid, "--name", "bob", "--identity-key", b_ik, "--dir", a,
                      expect=2)  # flag removed
             line = self.cli("contacts", "--dir", a).stdout.strip()
             self.assertEqual(line, f"bob\t{bid}\tunverified")
@@ -146,7 +146,7 @@ class TestContacts(unittest.TestCase):
                 self.cli("receive", "--all", "--dir", b)  # bob publishes keys
 
                 # alice adds bob, then fetches+records his keys from the relay
-                self.cli("add", "bob", bid, "--dir", a)
+                self.cli("add", bid, "--name", "bob", "--dir", a)
                 self.assertFalse(self.contacts(a)["bob"]["verified"])
                 res = self.cli("verify", "bob", "--dir", a)
                 self.assertIn("from the relay", res.stderr)

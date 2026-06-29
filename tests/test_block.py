@@ -205,7 +205,7 @@ class TestBlockCLI(unittest.TestCase):
         cid = self.cli("init", "--dir", c, "--display-name", "carol").stdout.strip()
 
         # alice knows bob, not carol
-        self.cli("add", "bob", bid, "--dir", a)
+        self.cli("add", bid, "--name", "bob", "--dir", a)
         self.cli("receive", "--all", "--dir", a)  # alice publishes keys
 
         # block / block --list / block --remove round-trip (by name and raw id)
@@ -245,7 +245,7 @@ class TestBlockCLI(unittest.TestCase):
         # refused server-side (a signed negative ack), so the relay rejects the
         # resends and carol marks them dropped from the rejection. Only her
         # latest, accepted message arrives.
-        self.cli("add", "carol", cid, "--dir", a)
+        self.cli("add", cid, "--name", "carol", "--dir", a)
         self.cli("send", "--peer", aid, "second knock from carol", "--dir", c)
         out = self.cli("receive", "--all", "--peers-only", "--dir", a).stdout
         texts = [json.loads(l)["text"] for l in out.splitlines()]

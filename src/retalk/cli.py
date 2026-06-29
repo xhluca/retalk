@@ -199,28 +199,42 @@ def _meta(store_db: Path, key: str) -> str | None:
 
 
 def _saved_peers(store_db: Path) -> dict:
-    """Return {name: (fingerprint, identity_key, signing_key)} for saved peers.
+    """Return {fingerprint: (name, identity_key, signing_key)} for saved peers.
 
-    A peer added with `retalk add` has only name + fingerprint; identity_key
-    and signing_key stay NULL until `retalk verify` records them, so a peer is
-    "verified" exactly when both keys are present."""
+    A peer is keyed by its fingerprint; `name` is an optional local label (None
+    when added by fingerprint alone). identity_key and signing_key stay None
+    until `retalk verify` records them, so a peer is "verified" exactly when
+    both keys are present."""
+    info = _store_sql(store_db, "PRAGMA table_info(peers)")
+    if info:                                   # migrate an existing table
+        cols = [r[1] for r in info]
+        if "id" in cols and "fingerprint" not in cols:
+            _store_sql(store_db, "ALTER TABLE peers RENAME COLUMN id TO fingerprint")
+        if "pin" in cols and "identity_key" not in cols:
+            _store_sql(store_db,
+                       "ALTER TABLE peers RENAME COLUMN pin TO identity_key")
+        if "signing_key" not in cols:
+            try:
+                _store_sql(store_db, "ALTER TABLE peers ADD COLUMN signing_key TEXT")
+            except sqlite3.OperationalError:
+                pass
+        # re-key by fingerprint if the table is still keyed by name (old schema)
+        info = _store_sql(store_db, "PRAGMA table_info(peers)")
+        if [r[1] for r in info if r[5]] == ["name"]:
+            _store_sql(store_db, "ALTER TABLE peers RENAME TO _peers_old")
+            _store_sql(store_db, "CREATE TABLE peers(fingerprint TEXT PRIMARY "
+                                 "KEY, name TEXT, identity_key TEXT, "
+                                 "signing_key TEXT)")
+            _store_sql(store_db, "INSERT OR IGNORE INTO peers("
+                       "fingerprint, name, identity_key, signing_key) "
+                       "SELECT fingerprint, name, identity_key, signing_key "
+                       "FROM _peers_old")
+            _store_sql(store_db, "DROP TABLE _peers_old")
     _store_sql(store_db, "CREATE TABLE IF NOT EXISTS peers("
-                         "name TEXT PRIMARY KEY, fingerprint TEXT, "
+                         "fingerprint TEXT PRIMARY KEY, name TEXT, "
                          "identity_key TEXT, signing_key TEXT)")
-    # migrate older stores that named these columns id / pin
-    cols = [r[1] for r in _store_sql(store_db, "PRAGMA table_info(peers)")]
-    if "id" in cols and "fingerprint" not in cols:
-        _store_sql(store_db, "ALTER TABLE peers RENAME COLUMN id TO fingerprint")
-    if "pin" in cols and "identity_key" not in cols:
-        _store_sql(store_db,
-                   "ALTER TABLE peers RENAME COLUMN pin TO identity_key")
-    if "signing_key" not in cols:  # pre-verify stores lack the cached signing key
-        try:
-            _store_sql(store_db, "ALTER TABLE peers ADD COLUMN signing_key TEXT")
-        except sqlite3.OperationalError:
-            pass  # already present (added concurrently)
-    return {name: (fp, ik, sk) for name, fp, ik, sk in
-            _store_sql(store_db, "SELECT name, fingerprint, identity_key, "
+    return {fp: (name, ik, sk) for fp, name, ik, sk in
+            _store_sql(store_db, "SELECT fingerprint, name, identity_key, "
                                  "signing_key FROM peers")}
 
 
@@ -300,9 +314,9 @@ def _open_user(args, need_server: bool = True, banner: bool = True) -> User:
         _die("no relay URL: pass --relay, set RETALK_RELAY, or save one "
              "at init time")
     peers = _saved_peers(store_db)
-    identity_keys = {fp: ik for _, (fp, ik, _sk) in peers.items() if ik}
-    names = {fp: name for name, (fp, _ik, _sk) in peers.items()}
-    known = {fp for _, (fp, _ik, _sk) in peers.items()}
+    identity_keys = {fp: ik for fp, (name, ik, _sk) in peers.items() if ik}
+    names = {fp: name for fp, (name, _ik, _sk) in peers.items() if name}
+    known = set(peers)
     blocked = _blocked_set(store_db)
     # --peers-only this run, or the setting persisted by an earlier flag
     policy = ("peers-only"
@@ -324,13 +338,22 @@ def _open_user(args, need_server: bool = True, banner: bool = True) -> User:
     return u
 
 
+def _resolve_peer(peers: dict, arg: str) -> str | None:
+    """Resolve a peer reference (a saved local name or a 32-hex fingerprint) to
+    a fingerprint, or None. `peers` is {fingerprint: (name, ik, sk)}."""
+    if arg in peers:                        # already a saved fingerprint
+        return arg
+    for fp, (name, _ik, _sk) in peers.items():
+        if name and name == arg:            # matched a saved local name
+            return fp
+    return arg if ID_RE.match(arg) else None  # an unsaved fingerprint
+
+
 def _peer_to_id(peer: str, store_db: Path) -> str:
-    peers = _saved_peers(store_db)
-    if peer in peers:
-        return peers[peer][0]
-    if ID_RE.match(peer):
-        return peer
-    _die(f"unknown peer '{peer}': `retalk add {peer} <user-id>` first, "
+    fp = _resolve_peer(_saved_peers(store_db), peer)
+    if fp:
+        return fp
+    _die(f"unknown peer '{peer}': `retalk add {peer}` first, "
          "or pass a 32-hex user id")
 
 
@@ -342,22 +365,16 @@ def _build_card(store_db: Path, contact: str, as_name: str | None) -> dict:
     else "". The identity_key/signing_key are filled in only when the contact
     is a verified saved peer; otherwise they stay "" and the card is shared
     unverified (the recipient verifies on first contact, as always)."""
-    peers = _saved_peers(store_db)
-    if contact in peers:                      # a saved peer name
-        fp, ik, sk = peers[contact]
-        name = as_name or contact
-    elif ID_RE.match(contact):                # a raw fingerprint
-        match = [(n, ik, sk) for n, (pfp, ik, sk) in peers.items()
-                 if pfp == contact]
-        if match:                             # ...that is also a saved peer
-            saved_name, ik, sk = match[0]
-            name = as_name or saved_name
-        else:                                 # ...not saved: keys unknown
-            name, ik, sk = (as_name or ""), None, None
-        fp = contact
-    else:
+    peers = _saved_peers(store_db)            # {fingerprint: (name, ik, sk)}
+    fp = _resolve_peer(peers, contact)
+    if fp is None:
         _die(f"unknown contact '{contact}': save it with "
-             f"`retalk add {contact} <user-id>`, or pass a 32-hex user id")
+             f"`retalk add {contact}`, or pass a 32-hex user id")
+    if fp in peers:                           # a saved peer
+        saved_name, ik, sk = peers[fp]
+        name = as_name or saved_name or ""
+    else:                                     # an unsaved fingerprint
+        name, ik, sk = (as_name or ""), None, None
     return {"fingerprint": fp, "name": name,
             "identity_key": ik or "", "signing_key": sk or "",
             "verified": bool(ik and sk)}
@@ -488,7 +505,7 @@ def _invite_message(u, as_name):
         "# 2. Create your identity on our relay (prints a reply to send back to me):",
         f"retalk init --relay {relay} --reply --passphrase <PRIVATE-PASSPHRASE>",
         "# 3. Add me as a contact:",
-        f"retalk add {name} {c['fingerprint']}",
+        f"retalk add {c['fingerprint']} --name {name}",
         "# 4. Send me the reply that step 2 printed, so I can add you back.",
     ])
 
@@ -501,7 +518,7 @@ def _invite_reply(u, as_name):
     name = c["name"] or "me"
     return _bash_block([
         "# Got your invite -- I'm set up on retalk. Add me back:",
-        f"retalk add {name} {c['fingerprint']}",
+        f"retalk add {c['fingerprint']} --name {name}",
         "# Then we can message each other.",
     ])
 def cmd_id(args):
@@ -538,55 +555,62 @@ def _suggest_free_name(taken: set, name: str) -> str:
 
 def cmd_add(args):
     d = _resolve_store(args)
-    if not ID_RE.match(args.fingerprint):
+    fp = args.fingerprint
+    if not ID_RE.match(fp):
         _die("fingerprint must be 32 hex characters")
-    if ID_RE.match(args.name):
-        _die("peer name looks like a user id — give it a human name")
+    name = args.name
+    if name and ID_RE.match(name):
+        _die("--name looks like a user id — give a human name")
     store_db = d / STORE_FILE
-    existing = _saved_peers(store_db)         # ensure the table + current peers
-    replacing = args.name in existing
-    if replacing and not getattr(args, "override", False):
-        alt = _suggest_free_name(set(existing), args.name)
-        _die(f"a contact named '{args.name}' already exists "
-             f"(-> {existing[args.name][0]}). Pick another name (e.g. '{alt}'), "
-             f"or pass --override to replace it")
-    # store name + fingerprint only; keys are recorded later by `retalk verify`.
-    # --override resets any recorded keys, since the fingerprint may have changed
-    # and the old keys would no longer match it.
+    peers = _saved_peers(store_db)            # {fingerprint: (name, ik, sk)}
+    # collision: a *different* peer already uses this local name
+    if name:
+        clash = next((f for f, (nm, _i, _s) in peers.items()
+                      if nm == name and f != fp), None)
+        if clash and not getattr(args, "override", False):
+            alt = _suggest_free_name({nm for (nm, _i, _s) in peers.values() if nm},
+                                     name)
+            _die(f"a contact named '{name}' already exists (-> {clash}). "
+                 f"Pick another name (e.g. '{alt}'), or pass --override to "
+                 "replace it")
+    had = fp in peers
+    # keyed by fingerprint; --override frees the name from any other peer.
+    # re-adding resets recorded keys, since they are bound to the fingerprint.
+    if name and getattr(args, "override", False):
+        _store_sql(store_db, "UPDATE peers SET name=NULL "
+                             "WHERE name=? AND fingerprint!=?", name, fp)
     _store_sql(store_db,
-               "INSERT INTO peers(name, fingerprint, identity_key, signing_key) "
-               "VALUES(?,?,NULL,NULL) ON CONFLICT(name) DO UPDATE SET "
-               "fingerprint=excluded.fingerprint, "
-               "identity_key=NULL, signing_key=NULL",
-               args.name, args.fingerprint)
-    n = args.name
-    print(f"{'Replaced' if replacing else 'Added'} '{n}' in your contacts "
-          f"({args.fingerprint}).", file=sys.stderr)
+               "INSERT INTO peers(fingerprint, name, identity_key, signing_key) "
+               "VALUES(?,?,NULL,NULL) ON CONFLICT(fingerprint) DO UPDATE SET "
+               "name=excluded.name, identity_key=NULL, signing_key=NULL",
+               fp, name)
+    ref = name or fp
+    print(f"{'Updated' if had else 'Added'} contact "
+          f"{(repr(name) + ' ') if name else ''}({fp}).", file=sys.stderr)
     print("Next:", file=sys.stderr)
-    print(f"  retalk verify {n}            — check their keys against the relay",
+    print(f"  retalk verify {ref}            — check their keys against the relay",
           file=sys.stderr)
-    print(f'  retalk send --peer {n} "hi"  — send them a message', file=sys.stderr)
+    print(f'  retalk send --peer {ref} "hi"  — send them a message',
+          file=sys.stderr)
     print( "  retalk contacts              — see all saved peers", file=sys.stderr)
 
 
 def cmd_contacts(args):
     d = _resolve_store(args)
     store_db = d / STORE_FILE
-    # --remove NAME-OR-ID: delete a saved peer (the inverse of `add`). Resolve
-    # by saved name, or by fingerprint (dropping every name pinned to it).
+    # --remove NAME-OR-ID: delete a saved peer (the inverse of `add`), resolved
+    # by saved name or fingerprint.
     if args.remove is not None:
         if args.show is not None:
             _die("pass --show to view a contact or --remove to delete one, "
                  "not both")
         peers = _saved_peers(store_db)
-        target = args.remove
-        names = ([target] if target in peers else
-                 [n for n, (fp, _ik, _sk) in peers.items() if fp == target])
-        if not names:
-            _die(f"no saved contact '{target}' to remove")
-        for n in names:
-            _store_sql(store_db, "DELETE FROM peers WHERE name=?", n)
-        print(f"removed contact '{names[0]}' ({peers[names[0]][0]})",
+        fp = _resolve_peer(peers, args.remove)
+        if fp is None or fp not in peers:
+            _die(f"no saved contact '{args.remove}' to remove")
+        nm = peers[fp][0]
+        _store_sql(store_db, "DELETE FROM peers WHERE fingerprint=?", fp)
+        print(f"removed contact {(repr(nm) + ' ') if nm else ''}({fp})",
               file=sys.stderr)
         return
     # --show NAME-OR-ID: just that one contact. As a Contact card with --json
@@ -600,14 +624,16 @@ def cmd_contacts(args):
             status = "verified" if card["verified"] else "unverified"
             print(f"{card['name']}\t{card['fingerprint']}\t{status}")
         return
-    for name, (fp, ik, sk) in sorted(_saved_peers(store_db).items()):
+    for fp, (name, ik, sk) in sorted(_saved_peers(store_db).items(),
+                                     key=lambda kv: (kv[1][0] or "~", kv[0])):
         verified = bool(ik and sk)
         if args.json:
-            print(json.dumps({"name": name, "fingerprint": fp,
+            print(json.dumps({"name": name or "", "fingerprint": fp,
                               "identity_key": ik or "", "signing_key": sk or "",
                               "verified": verified}))
         else:
-            print(f"{name}\t{fp}\t{'verified' if verified else 'unverified'}")
+            print(f"{name or '(unnamed)'}\t{fp}\t"
+                  f"{'verified' if verified else 'unverified'}")
 
 
 def cmd_verify(args):
@@ -615,14 +641,11 @@ def cmd_verify(args):
     store_db = d / STORE_FILE
     peers = _saved_peers(store_db)
     # the target must already be a saved contact (run `retalk add` first)
-    if args.peer in peers:
-        name, fp = args.peer, peers[args.peer][0]
-    else:
-        match = [n for n, (pfp, _ik, _sk) in peers.items() if pfp == args.peer]
-        if not match:
-            _die(f"no saved contact '{args.peer}': add it first with "
-                 "`retalk add <name> <fingerprint>`")
-        name, fp = match[0], args.peer
+    fp = _resolve_peer(peers, args.peer)
+    if fp is None or fp not in peers:
+        _die(f"no saved contact '{args.peer}': add it first with "
+             "`retalk add <fingerprint>`")
+    name = peers[fp][0] or fp
 
     if args.identity_key or args.signing_key:
         if not (args.identity_key and args.signing_key):
@@ -696,12 +719,14 @@ def _save_card(store_db: Path, card: dict, as_name: str | None) -> tuple:
                              f"{fp} -- refusing a contact whose keys do not "
                              "match its id")
     _saved_peers(store_db)  # ensure the table exists
-    # save name + fingerprint (like `add`); re-adding a name resets its keys
+    # save by fingerprint (like `add`); the name is reassigned from any other
+    # contact, and re-importing resets the keys
+    _store_sql(store_db, "UPDATE peers SET name=NULL "
+                         "WHERE name=? AND fingerprint!=?", name, fp)
     _store_sql(store_db,
-               "INSERT INTO peers(name, fingerprint, identity_key, signing_key) "
-               "VALUES(?,?,NULL,NULL) ON CONFLICT(name) DO UPDATE SET "
-               "fingerprint=excluded.fingerprint, "
-               "identity_key=NULL, signing_key=NULL", name, fp)
+               "INSERT INTO peers(fingerprint, name, identity_key, signing_key) "
+               "VALUES(?,?,NULL,NULL) ON CONFLICT(fingerprint) DO UPDATE SET "
+               "name=excluded.name, identity_key=NULL, signing_key=NULL", fp, name)
     if ik and sk:           # record the keys (like a checked `verify`)
         _store_sql(store_db, "UPDATE peers SET identity_key=?, signing_key=? "
                              "WHERE fingerprint=?", ik, sk, fp)
@@ -792,7 +817,7 @@ def cmd_block(args):
         if args.peer is not None or args.remove:
             _die("give a peer (to block, or --remove to unblock), or --list to "
                  "show the block list -- not both")
-        names = {fp: name for name, (fp, _ik, _sk)
+        names = {fp: name for fp, (name, _ik, _sk)
                  in _saved_peers(store_db).items()}
         for fp in sorted(_blocked_set(store_db)):
             if args.json:
@@ -1091,30 +1116,35 @@ examples:
 
     sp = sub.add_parser(
         "add", parents=[common], formatter_class=raw,
-        help="save a peer's user id under a local name",
+        help="save a peer's user id, optionally under a local name",
         description="""\
-Save a peer's USER ID under a short local name, so `send bob ...` works
-and incoming messages from that ID display as 'bob' instead of an
-unverified '~name'. The name is yours alone — it never travels over
-the network and the peer never learns it.
+Save a peer's USER ID (a 32-hex fingerprint) as a contact. Optionally label it
+with --name, so `send bob ...` works and incoming messages from that ID display
+as 'bob' instead of an unverified '~name'. Without --name the contact has no
+local label — refer to it by fingerprint, or by the peer's own '~name'. The
+name is yours alone — it never travels over the network and the peer never
+learns it.
 
-Get the peer's ID out-of-band (they run `retalk id`). If the name is already
-taken, `add` errors and suggests a free one; pass `--override` to replace the
-existing contact. No secret needed and no server contact — this only writes
-your local peers table.""",
+Get the peer's ID out-of-band (they run `retalk id`). If --name is already taken
+by another contact, `add` errors and suggests a free one; pass --override to
+reassign it. No secret needed and no server contact — this only writes your
+local peers table.""",
         epilog="""\
 examples:
-  retalk add bob f1041c25c87351d8550b31cc6b13ab04
+  retalk add f1041c25c87351d8550b31cc6b13ab04
+  retalk add f1041c25c87351d8550b31cc6b13ab04 --name bob
 
-This saves an incomplete contact -- just the name and fingerprint. The peer's
+This saves an incomplete contact -- just the fingerprint (and name). The peer's
 keys are fetched and verified automatically the first time you message them;
-run `retalk verify bob` to do that explicitly now and record the keys (see
+run `retalk verify <name-or-fingerprint>` to do that explicitly now (see
 `retalk verify --help`).""")
-    sp.add_argument("name", help="local name for this peer (e.g. 'bob')")
     sp.add_argument("fingerprint", help="the peer's 32-hex fingerprint (user id)")
+    sp.add_argument("--name", metavar="NAME",
+                    help="optional local label for this peer (e.g. 'bob'); "
+                         "default: none — refer to them by fingerprint or ~name")
     sp.add_argument("--override", action="store_true",
-                    help="replace an existing contact of the same name "
-                         "(default: error if the name is already taken)")
+                    help="reassign --name from another contact that already has "
+                         "it (default: error if the name is taken)")
     sp.set_defaults(fn=cmd_add)
 
     sp = sub.add_parser(
