@@ -127,7 +127,7 @@ def _next_default_user() -> str:
 
 
 def _die(msg: str, code: int = 2):
-    print(f"retalk: {msg}", file=sys.stderr)
+    print(f"[retalk] {msg}", file=sys.stderr)
     sys.exit(code)
 
 
@@ -178,8 +178,10 @@ def _resolve_passphrase(args, store_db: Path | None = None,
     s = getattr(args, "passphrase", None) or os.environ.get("RETALK_PASSPHRASE")
     if s:
         return s, False
-    _die("no passphrase: pass --passphrase SECRET, set RETALK_PASSPHRASE, or "
-         "use --no-passphrase for an identity with no passphrase")
+    _die("No passphrase provided. Try one of:\n"
+         "  - pass the flag --passphrase SECRET\n"
+         "  - set the environment variable RETALK_PASSPHRASE=<your passphrase>\n"
+         "  - use --no-passphrase for an identity with no passphrase")
 
 
 def _store_sql(store_db: Path, query: str, *params) -> list:
@@ -426,7 +428,7 @@ def cmd_init(args):
           + (server or "(none — set one with: retalk config --relay <url>)"),
           file=err)
     print("\nShare the following message with your peer so they can add you:\n"
-          + _style(_invite_message(u, None), "2"), file=err)
+          + _invite_message(u, None), file=err)
     # bare id on stdout for scripts/pipes; skipped interactively (shown above)
     if not sys.stdout.isatty():
         print(u.fingerprint())
@@ -457,33 +459,52 @@ def _self_card(u, as_name):
     return card
 
 
+def _bash_block(lines):
+    """Render shell lines as a colored ```bash code block: dim fence, green
+    comments, cyan commands. Color applies only when stderr is a TTY (via
+    _style), so pipes, copies, and markdown renderers get a plain block."""
+    out = [_style("```bash", "2")]
+    for ln in lines:
+        out.append(_style(ln, "32" if ln.lstrip().startswith("#") else "36"))
+    out.append(_style("```", "2"))
+    return "\n".join(out)
+
+
 def _invite_message(u, as_name):
     """Render this user's card as a copy-paste shell snippet that onboards a
-    peer: install retalk, create their identity, point at the relay, and add
-    you. Plain `#` comments + commands, so the whole block pastes into a shell
-    and runs -- no quoting prefixes to strip out."""
+    peer: install retalk, point at the relay, create their identity, and add
+    you. `#` comments + commands, colored like bash in a terminal."""
     c = _self_card(u, as_name)
     name = c["name"] or "me"
     relay = c.get("relay") or "<relay-url>"
-    return "\n".join([
-        "```bash",
-        "# Let's talk over retalk (CLI-based messaging).",
-        "# 1. Install retalk:",
-        "pipx install retalk                  # or: uv tool install retalk",
-        "# 2. Point at our relay:",
-        f"export RETALK_RELAY={relay}",
-        "# 3. Create your identity:",
-        "retalk init --passphrase <YOUR-PRIVATE-PASSPHRASE>",
-        "# 4. Add me as a contact:",
+    return _bash_block([
+        "# Let's talk over retalk, a CLI-based messaging",
+        "# 1. Install retalk (if not installed yet):",
+        "pip install -U retalk               # or: uv add retalk",
+        "# 2. Create your identity on our relay:",
+        f"retalk init --passphrase <YOUR-PRIVATE-PASSPHRASE> --relay {relay}",
+        "# 3. Add me as a contact:",
         f"retalk add {name} {c['fingerprint']}",
-        "# 5. Send me YOUR fingerprint back (shown by retalk init above) so I can add you.",
-        "```",
+        "# 4. Send me YOUR fingerprint back (shown by retalk init above) so I can add you.",
     ])
 
 
+def _invite_reply(u, as_name):
+    """The other half of `--invite-message`: a copy-paste reply for when YOU
+    received an invite and set yourself up -- it hands the inviter your
+    fingerprint so they can add you back (they already shared the relay)."""
+    c = _self_card(u, as_name)
+    name = c["name"] or "me"
+    return _bash_block([
+        "# Got your invite -- I'm set up on retalk. Add me back:",
+        f"retalk add {name} {c['fingerprint']}",
+        "# Then we can message each other.",
+    ])
 def cmd_id(args):
     u = _open_user(args, need_server=False, banner=False)
-    if getattr(args, "invite_message", False):
+    if getattr(args, "invite_reply", False):
+        print(_invite_reply(u, getattr(args, "as_name", None)))
+    elif getattr(args, "invite_message", False):
         print(_invite_message(u, getattr(args, "as_name", None)))
     elif getattr(args, "card", False):                 # human-readable card
         c = _self_card(u, getattr(args, "as_name", None))
@@ -1027,7 +1048,8 @@ Needs your secret (to open the store) but never contacts the server.
 --card prints your OWN Contact card (your address + keys + relay) as JSON for a
 peer to `retalk import`; --invite-message renders that card as a copy-paste
 message that walks a new peer through installing retalk, setting the relay, and
-adding you.""",
+adding you. `--invite-reply` is the other half -- a paste-back that gives the
+inviter your fingerprint so they can add you.""",
         epilog="""\
 examples:
   retalk id                    id of the default identity
@@ -1036,7 +1058,8 @@ examples:
   retalk id --json             that same card as JSON (the shareable form)
   retalk id --json | retalk import --dir ./bob   hand yourself to another identity
   retalk id --invite-message   a copy-paste invite to onboard a peer out-of-band
-  retalk id --invite-message --as bob   suggest the name the peer saves you as""")
+  retalk id --invite-message --as bob   suggest the name the peer saves you as
+  retalk id --invite-reply     reply to an invite -- hand your id to whoever invited you""")
     sp.add_argument("--json", action="store_true",
                     help="emit your OWN Contact card as JSON (fingerprint, name, "
                          "identity_key, signing_key, verified, relay) -- the "
@@ -1049,9 +1072,13 @@ examples:
                     action="store_true",
                     help="render your card as a copy-paste invite (install + "
                          "relay + add-me steps) to onboard a peer out-of-band")
+    sp.add_argument("--invite-reply", dest="invite_reply", action="store_true",
+                    help="render a copy-paste REPLY to an invite: hand the "
+                         "inviter your fingerprint so they can add you back")
     sp.add_argument("--as", dest="as_name", metavar="NAME",
-                    help="with --card/--invite-message: the nickname you suggest "
-                         "the peer save you under (default: your display name)")
+                    help="with --card/--invite-message/--invite-reply: the "
+                         "nickname you suggest the peer save you under (default: "
+                         "your display name)")
     sp.set_defaults(fn=cmd_id)
 
     sp = sub.add_parser(
