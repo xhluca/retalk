@@ -505,9 +505,9 @@ def _invite_message(u, as_name):
         "# 1. Install retalk (if not installed yet):",
         "pip install -U retalk               # or: uv add retalk",
         "# 2. Create your identity (pick any name; init also prints a reply to send me):",
-        f"retalk init --user <your-name> --relay {relay} --passphrase <PRIVATE-PASSPHRASE>",
+        f"retalk init --relay {relay} --passphrase <PRIVATE-PASSPHRASE> # -u <your-username>",
         "# 3. Add me as a contact (same name you chose above):",
-        f"retalk add --user <your-name> {c['fingerprint']} --name {name}",
+        f"retalk add {c['fingerprint']} --name {name} # -u <your-username>",
         "# 4. Send me the 'reply' block that step 2 printed, so I can add you back.",
     ])
 
@@ -520,7 +520,7 @@ def _invite_reply(u, as_name):
     name = c["name"] or "me"
     return _bash_block([
         "# Got your invite -- I'm set up on retalk. Add me back (use your own user name):",
-        f"retalk add --user <your-name> {c['fingerprint']} --name {name}",
+        f"retalk add {c['fingerprint']} --name {name} # -u <your-username>",
         "# Then we can message each other.",
     ])
 def cmd_id(args):
