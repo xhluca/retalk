@@ -273,7 +273,7 @@ class TestSyncCLI(unittest.TestCase):
                 bid = self.cli("init", "--dir", b,
                                "--display-name", "bob").stdout.strip()
                 self.cli("receive", "--all", "--dir", b)   # bob publishes
-                self.cli("add", bid, "--name", "bob", "--dir", a)
+                self.cli("add", bid, "--peer", "bob", "--dir", a)
 
                 self.cli("send", "--peer", "bob", "m1", "--dir", a)
                 self.assertEqual(mailbox(db, bid), 1)

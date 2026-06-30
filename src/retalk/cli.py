@@ -538,7 +538,7 @@ def _invite_message(u, as_name):
         "# 2. Create your identity (pick any name; init also prints a reply to send me):",
         f"retalk init --relay {relay} --passphrase <PRIVATE-PASSPHRASE> # -u <your-username>",
         "# 3. Add me as a contact (specify your username for user-specific contact):",
-        f"retalk add {c['fingerprint']} --name {name} # -u <your-username>",
+        f"retalk add {c['fingerprint']} --peer {name} # -u <your-username>",
         "# 4. Send me the 'reply' block that step 2 printed, so I can add you back",
     ])
 
@@ -590,9 +590,9 @@ def cmd_add(args):
     fp = args.fingerprint
     if not ID_RE.match(fp):
         _die("fingerprint must be 32 hex characters")
-    name = args.name
+    name = args.peer
     if name and ID_RE.match(name):
-        _die("--name looks like a user id — give a human name")
+        _die("--peer looks like a user id — give a human name")
     # Target list: the GLOBAL list (shared by every identity) unless an identity
     # is selected via --user/--dir/RETALK_USER. --global forces global and can't
     # be combined with an explicit --user/--dir.
@@ -1181,31 +1181,31 @@ examples:
         help="save a peer's user id, optionally under a local name",
         description="""\
 Save a peer's USER ID (a 32-hex fingerprint) as a contact. Optionally label it
-with --name, so `send bob ...` works and incoming messages from that ID display
-as 'bob' instead of an unverified '~name'. Without --name the contact has no
+with --peer, so `send bob ...` works and incoming messages from that ID display
+as 'bob' instead of an unverified '~name'. Without --peer the contact has no
 local label — refer to it by fingerprint, or by the peer's own '~name'. The
 name is yours alone — it never travels over the network and the peer never
 learns it.
 
-Get the peer's ID out-of-band (they run `retalk id`). If --name is already taken
+Get the peer's ID out-of-band (they run `retalk id`). If --peer is already taken
 by another contact, `add` errors and suggests a free one; pass --override to
 reassign it. No secret needed and no server contact — this only writes your
 local peers table.""",
         epilog="""\
 examples:
   retalk add f1041c25c87351d8550b31cc6b13ab04
-  retalk add f1041c25c87351d8550b31cc6b13ab04 --name bob
+  retalk add f1041c25c87351d8550b31cc6b13ab04 --peer bob
 
 This saves an incomplete contact -- just the fingerprint (and name). The peer's
 keys are fetched and verified automatically the first time you message them;
 run `retalk verify <name-or-fingerprint>` to do that explicitly now (see
 `retalk verify --help`).""")
     sp.add_argument("fingerprint", help="the peer's 32-hex fingerprint (user id)")
-    sp.add_argument("-n", "--name", metavar="NAME",
+    sp.add_argument("--peer", metavar="PEER",
                     help="optional local label for this peer (e.g. 'bob'); "
                          "default: none — refer to them by fingerprint or ~name")
     sp.add_argument("--override", action="store_true",
-                    help="reassign --name from another contact that already has "
+                    help="reassign --peer from another contact that already has "
                          "it (default: error if the name is taken)")
     sp.add_argument("--global", dest="glob", action="store_true",
                     help="save to the owner-wide global contact list shared by "
