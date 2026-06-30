@@ -537,9 +537,9 @@ def _invite_message(u, as_name):
         "pip install -U retalk               # or: uv add retalk",
         "# 2. Create your identity (pick any name; init also prints a reply to send me):",
         f"retalk init --relay {relay} --passphrase <PRIVATE-PASSPHRASE> # -u <your-username>",
-        "# 3. Add me as a contact (same name you chose above):",
+        "# 3. Add me as a contact (specify your username for user-specific contact):",
         f"retalk add {c['fingerprint']} --name {name} # -u <your-username>",
-        "# 4. Send me the 'reply' block that step 2 printed, so I can add you back.",
+        "# 4. Send me the 'reply' block that step 2 printed, so I can add you back",
     ])
 
 
@@ -550,8 +550,8 @@ def _invite_reply(u, as_name):
     c = _self_card(u, as_name)
     name = c["name"] or "me"
     return _bash_block([
-        "# Got your invite -- I'm set up on retalk. Add me back (use your own user name):",
-        f"retalk add {c['fingerprint']} --name {name} # -u <your-username>",
+        "# Got your invite for retalk. Add me back (optionally specify your user):",
+        f"retalk add {c['fingerprint']} # --user <your-name>",
         "# Then we can message each other.",
     ])
 def cmd_id(args):
@@ -691,16 +691,21 @@ def cmd_contacts(args):
 
 
 def cmd_verify(args):
-    d = _resolve_store(args)
-    store_db = d / STORE_FILE
-    peers = _effective_peers(store_db)      # merged: global + this identity's own
+    # Works without an identity: then it verifies a contact in the GLOBAL list.
+    # With an identity the merged view is searched and the contact is recorded
+    # back into whichever list holds it (this identity's own, else the global).
+    user_sel = bool(getattr(args, "dir", None) or getattr(args, "user", None)
+                    or os.environ.get("RETALK_USER"))
+    store_db = (_resolve_store(args) / STORE_FILE
+                if user_sel else _global_contacts_db())
+    peers = _effective_peers(store_db) if user_sel else _saved_peers(store_db)
     # the target must already be a saved contact (run `retalk add` first)
     fp = _resolve_peer(peers, args.peer)
     if fp is None or fp not in peers:
         _die(f"no saved contact '{args.peer}': add it first with "
              "`retalk add <fingerprint>`")
     name = peers[fp][0] or fp
-    target = _contact_db(store_db, fp) or store_db   # record where it lives
+    target = (_contact_db(store_db, fp) or store_db) if user_sel else store_db
 
     if args.identity_key or args.signing_key:
         if not (args.identity_key and args.signing_key):
@@ -713,6 +718,12 @@ def cmd_verify(args):
                  "refusing to record them")
         source = "supplied keys"
     else:
+        if not user_sel:
+            # get_keys is an authenticated, signed relay call, so fetching needs
+            # an identity to sign as; the global contact still records globally.
+            _die("verifying against the relay needs an identity to sign the "
+                 "request: pass --user NAME (-u NAME) — the contact can stay "
+                 "global — or supply the keys with --identity-key/--signing-key")
         u = _open_user(args)  # fetching needs the relay and the passphrase
         try:
             keys = u._call("get_keys", {"peer": fp})
@@ -1005,19 +1016,19 @@ def main():
     g.add_argument("-u", "--user", metavar="NAME",
                    help="act as the user named NAME, stored under "
                         "~/.retalk/NAME/. Overrides RETALK_USER")
-    g.add_argument("--relay", metavar="URL",
+    g.add_argument("-r", "--relay", metavar="URL",
                    help="relay URL for this invocation; overrides the "
                         "RETALK_RELAY env var and the URL saved at init")
     g.add_argument("--api-key", metavar="KEY",
                    help="relay access key, if the relay requires one; sent as "
                         "an Authorization: Bearer header. Overrides "
                         "RETALK_API_KEY and the value saved at init")
-    g.add_argument("--passphrase", metavar="SECRET",
+    g.add_argument("-p", "--passphrase", metavar="SECRET",
                    help="passphrase that unlocks this identity's keys; "
                         "overrides RETALK_PASSPHRASE. NOTE: a value passed "
                         "here is visible in the process list and shell "
                         "history -- prefer RETALK_PASSPHRASE for real secrets")
-    g.add_argument("--no-passphrase", action="store_true",
+    g.add_argument("-np", "--no-passphrase", action="store_true",
                    help="use no passphrase. On `init` this stores keys "
                         "unencrypted at rest (protected only by file "
                         "permissions); later commands detect it and need none")
@@ -1190,7 +1201,7 @@ keys are fetched and verified automatically the first time you message them;
 run `retalk verify <name-or-fingerprint>` to do that explicitly now (see
 `retalk verify --help`).""")
     sp.add_argument("fingerprint", help="the peer's 32-hex fingerprint (user id)")
-    sp.add_argument("--name", metavar="NAME",
+    sp.add_argument("-n", "--name", metavar="NAME",
                     help="optional local label for this peer (e.g. 'bob'); "
                          "default: none — refer to them by fingerprint or ~name")
     sp.add_argument("--override", action="store_true",
@@ -1585,7 +1596,7 @@ examples:
   retalk config                                    show owner-wide config
   retalk config --relay https://relay.example.com  set the default relay
   retalk config --relay ""                         clear the default relay""")
-    sp.add_argument("--relay", metavar="URL",
+    sp.add_argument("-r", "--relay", metavar="URL",
                     help="set the owner-wide default relay URL; pass an empty "
                          "string to clear it")
     sp.set_defaults(fn=cmd_config)

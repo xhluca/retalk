@@ -68,6 +68,28 @@ class TestGlobalContacts(unittest.TestCase):
         self.assertIn("pick one", r.stderr.lower())
         print("PASS: --global with an explicit --user errors")
 
+    def test_verify_global_manual_no_user(self):
+        # a real (fingerprint, identity_key, signing_key) triple
+        from retalk import User
+        u = User("http://127.0.0.1:1", "s", store=os.path.join(self.tmp, "k.db"))
+        fp, ik = u.fingerprint(), u.identity_key()
+        sk = u._load_account().ed25519_key.to_base64()
+        self.cli("add", fp, "--name", "carol")                 # -> global, no user
+        # manual verify with no identity selected records into the global list
+        self.cli("verify", "carol", "--identity-key", ik, "--signing-key", sk)
+        self.assertEqual(self.cli("contacts", "--show", "carol").stdout
+                         .split("\t")[2].strip(), "verified")
+        # and every identity sees it verified through the global list
+        self.assertEqual(self.cli("contacts", "--show", "carol", "-u", "bob")
+                         .stdout.split("\t")[2].strip(), "verified")
+        print("PASS: global contact verified manually with no identity")
+
+    def test_verify_global_relay_needs_identity(self):
+        self.cli("add", FP1, "--name", "shared")               # -> global
+        r = self.cli("verify", "shared", expect=2)             # relay fetch, no user
+        self.assertIn("identity", r.stderr.lower())
+        print("PASS: relay verify with no identity errors clearly")
+
 
 if __name__ == "__main__":
     unittest.main()
