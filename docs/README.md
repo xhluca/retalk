@@ -261,6 +261,15 @@ or by the peer's own `~name`. A name already taken by another contact errors
 (suggesting a free one) unless `--override`. The name is yours alone and never
 travels over the network.
 
+There are **two contact lists**: a **global** one at `~/.retalk/contacts.db`,
+shared by every identity the owner creates, and a **per-identity** one inside
+each identity's store. `add` writes to the **global** list when no identity is
+selected (or with `--global`), and to the **identity's own** list when one is
+(`--user`/`--dir`/`RETALK_USER`); `--global` together with `--user`/`--dir` is an
+error. Every command then sees the **merge** — a peer in the identity's own list
+overrides a global one with the same fingerprint or name. `retalk contacts` with
+no identity selected shows (and `--remove`s from) the global list directly.
+
 **`retalk verify PEER`** — record a saved peer's public keys, making explicit the
 key exchange that otherwise happens on first message. Keys are checked against
 the saved fingerprint; a mismatch is refused with **PIN MISMATCH** and nothing

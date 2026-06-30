@@ -123,11 +123,11 @@ class TestContacts(unittest.TestCase):
             self.assertEqual(self.cli("contacts", "--dir", a).stdout.strip(),
                              f"bob\t{bid}\tverified")
 
-            # 3. unknown contact, and no identity selected, both fail loudly
+            # 3. verifying an unknown contact fails loudly
             res = self.cli("verify", "nobody", "--dir", a, expect=2)
             self.assertIn("no saved contact", res.stderr)
-            res = self.cli("contacts", expect=2)
-            self.assertIn("no user selected", res.stderr)
+            # with no identity selected, `contacts` shows the (empty) global list
+            self.assertEqual(self.cli("contacts").stdout, "")
             print("PASS: contacts listing + manual verify (incl. PIN MISMATCH)")
 
     def test_verify_fetches_from_relay(self):
