@@ -41,7 +41,7 @@ class TestInvite(unittest.TestCase):
         msg = self.cli("id", "--dir", alice, "--invite-message", "--as", "ali")
         self.assertIn(card["fingerprint"], msg)
         self.assertIn("https://relay.example.com", msg)
-        self.assertIn("--name ali", msg)
+        self.assertIn("--peer ali", msg)
         # the self-card is a valid Contact card: import it into another identity
         bob = os.path.join(self.tmp, "bob")
         self.cli("init", "--dir", bob, "--relay", "https://relay.example.com",

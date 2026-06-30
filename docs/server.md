@@ -483,7 +483,7 @@ There are two kinds:
 - **Self-chosen name**: stored inside encrypted messages. Recipients can read
   it, but it is unverified, so clients display it as `~name`.
 - **Peer name**: your local label for a user ID, created with
-  `retalk add <id> --name bob`. It never leaves your machine and overrides the
+  `retalk add <id> --peer bob`. It never leaves your machine and overrides the
   sender's self-chosen name.
 
 Trust IDs and saved peer names, not self-chosen names.
@@ -494,7 +494,7 @@ Example:
 retalk receive --peer alice --dir ./bob
 # ~"alice": hello
 
-retalk add "$ALICE_ID" --name boss --dir ./bob
+retalk add "$ALICE_ID" --peer boss --dir ./bob
 retalk receive --peer boss --dir ./bob
 # "boss": are we still on for tomorrow?
 ```

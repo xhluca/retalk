@@ -1,4 +1,4 @@
-"""`retalk add <fingerprint>` saves a peer by fingerprint; --name is optional.
+"""`retalk add <fingerprint>` saves a peer by fingerprint; --peer is optional.
 A name already taken by another contact errors (suggesting a free name) unless
 --override reassigns it. Old name-keyed peer tables migrate to the new
 fingerprint-keyed schema."""
@@ -43,7 +43,7 @@ class TestAddByFingerprint(unittest.TestCase):
 
     def test_add_unnamed_and_named(self):
         self.cli("add", FP1, "--dir", self.a)                  # no name
-        self.cli("add", FP2, "--name", "bob", "--dir", self.a)
+        self.cli("add", FP2, "--peer", "bob", "--dir", self.a)
         c = self.contacts()
         self.assertEqual(c[FP1]["name"], "")                   # unnamed
         self.assertEqual(c[FP2]["name"], "bob")
@@ -53,13 +53,13 @@ class TestAddByFingerprint(unittest.TestCase):
         print("PASS: add by fingerprint — named + unnamed")
 
     def test_name_collision_and_override(self):
-        self.cli("add", FP1, "--name", "bob", "--dir", self.a)
+        self.cli("add", FP1, "--peer", "bob", "--dir", self.a)
         # a different fingerprint claiming the same name -> error + suggestion
-        r = self.cli("add", FP2, "--name", "bob", "--dir", self.a, expect=2)
+        r = self.cli("add", FP2, "--peer", "bob", "--dir", self.a, expect=2)
         self.assertIn("already exists", r.stderr)
         self.assertIn("bob-1", r.stderr)
         # --override reassigns the name; the old holder is left unnamed
-        self.cli("add", FP2, "--name", "bob", "--override", "--dir", self.a)
+        self.cli("add", FP2, "--peer", "bob", "--override", "--dir", self.a)
         c = self.contacts()
         self.assertEqual(c[FP2]["name"], "bob")
         self.assertEqual(c[FP1]["name"], "")
