@@ -84,11 +84,16 @@ class TestGlobalContacts(unittest.TestCase):
                          .stdout.split("\t")[2].strip(), "verified")
         print("PASS: global contact verified manually with no identity")
 
-    def test_verify_global_relay_needs_identity(self):
+    def test_verify_global_autopicks_signer(self):
+        # verify on a global contact no longer demands --user: it auto-picks an
+        # identity to sign the authenticated relay fetch. Here no relay is set, so
+        # it gets PAST the identity gate and fails on the missing relay instead —
+        # proving it tried to fetch rather than refusing for lack of an identity.
         self.cli("add", FP1, "--peer", "shared")               # -> global
         r = self.cli("verify", "shared", expect=2)             # relay fetch, no user
-        self.assertIn("identity", r.stderr.lower())
-        print("PASS: relay verify with no identity errors clearly")
+        self.assertIn("relay", r.stderr.lower())
+        self.assertNotIn("no user selected", r.stderr.lower())
+        print("PASS: verify auto-picks a signer for a global contact (no --user)")
 
 
 if __name__ == "__main__":
