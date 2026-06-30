@@ -174,10 +174,11 @@ retalk import '<card json>'        # save a contact someone shared with you
 retalk import --inbox --list       # contacts peers shared (saved by `receive`)
 retalk import --inbox              # save all of them as peers
 retalk send --peer bob "hello"     # send one encrypted message
+retalk send --peer bob "hi" --save-messages  # keep your side too (opt-in)
 retalk receive --peer bob          # read only messages from "bob"
 retalk receive --peer bob --follow      # keep polling "bob"; maintain keys
 retalk receive --peer bob --save-messages   # also keep a sealed local copy
-retalk history                     # replay saved messages (needs --save-messages)
+retalk history --peer bob          # the whole conversation, sent + received
 retalk block eve                   # drop a sender's mail before decryption
 retalk block --remove eve          # stop dropping that sender
 retalk block --list                # list blocked senders
@@ -218,7 +219,7 @@ ones that touch a mailbox reach the relay.
 | `block` | Drop a sender's mail before decryption; `--remove` to undo, `--list` to view. | no |
 | `send` | Encrypt and send one message. | yes |
 | `receive` | Fetch, decrypt, and print pending messages. | yes |
-| `history` | Replay messages saved by `receive --save-messages`. | no |
+| `history` | Replay saved messages (both sent and received) as a conversation. | no |
 | `sync` | Reconcile keys and resend the outbox against the relay. | yes |
 
 ¹ `verify` reaches the relay only when fetching keys; with `--identity-key`/`--signing-key` it stays offline.
@@ -276,6 +277,7 @@ the saved fingerprint; a mismatch is refused with **PIN MISMATCH** and nothing
 is recorded.
 
 - `--identity-key KEY` / `--signing-key KEY` — record keys you already hold (offline) instead of fetching from the relay; pass both together.
+- Verifying a **global** contact needs no `--user`. Offline (`--identity-key`/`--signing-key`) it just records into the global list. A relay fetch is an authenticated, signed call, so it's signed by an auto-picked identity (any works — the signer never changes the fetched keys) and the result is recorded into the global list; pass `--user NAME` to sign as a specific identity (required if you have several passphrase-protected identities and no passphrase-free one).
 
 **`retalk contacts`** — list saved peers, one per line as tab-separated `NAME`, `FINGERPRINT`, and `STATUS` (verified or unverified), sorted by name. With `--show`, print just one contact instead of the whole list — its status row, or its full **Contact card** with `--json`. That card is the shareable form `share` sends and `import` ingests, so you can also pipe or paste it out-of-band; keys are included only when the contact is verified, and the fingerprint pins them, so a card is safe to share in the clear.
 
@@ -330,6 +332,7 @@ that doesn't match the peer's fingerprint (or your verified keys) is refused wit
 a `{id, to}` receipt.
 
 - `--peer PEER` — recipient (required): a saved peer name or a raw user id.
+- `--save-messages` — also keep a sealed local copy of *this sent message*, so `history` shows both sides of the conversation. Off by default; `RETALK_SAVE_MESSAGE=1` turns it on for every command.
 
 **`retalk receive`** — fetch, decrypt, ack, and print pending messages as NDJSON.
 A shared contact arrives as a contact record (`{…, "kind": "contact", "card":
@@ -341,14 +344,17 @@ target with `--peer` or `--all` (one is required, not both).
 - `--follow` — keep polling every 2s and run key maintenance every 60s until ctrl-c.
 - `--peers-only` — accept only saved peers; unknown senders are dropped before decryption. Blocked senders are always dropped regardless.
 - `--no-save-contacts` — do not stage shared contacts to the contact-inbox (staging is on by default).
-- `--save-messages` — also keep a local copy of each chat message, sealed with this identity's key, for `history`. Off by default; on a `--no-passphrase` identity the seal is not real encryption, since the store key is public.
+- `--save-messages` — also keep a local copy of each *received* message, sealed with this identity's key, for `history`. Off by default; on a `--no-passphrase` identity the seal is not real encryption, since the store key is public.
 
-**`retalk history`** — replay messages saved by `receive --save-messages`,
-oldest first, as NDJSON in the same shape `receive` emits. Each body is decrypted
-from its at-rest seal on the way out, so this needs the passphrase but never the
-relay.
+Saving is also controlled by the **`RETALK_SAVE_MESSAGE`** env var: set it to a truthy value (`1`/`true`/`t`/`yes`/`y`/`on`) to save messages for *every* `send` and `receive` without the flag; anything else (incl. `false`/`no`/unset) leaves it off. retalk keeps no message log unless you opt in one of these two ways.
 
-- `--peer PEER` — show only this sender's saved messages.
+**`retalk history`** — replay saved messages, oldest first, as NDJSON. Output is
+the shape `receive` emits plus a `direction` field — `{id, from, name, direction,
+text}`, where `direction` is `"in"` (received) or `"out"` (sent) — so a
+conversation shows **both sides interleaved by time**. Each body is decrypted from
+its at-rest seal on the way out, so this needs the passphrase but never the relay.
+
+- `--peer PEER` — show only the conversation with this peer (both directions).
 
 ### Maintenance — `sync`
 

@@ -277,16 +277,22 @@ two of your own identities without going through the relay at all.
 
 ### Saving a message history
 
-By default `retalk receive` keeps **no** message log: it decrypts each message,
-prints it, and forgets it (pipe the output somewhere if you want a record).
-Opt in with `--save-messages` to also keep a local copy, and read it back with
-`retalk history`:
+By default retalk keeps **no** message log: `send` and `receive` move the
+ciphertext and forget the plaintext (pipe the output somewhere if you want a
+record). Opt in with `--save-messages` — on **both** `send` and `receive`, so the
+log has both sides — and read it back with `retalk history`:
 
 ```sh
-retalk receive --peer bob --save-messages   # decrypt, print, and keep a copy
-retalk history                         # replay saved messages, oldest first
-retalk history --peer bob              # just bob's
+retalk send --peer bob "hi" --save-messages       # keep your sent message
+retalk receive --peer bob --save-messages         # keep messages from bob
+retalk history --peer bob                          # the conversation, oldest first
+retalk history                                     # every saved message
 ```
+
+To save everything without repeating the flag, set **`RETALK_SAVE_MESSAGE=1`**
+(truthy: `1`/`true`/`t`/`yes`/`y`/`on`); it turns saving on for every `send` and
+`receive`. `history` emits NDJSON tagged with `"direction"` (`"in"` received /
+`"out"` sent), interleaving both sides by time.
 
 Saved bodies are **sealed at rest** with a key derived from the identity's
 passphrase (the same secret that protects your keys), so the SQLite file does

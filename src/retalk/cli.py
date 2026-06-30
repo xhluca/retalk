@@ -126,6 +126,30 @@ def _next_default_user() -> str:
     return f"{base}-{highest + 1}"
 
 
+def _pick_signer() -> Path | None:
+    """Pick a local identity to SIGN an authenticated relay request (the get_keys
+    behind `verify`) when none is selected -- used when verifying a GLOBAL contact
+    with no --user. The signer never changes the result: get_keys just needs
+    *some* registered caller. So prefer one we can open with no passphrase, and
+    otherwise only auto-pick when there is exactly one identity (never silently
+    choose among several). Returns the identity dir, or None."""
+    ids, seen = [], set()
+    for home in (_data_home(), _local_home()):
+        if not home.is_dir():
+            continue
+        rp = home.resolve()
+        if rp in seen:
+            continue
+        seen.add(rp)
+        for child in sorted(home.iterdir()):
+            if (child / STORE_FILE).exists():
+                ids.append(child)
+    for d in ids:                                  # prefer a no-passphrase identity
+        if _meta(d / STORE_FILE, "no_passphrase") == "1":
+            return d
+    return ids[0] if len(ids) == 1 else None
+
+
 def _die(msg: str, code: int = 2):
     print(f"[retalk] {msg}", file=sys.stderr)
     sys.exit(code)
@@ -317,22 +341,62 @@ def _stage_contact(store_db: Path, rec: dict):
                rec.get("name") or "", rec.get("id") or "", time.time())
 
 
+def _save_messages_on(args) -> bool:
+    """Whether to persist message bodies for `retalk history`. Off by default --
+    retalk keeps no message log unless you opt in, either with --save-messages or
+    by setting RETALK_SAVE_MESSAGE to a truthy value (1/true/t/yes/y/on). The flag
+    forces it on; otherwise the env var decides (anything else, including
+    false/no/n/f or unset, means off)."""
+    if getattr(args, "save_messages", False):
+        return True
+    return os.environ.get("RETALK_SAVE_MESSAGE", "").strip().lower() in (
+        "1", "true", "t", "yes", "y", "on")
+
+
+def _warn_unsealed_save(store_db: Path):
+    """Warn when saving messages on a --no-passphrase identity: the at-rest key is
+    a public constant, so the bodies are guarded only by file permissions."""
+    if _meta(store_db, "no_passphrase") == "1":
+        print("retalk: warning: saving messages on a --no-passphrase identity "
+              "stores message bodies with no real protection (its store key is "
+              "a public constant); the folder's file permissions are the only "
+              "guard", file=sys.stderr)
+
+
 def _ensure_messages(store_db: Path):
     _store_sql(store_db, "CREATE TABLE IF NOT EXISTS messages("
                "msg_id TEXT PRIMARY KEY, from_fp TEXT, from_name TEXT, "
-               "body TEXT, ts REAL)")
+               "peer_fp TEXT, direction TEXT, body TEXT, ts REAL)")
+    cols = [r[1] for r in _store_sql(store_db, "PRAGMA table_info(messages)")]
+    if "peer_fp" not in cols:        # migrate an older received-only table
+        _store_sql(store_db, "ALTER TABLE messages ADD COLUMN peer_fp TEXT")
+        _store_sql(store_db, "ALTER TABLE messages ADD COLUMN direction TEXT")
+        _store_sql(store_db, "UPDATE messages SET peer_fp=from_fp, direction='in' "
+                             "WHERE peer_fp IS NULL")   # old rows were all received
 
 
 def _save_message(store_db: Path, u, rec: dict):
-    """Persist one chat message (`receive --save-messages`) with its body
+    """Persist one INCOMING chat message (`receive --save-messages`) with its body
     sealed at rest by the identity's key (see User.encrypt_at_rest)."""
+    _ensure_messages(store_db)
+    sender = rec.get("from") or ""
+    _store_sql(store_db,
+               "INSERT OR IGNORE INTO messages(msg_id, from_fp, from_name, "
+               "peer_fp, direction, body, ts) VALUES(?,?,?,?,?,?,?)",
+               rec.get("id") or "", sender, rec.get("name") or "",
+               sender, "in", u.encrypt_at_rest(rec.get("text") or ""),
+               time.time())
+
+
+def _save_sent(store_db: Path, u, msg_id: str, to_fp: str, text: str):
+    """Persist one OUTGOING chat message (`send --save-messages`), body sealed at
+    rest, so `history` shows both sides of the conversation."""
     _ensure_messages(store_db)
     _store_sql(store_db,
                "INSERT OR IGNORE INTO messages(msg_id, from_fp, from_name, "
-               "body, ts) VALUES(?,?,?,?,?)",
-               rec.get("id") or "", rec.get("from") or "",
-               rec.get("name") or "", u.encrypt_at_rest(rec.get("text") or ""),
-               time.time())
+               "peer_fp, direction, body, ts) VALUES(?,?,?,?,?,?,?)",
+               msg_id or "", u.fingerprint(), u.name or "", to_fp or "",
+               "out", u.encrypt_at_rest(text or ""), time.time())
 
 
 def _open_user(args, need_server: bool = True, banner: bool = True) -> User:
@@ -435,6 +499,7 @@ def cmd_init(args):
     display = (args.display_name or args.user
                or os.environ.get("RETALK_USER") or "")
     u = User(server, secret, name=display, store=str(d / STORE_FILE))
+    u._meta_set("created_at", repr(time.time()))   # lets `retalk id --last` find it
     if disabled:
         u._meta_set("no_passphrase", "1")
     if display:
@@ -538,7 +603,7 @@ def _invite_message(u, as_name):
         "# 2. Create your identity (pick any name; init also prints a reply to send me):",
         f"retalk init --relay {relay} --passphrase <PRIVATE-PASSPHRASE> # -u <your-username>",
         "# 3. Add me as a contact (specify your username for user-specific contact):",
-        f"retalk add {c['fingerprint']} --peer {name} # -u <your-username>",
+        f"retalk add {c['fingerprint']} --peer {name} --verify # -u <your-username>",
         "# 4. Send me the 'reply' block that step 2 printed, so I can add you back",
     ])
 
@@ -550,11 +615,44 @@ def _invite_reply(u, as_name):
     c = _self_card(u, as_name)
     name = c["name"] or "me"
     return _bash_block([
-        "# Got your invite for retalk. Add me back (optionally specify your user):",
-        f"retalk add {c['fingerprint']} # --user <your-name>",
+        "# Got your invite for retalk.",
+        "# Add me back (specify your username for user-specific contact):",
+        f"retalk add {c['fingerprint']} --peer {name} --verify # --user <your-name>",
         "# Then we can message each other.",
     ])
+def _latest_identity() -> Path | None:
+    """The most recently created identity across the global (~/.retalk) and
+    project-local (.retalk) stores -- what `retalk id --last` reports right after
+    an `init`. Ranks by the `created_at` stamp written at init, falling back to
+    the store file's mtime for identities made before that stamp existed."""
+    best, best_ts, seen = None, -1.0, set()
+    for home in (_data_home(), _local_home()):
+        if not home.is_dir():
+            continue
+        rp = home.resolve()
+        if rp in seen:
+            continue
+        seen.add(rp)
+        for child in home.iterdir():
+            sdb = child / STORE_FILE
+            if not sdb.exists():
+                continue
+            stamp = _meta(sdb, "created_at")
+            try:
+                ts = float(stamp) if stamp else sdb.stat().st_mtime
+            except (ValueError, OSError):
+                ts = sdb.stat().st_mtime
+            if ts > best_ts:
+                best, best_ts = child, ts
+    return best
+
+
 def cmd_id(args):
+    if getattr(args, "last", False):
+        latest = _latest_identity()
+        if latest is None:
+            _die("no identity yet — create one with `retalk init`")
+        args.dir = str(latest)        # the most recently created identity
     u = _open_user(args, need_server=False, banner=False)
     if getattr(args, "invite_reply", False):
         print(_invite_reply(u, getattr(args, "as_name", None)))
@@ -635,6 +733,11 @@ def cmd_add(args):
     print(f"{'Updated' if had else 'Added'} contact "
           f"{(repr(name) + ' ') if name else ''}({fp}) in {where}.",
           file=sys.stderr)
+    if getattr(args, "verify", False):
+        # verify right away: fetch + pin the two keys (the INSERT above left them
+        # NULL). Records into the same list the contact was just added to.
+        _record_keys(args, store_db, fp, name)
+        return
     print("Next:", file=sys.stderr)
     print(f"  retalk verify {ref}            — check their keys against the relay",
           file=sys.stderr)
@@ -690,6 +793,65 @@ def cmd_contacts(args):
                   f"{'verified' if verified else 'unverified'}")
 
 
+def _record_keys(args, target, fp, label):
+    """Record fp's two public keys into `target` after checking they hash to the
+    fingerprint, then print the init-styled result block. Keys come from
+    --identity-key/--signing-key if given, else the relay (signed by the selected
+    or an auto-picked identity). Shared by `verify` and `add --verify`."""
+    name = label or fp
+    user_sel = bool(getattr(args, "dir", None) or getattr(args, "user", None)
+                    or os.environ.get("RETALK_USER"))
+    signed_by = None                            # the identity that signed a fetch
+    ik_arg, sk_arg = getattr(args, "identity_key", None), getattr(args, "signing_key", None)
+    if ik_arg or sk_arg:
+        if not (ik_arg and sk_arg):
+            _die("manual verify needs both --identity-key and --signing-key: "
+                 "the fingerprint is the hash of the two together")
+        ik, sk = ik_arg, sk_arg
+        got = fingerprint(ik, sk)
+        if got != fp:
+            _die(f"PIN MISMATCH: the supplied keys hash to {got}, not {fp} -- "
+                 "refusing to record them")
+        source = "supplied keys"
+    else:
+        if not user_sel:
+            # get_keys is an authenticated, signed relay call, so fetching needs
+            # an identity to sign as. Auto-pick one (any works); the contact still
+            # records into its list. Lets `verify`/`add --verify` skip --user.
+            signer = _pick_signer()
+            if signer is None:
+                _die("verifying against the relay needs an identity to sign the "
+                     "request, and none could be auto-picked: create one with "
+                     "`retalk init`, pass --user NAME (-u NAME) to choose which "
+                     "signs, or supply the keys with --identity-key/--signing-key")
+            args.dir = str(signer)   # sign as this identity; contact stays global
+        u = _open_user(args, banner=False)  # fetch needs the relay + passphrase
+        signed_by = u.name or _resolve_store(args).name
+        try:
+            keys = u._call("get_keys", {"peer": fp})
+        except Exception as e:
+            _die(f"could not fetch {name}'s keys from the relay: {e}")
+        ik, sk = keys["identity_key"], keys["signing_key"]
+        got = fingerprint(ik, sk)
+        if got != fp:
+            _die(f"PIN MISMATCH: the relay served keys hashing to {got}, not "
+                 f"{fp} -- possible MITM, refusing to record them")
+        source = "the relay"
+
+    _store_sql(target, "UPDATE peers SET identity_key=?, signing_key=? "
+                       "WHERE fingerprint=?", ik, sk, fp)
+    where = ("the global contacts" if target == _global_contacts_db()
+             else f"{target.parent.name}'s contacts")
+    err = sys.stderr
+    print(_style(f"\n✓ Verified {label or fp}", "1;32"), file=err)
+    print(f"\nName:        {label or '(unnamed)'}", file=err)
+    print(f"Fingerprint: {fp}", file=err)
+    print(f"Keys:        from {source}", file=err)
+    print(f"Saved to:    {where}", file=err)
+    if signed_by:
+        print(f"Signed by:   {signed_by}", file=err)
+
+
 def cmd_verify(args):
     # Works without an identity: then it verifies a contact in the GLOBAL list.
     # With an identity the merged view is searched and the contact is recorded
@@ -704,41 +866,8 @@ def cmd_verify(args):
     if fp is None or fp not in peers:
         _die(f"no saved contact '{args.peer}': add it first with "
              "`retalk add <fingerprint>`")
-    name = peers[fp][0] or fp
     target = (_contact_db(store_db, fp) or store_db) if user_sel else store_db
-
-    if args.identity_key or args.signing_key:
-        if not (args.identity_key and args.signing_key):
-            _die("manual verify needs both --identity-key and --signing-key: "
-                 "the fingerprint is the hash of the two together")
-        ik, sk = args.identity_key, args.signing_key
-        got = fingerprint(ik, sk)
-        if got != fp:
-            _die(f"PIN MISMATCH: the supplied keys hash to {got}, not {fp} -- "
-                 "refusing to record them")
-        source = "supplied keys"
-    else:
-        if not user_sel:
-            # get_keys is an authenticated, signed relay call, so fetching needs
-            # an identity to sign as; the global contact still records globally.
-            _die("verifying against the relay needs an identity to sign the "
-                 "request: pass --user NAME (-u NAME) — the contact can stay "
-                 "global — or supply the keys with --identity-key/--signing-key")
-        u = _open_user(args)  # fetching needs the relay and the passphrase
-        try:
-            keys = u._call("get_keys", {"peer": fp})
-        except Exception as e:
-            _die(f"could not fetch {name}'s keys from the relay: {e}")
-        ik, sk = keys["identity_key"], keys["signing_key"]
-        got = fingerprint(ik, sk)
-        if got != fp:
-            _die(f"PIN MISMATCH: the relay served keys hashing to {got}, not "
-                 f"{fp} -- possible MITM, refusing to record them")
-        source = "the relay"
-
-    _store_sql(target, "UPDATE peers SET identity_key=?, signing_key=? "
-                       "WHERE fingerprint=?", ik, sk, fp)
-    print(f"verified {name} ({fp}) from {source}", file=sys.stderr)
+    _record_keys(args, target, fp, peers[fp][0])
 
 
 def cmd_share(args):
@@ -909,10 +1038,16 @@ def cmd_block(args):
 
 def cmd_send(args):
     u = _open_user(args)
-    to = _peer_to_id(args.peer, _resolve_store(args) / STORE_FILE)
+    store_db = _resolve_store(args) / STORE_FILE
+    to = _peer_to_id(args.peer, store_db)
+    save = _save_messages_on(args)
+    if save:
+        _warn_unsealed_save(store_db)
 
     u.sync()                       # keys + resend the unacked outbox along with this one
     mid = u.send(to, args.text)
+    if save:                       # keep our side of the conversation for `history`
+        _save_sent(store_db, u, mid, to, args.text)
     print(json.dumps({"id": mid, "to": to}))
     print(f"sent to {args.peer}", file=sys.stderr)
 
@@ -934,17 +1069,15 @@ def cmd_receive(args):
             "  Prefer --peer <name> for a saved contact, or add --peers-only to "
             "drop strangers.", "1;31"), file=sys.stderr)
 
-    if args.save_messages and _meta(store_db, "no_passphrase") == "1":
-        print("retalk: warning: --save-messages on a --no-passphrase identity "
-              "stores message bodies with no real protection (its store key is "
-              "a public constant); the folder's file permissions are the only "
-              "guard", file=sys.stderr)
+    save = _save_messages_on(args)
+    if save:
+        _warn_unsealed_save(store_db)
 
     def handle(batch):
         for m in batch:                      # standard message / contact objects
             if args.save_contacts and m.get("kind") == "contact":
                 _stage_contact(store_db, m)  # to the inbox for `import --inbox`
-            elif args.save_messages and "text" in m:
+            elif save and "text" in m:
                 _save_message(store_db, u, m)  # sealed copy for `retalk history`
             print(json.dumps(m), flush=True)
 
@@ -968,16 +1101,22 @@ def cmd_history(args):
     u = _open_user(args, need_server=False, banner=False)
     store_db = _resolve_store(args) / STORE_FILE
     _ensure_messages(store_db)
+    # filter by the OTHER party (peer_fp), so a conversation shows both the
+    # messages you received from them and the ones you sent to them.
     peer_fp = _peer_to_id(args.peer, store_db) if args.peer else None
-    where = "WHERE from_fp=? " if peer_fp else ""
+    where = "WHERE peer_fp=? " if peer_fp else ""
     rows = _store_sql(store_db,
-                      "SELECT msg_id, from_fp, from_name, body FROM messages "
-                      f"{where}ORDER BY ts", *([peer_fp] if peer_fp else []))
+                      "SELECT msg_id, from_fp, from_name, direction, body "
+                      f"FROM messages {where}ORDER BY ts",
+                      *([peer_fp] if peer_fp else []))
     # prefer the current saved-peer name; fall back to the label stored at receive
-    names = {fp: name for name, (fp, _ik, _sk) in _effective_peers(store_db).items()}
-    for msg_id, from_fp, from_name, body in rows:
-        print(json.dumps({"id": msg_id, "from": from_fp,
-                          "name": names.get(from_fp) or from_name,
+    names = {fp: nm for fp, (nm, _ik, _sk) in _effective_peers(store_db).items()}
+    self_name = u.name or "me"
+    for msg_id, from_fp, from_name, direction, body in rows:
+        name = self_name if direction == "out" else (names.get(from_fp)
+                                                      or from_name)
+        print(json.dumps({"id": msg_id, "from": from_fp, "name": name,
+                          "direction": direction or "in",
                           "text": u.decrypt_at_rest(body)}), flush=True)
 
 
@@ -1174,6 +1313,9 @@ examples:
                     help="with --card/--invite-message/--invite-reply: the "
                          "nickname you suggest the peer save you under (default: "
                          "your display name)")
+    sp.add_argument("--last", action="store_true",
+                    help="use the most recently created identity (the one `retalk "
+                         "init` just made), instead of naming it with --user/--dir")
     sp.set_defaults(fn=cmd_id)
 
     sp = sub.add_parser(
@@ -1211,6 +1353,10 @@ run `retalk verify <name-or-fingerprint>` to do that explicitly now (see
                     help="save to the owner-wide global contact list shared by "
                          "every identity (the default when no identity is "
                          "selected); cannot be combined with --user/--dir")
+    sp.add_argument("--verify", action="store_true",
+                    help="immediately verify the new contact: fetch their two "
+                         "keys from the relay and pin them (same as running "
+                         "`retalk verify` right after)")
     sp.set_defaults(fn=cmd_add)
 
     sp = sub.add_parser(
@@ -1486,6 +1632,11 @@ examples:
                     help="recipient: a saved peer name (from `retalk add`) "
                          "or a raw 32-hex user id")
     sp.add_argument("text", help="the message plaintext (quote it)")
+    sp.add_argument("--save-messages", action="store_true",
+                    help="also keep a sealed local copy of THIS sent message, so "
+                         "`retalk history` shows both sides of the conversation. "
+                         "Off by default; RETALK_SAVE_MESSAGE=1 turns it on for "
+                         "every command")
     sp.set_defaults(fn=cmd_send)
 
     sp = sub.add_parser(
@@ -1554,33 +1705,37 @@ Contacts peers share are also saved to the contact-inbox (see
                          "(`retalk share`) to the contact-inbox; by default they "
                          "are staged there for `retalk import --inbox`")
     sp.add_argument("--save-messages", action="store_true",
-                    help="also keep a local copy of each chat message, sealed "
-                         "with this identity's key, for `retalk history`. Off by "
-                         "default (retalk keeps no message log otherwise). On a "
-                         "--no-passphrase identity the seal is not real "
+                    help="also keep a local copy of each RECEIVED chat message, "
+                         "sealed with this identity's key, for `retalk history`. "
+                         "Off by default (retalk keeps no message log otherwise); "
+                         "RETALK_SAVE_MESSAGE=1 turns it on for every command. On "
+                         "a --no-passphrase identity the seal is not real "
                          "encryption -- the store key is public")
     sp.set_defaults(fn=cmd_receive, save_contacts=True)
 
     sp = sub.add_parser(
         "history", parents=[common], formatter_class=raw,
-        help="replay messages saved by `receive --save-messages`",
+        help="replay messages saved by `send`/`receive --save-messages`",
         description="""\
-Print the messages this identity has saved with `retalk receive
---save-messages`, oldest first, as one JSON object per line (NDJSON) -- the same
-Message shape `receive` emits ({"id", "from", "name", "text"}, see
-docs/STANDARD.md). Each body is decrypted from its at-rest seal on the way out,
-so this needs the identity's passphrase but never the relay.
+Print the messages this identity has saved (with `send --save-messages` and
+`receive --save-messages`), oldest first, as one JSON object per line (NDJSON):
+the Message shape `receive` emits plus a `direction` field --
+{"id", "from", "name", "direction", "text"}, where direction is "in" (received)
+or "out" (sent). Both sides of a conversation are interleaved by time. Each body
+is decrypted from its at-rest seal on the way out, so this needs the identity's
+passphrase but never the relay.
 
-retalk keeps no message log unless you opt in with `receive --save-messages`;
-with `--peer` only that sender's saved messages are shown.""",
+retalk keeps no message log unless you opt in -- per command with
+--save-messages, or for every command with RETALK_SAVE_MESSAGE=1. With `--peer`,
+only the conversation with that peer is shown (both directions).""",
         epilog="""\
 examples:
   retalk history                 every saved message, oldest first
-  retalk history --peer bob      only messages saved from bob
+  retalk history --peer bob      the whole conversation with bob (sent + received)
   retalk history | jq -r .text   just the text of each""")
     sp.add_argument("--peer", metavar="PEER",
-                    help="show only this sender's saved messages (a saved peer "
-                         "name or a 32-hex user id)")
+                    help="show only the conversation with this peer, both "
+                         "directions (a saved peer name or a 32-hex user id)")
     sp.set_defaults(fn=cmd_history)
 
     sp = sub.add_parser(

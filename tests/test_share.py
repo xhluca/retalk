@@ -62,17 +62,19 @@ def start_server(db: str, port: int) -> subprocess.Popen:
 
 
 class TestShare(unittest.TestCase):
-    def cli(self, *cmd, secret="cli-secret", expect=0):
-        env = dict(os.environ,
-                   RETALK_PASSPHRASE=secret,
-                   RETALK_RELAY=f"http://127.0.0.1:{PORT}",
-                   RETALK_HOME=os.path.join(self.tmp, "store"))
-        env.pop("RETALK_USER", None)
+    def cli(self, *cmd, secret="cli-secret", expect=0, env=None):
+        e = dict(os.environ,
+                 RETALK_PASSPHRASE=secret,
+                 RETALK_RELAY=f"http://127.0.0.1:{PORT}",
+                 RETALK_HOME=os.path.join(self.tmp, "store"))
+        e.pop("RETALK_USER", None)
+        if env:
+            e.update(env)
         _h = os.path.join(self.tmp, "store"); os.makedirs(_h, exist_ok=True)
         _c = os.path.join(_h, "config.json")
         if not os.path.exists(_c): open(_c, "w").write("{}")  # hermetic: no default relay
         res = subprocess.run([sys.executable, "-m", "retalk.cli", *cmd],
-                             capture_output=True, text=True, env=env,
+                             capture_output=True, text=True, env=e,
                              input=getattr(self, "_stdin", None))
         self.assertEqual(res.returncode, expect,
                          f"{cmd}: rc={res.returncode}\n{res.stderr}")
@@ -330,9 +332,10 @@ class TestShare(unittest.TestCase):
                 hist = [json.loads(l) for l in
                         self.cli("history", "--dir", b).stdout.splitlines()]
                 self.assertEqual(len(hist), 1)
-                self.assertEqual(set(hist[0]), {"id", "from", "name", "text"})
-                self.assertEqual((hist[0]["from"], hist[0]["text"]),
-                                 (aid, "hello bob"))
+                self.assertEqual(set(hist[0]),
+                                 {"id", "from", "name", "direction", "text"})
+                self.assertEqual((hist[0]["from"], hist[0]["text"],
+                                  hist[0]["direction"]), (aid, "hello bob", "in"))
 
                 # 3. the stored body is encrypted at rest (no plaintext on disk)
                 conn = sqlite3.connect(os.path.join(b, "store.db"))
@@ -349,6 +352,88 @@ class TestShare(unittest.TestCase):
                 self.assertEqual(texts, ["hello bob", "again"])
                 print("PASS: receive --save-messages persists sealed copies; "
                       "history replays them")
+            finally:
+                server.terminate()
+                server.wait(timeout=10)
+
+    def test_history_both_directions(self):
+        """send + receive --save-messages record both sides; history interleaves
+        them per conversation, oldest first, each tagged with `direction`."""
+        with tempfile.TemporaryDirectory() as tmp:
+            self.tmp = tmp
+            server = start_server(os.path.join(tmp, "server.db"), PORT)
+            try:
+                a = os.path.join(tmp, "alice")
+                b = os.path.join(tmp, "bob")
+                aid = self.cli("init", "--dir", a,
+                               "--display-name", "alice").stdout.strip()
+                bid = self.cli("init", "--dir", b,
+                               "--display-name", "bob").stdout.strip()
+                self.cli("receive", "--all", "--dir", a)   # publish alice's keys
+                self.cli("receive", "--all", "--dir", b)   # publish bob's keys
+
+                # alice sends two (saving her side); bob saves on receive, replies
+                self.cli("send", "--peer", bid, "hi bob", "--dir", a,
+                         "--save-messages")
+                self.cli("send", "--peer", bid, "you there?", "--dir", a,
+                         "--save-messages")
+                self.cli("receive", "--all", "--save-messages", "--dir", b)
+                self.cli("send", "--peer", aid, "yep", "--dir", b,
+                         "--save-messages")
+                self.cli("receive", "--all", "--save-messages", "--dir", a)
+
+                # alice's conversation with bob: two out, then bob's reply in
+                ah = [json.loads(l) for l in
+                      self.cli("history", "--peer", bid, "--dir", a)
+                      .stdout.splitlines()]
+                self.assertEqual([(m["direction"], m["text"]) for m in ah],
+                                 [("out", "hi bob"), ("out", "you there?"),
+                                  ("in", "yep")])
+                # bob's mirror: two in, then his reply out
+                bh = [json.loads(l) for l in
+                      self.cli("history", "--peer", aid, "--dir", b)
+                      .stdout.splitlines()]
+                self.assertEqual([(m["direction"], m["text"]) for m in bh],
+                                 [("in", "hi bob"), ("in", "you there?"),
+                                  ("out", "yep")])
+                print("PASS: history interleaves sent + received per conversation")
+            finally:
+                server.terminate()
+                server.wait(timeout=10)
+
+    def test_save_messages_env_var(self):
+        """RETALK_SAVE_MESSAGE=1 turns on saving for both send and receive with
+        no per-command flag; a falsy value keeps the default (off)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            self.tmp = tmp
+            server = start_server(os.path.join(tmp, "server.db"), PORT)
+            try:
+                a = os.path.join(tmp, "alice")
+                b = os.path.join(tmp, "bob")
+                aid = self.cli("init", "--dir", a,
+                               "--display-name", "alice").stdout.strip()
+                bid = self.cli("init", "--dir", b,
+                               "--display-name", "bob").stdout.strip()
+                self.cli("receive", "--all", "--dir", b)   # publish bob's keys
+
+                # falsy env -> sender saves nothing (default preserved)
+                self.cli("send", "--peer", bid, "off", "--dir", a,
+                         env={"RETALK_SAVE_MESSAGE": "no"})
+                self.assertEqual(self.cli("history", "--dir", a).stdout, "")
+                self.cli("receive", "--all", "--dir", b)   # drain without saving
+
+                # truthy env -> saved with no flag, on send and on receive
+                self.cli("send", "--peer", bid, "on", "--dir", a,
+                         env={"RETALK_SAVE_MESSAGE": "true"})
+                self.assertEqual([json.loads(l)["text"] for l in
+                                  self.cli("history", "--dir", a).stdout
+                                  .splitlines()], ["on"])
+                self.cli("receive", "--all", "--dir", b,
+                         env={"RETALK_SAVE_MESSAGE": "yes"})
+                self.assertEqual([json.loads(l)["text"] for l in
+                                  self.cli("history", "--dir", b).stdout
+                                  .splitlines()], ["on"])
+                print("PASS: RETALK_SAVE_MESSAGE toggles saving without the flag")
             finally:
                 server.terminate()
                 server.wait(timeout=10)
