@@ -25,7 +25,6 @@ safely share one store.
 from __future__ import annotations
 
 import base64
-import fcntl
 import hashlib
 import json
 import os
@@ -38,6 +37,28 @@ import uuid
 from contextlib import contextmanager
 
 import vodozemac as v
+
+try:                     # POSIX: advisory whole-file lock
+    import fcntl
+except ImportError:      # Windows has no fcntl -- use msvcrt region locks
+    fcntl = None
+    import msvcrt
+
+
+def _lock_exclusive(f):
+    """Blocking exclusive lock on an open file. POSIX flock, or an msvcrt
+    region lock (1 byte at offset 0) on Windows. Either way the OS releases
+    the lock when the file closes or the process dies, so a crash can never
+    leave a stale lock behind."""
+    if fcntl is not None:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        return
+    while True:          # LK_LOCK gives up after ~10s; loop to block like flock
+        try:
+            msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+            return
+        except OSError:
+            time.sleep(0.05)
 
 
 def fingerprint(identity_key_b64: str, signing_key_b64: str) -> str:
@@ -93,7 +114,7 @@ class User:
     def _locked(self):
         """Serialize a whole operation across processes sharing this store."""
         with open(self._store_path + ".lock", "w") as f:
-            fcntl.flock(f, fcntl.LOCK_EX)
+            _lock_exclusive(f)
             yield
 
     def _init_store(self):
