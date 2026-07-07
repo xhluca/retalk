@@ -26,6 +26,7 @@ import re
 import sqlite3
 import sys
 import time
+import urllib.error
 from pathlib import Path
 
 from .user import User, fingerprint
@@ -530,14 +531,35 @@ def cmd_init(args):
         pass
 
     # Publish keys to the relay so peers can reach you (unless --no-register).
-    # Best-effort: a failure never blocks init (keys also publish lazily on the
-    # first send/receive).
-    if server and not getattr(args, "no_register", False):
-        try:
-            u.sync(resend=False)
-        except Exception as e:
-            print(_style(f"\n(not registered on {server}: {e} — your keys will "
-                         "publish on first send/receive)", "2"), file=sys.stderr)
+    # Best-effort: a failure never blocks init, but it warns LOUDLY — an
+    # unregistered identity cannot be messaged until its keys are published.
+    if not getattr(args, "no_register", False):
+        if args.user and not args.dir:
+            reg = f"retalk register -u {args.user}"
+        elif args.dir:
+            reg = f"retalk register --dir {args.dir}"
+        else:
+            reg = "retalk register"          # RETALK_USER selects the identity
+        if server:
+            try:
+                u.sync(resend=False)
+                print(_style(f"\n✓ Registered on {server} — peers can message "
+                             "you.", "1;32"), file=sys.stderr)
+            except Exception as e:
+                print(_style(
+                    f"\n⚠ NOT registered: the relay at {server} could not be "
+                    f"reached ({e}).\n"
+                    "  Peers cannot message you until your keys are published. "
+                    "Once the relay\n"
+                    f"  is reachable, run `{reg}` (any send/receive publishes "
+                    "them too).", "1;31"), file=sys.stderr)
+        else:
+            print(_style(
+                "\n⚠ NOT registered: no relay is configured, so your keys were "
+                "not published\n"
+                "  and peers cannot message you. Set a relay, then register:\n"
+                "    retalk config --relay <url>\n"
+                f"    {reg}", "1;31"), file=sys.stderr)
 
     home = str(Path.home())
     shown = str(d).replace(home, "~", 1) if str(d).startswith(home) else str(d)
@@ -1773,7 +1795,27 @@ examples:
     sp.set_defaults(fn=cmd_config)
 
     args = p.parse_args()
-    args.fn(args)
+    try:
+        args.fn(args)
+    except urllib.error.URLError as e:
+        # The relay could not be reached at all (DNS failure, connection
+        # refused, timeout, TLS). HTTP-level errors are already turned into
+        # clean messages by the relay layer; without this, an unreachable
+        # relay dumps a raw traceback at the user.
+        _die("could not reach the relay: "
+             f"{getattr(e, 'reason', None) or e}\n"
+             "  - check the relay URL (--relay, RETALK_RELAY, or the one saved at init)\n"
+             "  - check your network\n"
+             "  - nothing is lost: queued sends stay in the outbox and go out on\n"
+             "    the next successful command (e.g. `retalk sync`)")
+    except (ConnectionError, TimeoutError) as e:
+        _die(f"connection to the relay failed: {e} — retry (e.g. `retalk sync`) "
+             "once the relay is reachable")
+    except RuntimeError as e:
+        # relay-layer errors arrive as RuntimeError with a ready-made message
+        # (e.g. "server error from claim_key: unknown peer or no published
+        # keys"); print it cleanly instead of dumping a traceback.
+        _die(str(e))
 
 
 if __name__ == "__main__":
