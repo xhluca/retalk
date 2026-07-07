@@ -202,10 +202,24 @@ def _resolve_passphrase(args, store_db: Path | None = None,
     s = getattr(args, "passphrase", None) or os.environ.get("RETALK_PASSPHRASE")
     if s:
         return s, False
-    _die("No passphrase provided. Try one of:\n"
-         "  - pass the flag --passphrase SECRET\n"
-         "  - set the environment variable RETALK_PASSPHRASE=<your passphrase>\n"
-         "  - use --no-passphrase for an identity with no passphrase")
+    # Show the user's ACTUAL command with the missing piece filled in (rendered
+    # like the other colored bash blocks), not just the name of a flag.
+    ran = "retalk " + " ".join(sys.argv[1:])
+    lines = [
+        "# rerun with the passphrase inline:",
+        f"{ran} -p <YOUR-PASSPHRASE>",
+        "# or set it once for this shell, then rerun:",
+        "export RETALK_PASSPHRASE=<YOUR-PASSPHRASE>",
+        ran,
+    ]
+    if creating:
+        lines += [
+            "# or create the identity without one (unsafe: keys stored unencrypted):",
+            f"{ran} --no-passphrase",
+        ]
+    _die("no passphrase provided" +
+         ("" if creating else " (this identity's keys are encrypted with one)")
+         + ":\n" + _bash_block(lines))
 
 
 def _store_sql(store_db: Path, query: str, *params) -> list:
@@ -1213,17 +1227,19 @@ output conventions:
   so you always know which identity acted. Exit codes: 0 ok, 2 usage or
   refusal (no identity, wrong passphrase, unknown peer).
 
-quickstart:
-  retalk init --user alice --relay https://server.example.com
-  export RETALK_USER=alice           # so later commands know which user
-  retalk add bob <bob's user id>
+quickstart (your peer runs the same steps on their machine):
+  retalk init --user alice --passphrase <YOUR-PASSPHRASE>
+  export RETALK_USER=alice                     # which user to act as
+  export RETALK_PASSPHRASE=<YOUR-PASSPHRASE>   # unlocks your keys (or pass -u/-p per command)
+  retalk add <bobs-user-id> --peer bob --verify
   retalk send --peer bob "hello"
-  retalk send -u alice --peer bob "hello"    # or name the user inline (no env var)
-  retalk receive --peer bob --follow
+  retalk receive --peer bob --follow           # drop --follow to read just once
+  # with no --relay, init uses the public test relay (no uptime guarantee) --
+  # use your own via `init --relay URL` or `retalk config --relay URL`
 
 run `retalk <command> --help` for the full story of each command.""")
     sub = p.add_subparsers(dest="command", required=True,
-                           metavar="{init,register,id,add,contacts,share,import,verify,block,sync,send,receive,history}")
+                           metavar="{init,register,id,add,contacts,share,import,verify,block,sync,send,receive,history,config}")
 
     sp = sub.add_parser(
         "init", parents=[common], formatter_class=raw,

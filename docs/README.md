@@ -101,8 +101,24 @@ a fresh relay and keep going:
 
 ## Running a server on the internet
 
-The relay speaks plain HTTP on one local port. To expose it publicly, use a host
-that terminates TLS for you, or put your own TLS proxy in front:
+The relay is one process speaking plain HTTP on one local port:
+
+```sh
+retalk-server --host 127.0.0.1 --port 8766 --audience https://server.example.com
+```
+
+- `--host` / `--port` — the local address the relay listens on. Keep `--host`
+  on `127.0.0.1` when a TLS proxy sits in front; use `0.0.0.0` to accept
+  connections from other machines directly.
+- `--audience` — the public URL users actually connect to. Request signatures
+  are bound to it, so it must match each client's `--relay` URL exactly — a
+  mismatch causes signature failures. Behind a proxy it is your public
+  `https://` address while `--host`/`--port` stay local; for a purely local
+  run it defaults to host:port, so `--host`/`--port` alone is enough.
+
+There is no server-side user setup — users publish their own public keys when
+they first register, send, or receive. To expose the relay publicly, use a
+host that terminates TLS for you, or put your own TLS proxy in front:
 
 - [server/huggingface.md](server/huggingface.md) — a free Hugging Face Docker
   Space: a public HTTPS URL with no domain, firewall, or TLS setup. Quickest
@@ -192,6 +208,30 @@ that drop a sender during `receive` *before* any decryption, so a blocked or
 unknown sender can never make you consume a one-time key. Nothing is sent to the
 server or the peer.
 
+## Selecting the user
+
+Each user's identity lives in its own folder. retalk never guesses which user
+you mean; every command resolves it in order:
+
+1. `--dir DIR` — an explicit identity directory (wins if given)
+2. `--user NAME` / `-u NAME` — the user named NAME (`~/.retalk/NAME/`)
+3. `RETALK_USER` env var — the same, set once for the shell
+4. otherwise: an error — nothing is created or guessed.
+
+Identities are always stored locally on disk; the only question is *where*.
+`--user NAME` keeps them in the shared home location (`~/.retalk/NAME/`;
+relocate it with `RETALK_HOME`), good when one person has a few named users.
+`--dir ./somewhere` keeps an identity in a folder you choose — use it to keep
+one inside a project directory, on a removable disk, or anywhere you want it
+self-contained and easy to back up or delete as a unit.
+
+Only `retalk init` creates an identity; other commands fail if the selected
+user has none. Each acting command prints `using <name> (<id>) from <dir>` to
+stderr so stdout stays clean for messages and JSON.
+
+Machines need a roughly correct clock: server request signatures expire after
+about 2.5 minutes.
+
 ## Data format
 
 The CLI and library exchange newline-delimited JSON in one stable shape, so you
@@ -202,27 +242,30 @@ conventions.
 
 ## Command reference
 
-`retalk` has twelve subcommands. This is the quick reference; run `retalk
+`retalk` has fourteen subcommands. This is the quick reference; run `retalk
 <command> --help` for the full text, and see [STANDARD.md](STANDARD.md) for the
 JSON each one emits. Most commands work entirely on your local store — only the
 ones that touch a mailbox reach the relay.
 
 | Command | What it does | Relay? |
 | --- | --- | --- |
-| `init` | Create a new identity (keypair + store). The only command that creates one. | no |
+| `init` | Create a new identity (keypair + store) and publish its keys. The only command that creates one. | yes² |
 | `id` | Print this identity's user id (its public-key fingerprint). | no |
-| `add` | Save a peer's user id under a local name. | no |
+| `add` | Save a peer's user id, optionally under a local name; `--verify` pins their keys now. | no¹ |
 | `verify` | Record a saved peer's public keys (explicit first contact). | yes¹ |
 | `contacts` | List saved peers; `--show` one as a Contact card, `--remove` one. | no |
 | `share` | Send a contact to a peer (an introduction). | yes |
 | `import` | Save a contact from a card, or from the contact-inbox. | no |
 | `block` | Drop a sender's mail before decryption; `--remove` to undo, `--list` to view. | no |
+| `sync` | Reconcile keys and resend the outbox against the relay. | yes |
+| `register` | Publish this identity's keys to the relay (make it reachable). | yes |
 | `send` | Encrypt and send one message. | yes |
 | `receive` | Fetch, decrypt, and print pending messages. | yes |
 | `history` | Replay saved messages (both sent and received) as a conversation. | no |
-| `sync` | Reconcile keys and resend the outbox against the relay. | yes |
+| `config` | Show or set owner-wide defaults (e.g. the default relay). | no |
 
-¹ `verify` reaches the relay only when fetching keys; with `--identity-key`/`--signing-key` it stays offline.
+¹ `verify` (and `add --verify`) reaches the relay only when fetching keys; with `--identity-key`/`--signing-key` it stays offline.
+² best-effort: `init` still succeeds when the relay is unreachable (or with `--no-register`), and the keys publish on first contact.
 
 ### Options every command shares
 
@@ -291,6 +334,18 @@ is recorded.
 To get a contact's card for sharing, use `retalk contacts --show CONTACT --json`
 (above). `share` sends that card over the relay; `import` saves one you receive.
 
+A card is **not a secret**: the keys are public and the fingerprint pins them,
+so it is safe to pass in the clear — over retalk, chat, or email. `import`
+re-checks any keys against the fingerprint and refuses a tampered card with
+**PIN MISMATCH**, never trusting it; a card with no keys imports as an
+unverified contact, verified on first contact like any other. On the receiving
+side, `receive` also stages shared contacts into a local **contact-inbox**, so
+an introduction waits for you even if the message scrolled past; `import
+--inbox` then promotes it into your saved peers and clears it from the inbox —
+a move, not a copy. Each staged card records who introduced it.
+`contacts --show … --json` + `import` also copy a contact between two of your
+own identities without going through the relay at all.
+
 **`retalk share CONTACT --peer PEER`** — introduce `CONTACT` to `--peer` by
 sending its card, encrypted, over the relay. The recipient sees it in `receive`
 and saves it with `import`. Delivery is tracked like `send`; prints a
@@ -356,12 +411,31 @@ its at-rest seal on the way out, so this needs the passphrase but never the rela
 
 - `--peer PEER` — show only the conversation with this peer (both directions).
 
-### Maintenance — `sync`
+Saved bodies are **sealed at rest** with a key derived from the identity's
+passphrase (the same secret that protects your keys), so the store file never
+holds plaintext; `history` unseals them on the way out. The seal is only as
+strong as the passphrase — on a `--no-passphrase` identity (whose store key is
+a public constant) `--save-messages` warns that the copy is *not* meaningfully
+encrypted, and file permissions are the only guard.
+
+### Maintenance — `sync`, `register`, `config`
 
 **`retalk sync`** — run one reconciliation pass against the relay: republish your
 keys if it has forgotten them, replenish one-time keys, rotate a stale fallback
 key, and resend unacknowledged outbox mail. `send` and `sync` resend; `receive`
 never does — so run `sync` from cron or a timer for a mostly-listening client.
+
+**`retalk register`** — publish this identity's public keys (plus one-time keys)
+to the relay so peers can start encrypted sessions with you. `init` runs it
+automatically unless `--no-register`; run it yourself after that, or after
+switching relays. Idempotent — it reports what it refreshed.
+
+**`retalk config`** — show or set owner-wide defaults in `~/.retalk/config.json`.
+They apply to every identity as the *last* fallback: a `--relay` flag,
+`RETALK_RELAY`, and the relay saved in an identity all override them. With no
+flags it prints the current config.
+
+- `-r URL`, `--relay URL` — set the owner-wide default relay; pass `""` to clear it.
 
 ## Library usage
 

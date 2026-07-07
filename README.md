@@ -1,20 +1,28 @@
 # retalk
 
-Retalk is a lightweight and self-hostable messaging CLI for people and AI agents, encrypted via `vodozemac`.
+Try giving a cron job a Signal account: you'll need a phone number, a QR
+code, and a phone that stays on. Matrix gets you closer, but now you're
+running a homeserver and coding against an SDK. All you wanted was for one
+script to tell another script — or to tell *you* — that something happened,
+without the server in the middle being able to read it.
 
-The short version:
+retalk is that, as a CLI:
 
-- The server never receives plaintext or private keys.
-- Clients encrypt, decrypt, and sign every request.
-- There are no accounts, passwords, registration flows, or bearer tokens.
-- A user's ID is also the fingerprint clients use to verify that user's keys.
-- The server still sees metadata: sender, recipient, timing, and message size.
+```sh
+retalk send --peer bob "backup done: 412 files"
+retalk receive --peer bob   # -> {"name": "bob", "text": "nice, all verified", ...}
+```
 
-Retalk uses `vodozemac` for Olm encryption. Everything else uses plain
-HTTP+JSON and the Python standard library.
+No accounts and nothing to sign up for: an identity is a keypair created by
+one command, and its fingerprint is its address. Every message is end-to-end
+encrypted (Olm, via `vodozemac`), so the relay — a single process you can run
+anywhere — holds only public keys and ciphertext, and deletes each message on
+delivery ([what a hostile relay can and can't do](docs/server.md)). Output is
+JSON lines, so it pipes.
 
-## Quickstart
-
+retalk exists so AI agents, bots, and cron jobs can message each other, and
+their humans, with the guarantees people expect from Signal. Two people in
+two terminals works just as well.
 
 ## Install
 
@@ -28,6 +36,26 @@ system Python. Create and activate one, then use any method below:
 python -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 ```
+
+</details>
+
+<details>
+<summary>New to uv? Install it first</summary>
+
+[uv](https://docs.astral.sh/uv/) is a fast Python package manager. Install it
+once:
+
+```sh
+curl -LsSf https://astral.sh/uv/install.sh | sh   # macOS / Linux
+# Windows: powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+# or, with an existing Python: pip install uv
+```
+
+Then the `uv`/`uvx` rows below work as written. Which one to pick:
+`uv tool install retalk` gives you a global `retalk` command in its own
+isolated environment (best for daily use); `uv add retalk` adds it to the
+current project's dependencies; `uvx retalk` runs it one-off without
+installing anything.
 
 </details>
 
@@ -143,8 +171,8 @@ uv add git+https://github.com/xhluca/retalk
 </tbody>
 </table>
 
-The installation gives you the Python library (`import retalk`) and CLI
-commands: `retalk` (user CLI) and `retalk-server` (launching relay server).
+This gives you the Python library (`import retalk`) and two commands:
+`retalk` (the client) and `retalk-server` (the relay). Next: [Quickstart](#quickstart).
 
 <details>
 <summary>Installing from a development clone</summary>
@@ -161,296 +189,205 @@ Without uv, run `pip3 install -e .` inside the clone.
 
 </details>
 
+## Quickstart
 
-## Concepts
+Three steps get you messaging. You run them on your machine; your peer runs
+the same three on theirs.
 
-* **User**: a participant with a keypair and a mailbox. A user can be an
-AI agent, a bot, a service, or a person at a terminal.
+```sh
+# 1. Create your identity. This prints your USER ID (a 32-hex fingerprint) —
+#    share it with your peer over any channel (chat, email, in person).
+retalk init --user alice --passphrase <YOUR-PRIVATE-PASSPHRASE>
 
-* **Owner**: the person or organization that runs one or more users. The
-protocol does not model owners yet. Today, the protocol only knows users.
+export RETALK_USER=alice                             # which user to act as
+export RETALK_PASSPHRASE=<YOUR-PRIVATE-PASSPHRASE>   # unlocks your keys
+# (or skip the exports and pass -u / -p on each command)
 
-* **Identity**: a folder (created by
-`retalk init`) holding that user's keypair and state — encrypted keys,
-sessions, saved peers, and the outbox. Each command acts as one identity.
+# 2. Save your peer's ID under a name. --verify fetches and pins their keys
+#    now; without it that happens on your first message.
+retalk add <bobs-user-id> --peer bob --verify
 
-* **Peer**: another user you exchange messages with. You save a peer's user
-ID under a local name with `retalk add`, then address it by that name.
+# 3. Message each other.
+retalk send --peer bob "hello"
+retalk receive --peer bob              # print bob's replies once...
+retalk receive --peer bob --follow     # ...or keep listening
+```
 
-* **Server**: the untrusted relay in the middle. It stores users' public
-keys and ciphertext and forwards messages between mailboxes; it never sees
-plaintext, private keys, or self-chosen names.
+What the steps rely on:
 
-* **User ID**:  a 32-character sha256 fingerprint of the user's public keys. That ID is both:
-  - the address other users send messages to, and
-  - the key pin clients use to reject substituted keys.
-  Share user IDs over a channel the server does not control, such as chat,
-email, or in person.
+- **Relay.** With no `--relay`, commands use the public test relay
+  `https://retalk-relay.mcgill-nlp.org` — fine for trying retalk out, but
+  best-effort with **no uptime guarantee**. Use your own with
+  `retalk init --relay URL` (saved into the identity), the `RETALK_RELAY` env
+  var, or `retalk config --relay URL` (owner-wide default). See
+  [Run your own relay](#run-your-own-relay).
+- **Reachability.** `init` publishes your public keys to the relay
+  automatically, so peers can message you right away. Skip that with
+  `--no-register` and publish later with `retalk register`.
+- **Passphrase.** It encrypts your private keys at rest, and every later
+  command needs it again (`-p` or `RETALK_PASSPHRASE` — there are no
+  interactive prompts). For agents or throwaway identities,
+  `--no-passphrase` stores keys unencrypted and warns you loudly.
+- **Lost your ID?** `retalk id` reprints it (`retalk id --last` for the most
+  recently created identity). `init` also prints a ready-to-paste invite for
+  onboarding a peer who isn't on retalk yet.
 
-Display names (`--display-name`) are optional and work differently:
+<details>
+<summary>Troubleshooting: <code>ssl.SSLCertVerificationError: … unable to get local issuer certificate</code></summary>
 
-- A user's self-chosen name is encrypted inside each message. The server does
-  not see it. Clients show it with a `~` prefix because it is not verified.
-- A peer name is your local label for a user ID, added with
-  `retalk add <id> --peer bob`. It stays on your machine and takes priority over the
-  sender's self-chosen `~name`.
+If your first command that touches the relay (`init`, `register`, `send`,
+`receive`, `verify`) dies with this traceback, your **Python has no root CA
+certificates** — the relay and retalk are fine. It is most common on macOS
+with a python.org installer (the traceback shows
+`/Library/Frameworks/Python.framework/Versions/3.XY/...`), which ships
+without CA certs wired up.
 
+**Fix for python.org Pythons on macOS** — run the certificate installer that
+ships with your Python version, then retry:
 
-## Start a server
+```sh
+open "/Applications/Python 3.10/Install Certificates.command"   # match your version
+```
+
+**Fix for any Python / OS** — point Python at a CA bundle via `SSL_CERT_FILE`:
+
+```sh
+python3 -m pip install certifi
+export SSL_CERT_FILE="$(python3 -m certifi)"    # add to your shell profile
+```
+
+On macOS, `export SSL_CERT_FILE=/etc/ssl/cert.pem` (the system bundle) also
+works.
 
 </details>
 
-> [!NOTE]
-> This part is **optional** if you already have access to a 3rd party relay server.
-> You are however free to self-host a relay server for more reliable and safe access.
-> Don't want to run your own relay yet? For **testing only**, point `--relay` at
-> the public McGill-NLP relay: `https://retalk-relay.mcgill-nlp.org`. It is
-> best-effort with **no uptime guarantee** — run your own (above) for anything
-> you rely on.
+## Commands
 
-Run the relay on a public machine:
+One line per subcommand, matching `retalk --help`. Run
+`retalk <command> --help` for its flags and examples, or read the
+[full command reference](docs/README.md#command-reference).
+
+| Command | What it does |
+| --- | --- |
+| `init` | Create a new identity (the only command that ever does) and publish its keys. |
+| `id` | Print my user id (`--card`/`--json` for a shareable Contact card, `--invite-message` for a paste-able invite). |
+| `add` | Save a peer's user id, optionally under a local name (`--peer NAME`); `--verify` pins their keys now. |
+| `verify` | Record a saved peer's keys (explicit first contact). |
+| `contacts` | List saved peers; `--show` one as a Contact card, `--remove` one. |
+| `share` | Send a saved contact to a peer (an introduction). |
+| `import` | Save a contact from a shared Contact card. |
+| `block` | Silently drop a sender's messages (`--remove` to undo, `--list` them). |
+| `sync` | Reconcile this identity with the relay (keys + outbox). |
+| `register` | Publish this identity's keys to the relay (make it reachable). |
+| `send` | Encrypt and send one message. |
+| `receive` | Decrypt pending messages (`--follow` to keep listening). |
+| `history` | Replay messages saved by `send`/`receive --save-messages`. |
+| `config` | Show or set owner-wide defaults (e.g. the default relay). |
+
+Every command picks the identity it acts as from `--dir DIR`, then
+`--user`/`-u NAME`, then the `RETALK_USER` env var — retalk never guesses
+([details](docs/README.md#selecting-the-user)). Results go to stdout; banners
+and errors go to stderr, so output pipes cleanly into `jq` and friends
+([scripting recipes](docs/README.md#scripting-the-cli)).
+
+## Concepts
+
+- **User** — anything with a keypair and a mailbox: a person, an AI agent, a
+  service. Its **identity** is a local folder (`~/.retalk/NAME/`, created by
+  `retalk init`) holding the encrypted keys, sessions, contacts, and outbox.
+- **User ID** — a 32-hex sha256 fingerprint of the user's public keys. It is
+  both the address peers send to *and* the pin that lets clients reject
+  substituted keys, so share it over any channel the relay does not control.
+- **Peer** — another user you saved with `retalk add`, addressed by
+  fingerprint or by your local name for them. Contacts live in a per-identity
+  list plus an owner-wide global list shared by all your identities
+  ([details](docs/README.md#contacts--add-verify-contacts)).
+- **Relay (server)** — the untrusted middleman. It stores public keys and
+  ciphertext (deleted on delivery) and forwards sealed mail; it never sees
+  plaintext, private keys, or names — though it does see metadata
+  ([trust model](docs/server.md)).
+- **Names** — display names and peer names are conveniences layered on top of
+  fingerprints, never identity ([how names work](docs/README.md#creating-a-user)).
+
+## Run your own relay
+
+> [!NOTE]
+> This is **optional**: the public test relay
+> `https://retalk-relay.mcgill-nlp.org` works out of the box (no uptime
+> guarantee — testing only). Self-host for anything you rely on.
 
 ```sh
 retalk-server --host 127.0.0.1 --port 8766 --audience https://server.example.com
 ```
 
-There is no server-side user setup. Users publish their own public keys when
-they first send or receive.
+One process, one SQLite file, no server-side user setup — users publish their
+own keys. `--audience` is the public URL clients pass as `--relay` (request
+signatures are bound to it, so it must match exactly); for internet use put a
+TLS proxy in front. Flag details and free hosting guides (Hugging Face,
+Cloudflare Tunnel, GCP):
+[docs → running a server](docs/README.md#running-a-server-on-the-internet).
 
-The flags that configure it:
+## Try it locally
 
-- `--host` / `--port` are the local address the relay listens on. Keep `--host`
-  on `127.0.0.1` when a TLS proxy sits in front; use `0.0.0.0` to accept
-  connections from other machines directly.
-- `--audience` is the public URL users actually connect to. Request signatures
-  are bound to it, so it must match each client's `--relay` URL exactly — a
-  mismatch causes signature failures. Behind a proxy it is your public
-  `https://` address (as above) while `--host`/`--port` stay local. For a
-  purely local run the two coincide, so `--host`/`--port` alone is enough
-  (`--audience` then defaults to them).
-
-For internet use, put TLS in front of the relay.
-
-## More Usage
-
-### Sharing contacts
-
-Once you have saved a peer, you can introduce it to someone else — pass along
-its user ID together with a **recommended nickname** — instead of making them
-copy a fingerprint by hand.
+A full round trip on one machine, no internet needed: one relay and two users
+in three terminals.
 
 ```sh
-retalk contacts --show bob --json    # print "bob" as a Contact card (one JSON line)
-retalk share --peer carol bob        # send that card to "carol" over the relay
-retalk share --peer carol bob --as bobby   # recommend a different nickname
-```
-
-`contacts --show bob --json` prints the contact as a JSON **card** — its
-fingerprint, the recommended nickname, and (if you have verified it) its keys.
-`share` sends that same card, encrypted, to a recipient; it shows up in their
-`receive` as a contact record (`"kind":"contact"`) rather than a chat message.
-
-On the receiving side, `receive` saves shared contacts to a **contact-inbox** (a
-local staging area), so they wait for you even if the message scrolled past.
-`import --inbox` then moves them into your real contacts:
-
-```sh
-retalk import --inbox --list          # see who has been shared with you
-retalk import --inbox                 # save all of them as peers (and clear the inbox)
-retalk import --inbox bob --as bobby  # save just "bob", under a nickname of your own
-```
-
-Each staged card records who introduced it. `import --inbox` promotes a contact
-into your saved peers and removes it from the inbox — a move, not a copy. Pass
-`retalk receive --no-save-contacts` to skip staging. You can also skip the relay
-entirely and import a card someone handed you out-of-band (e.g. `retalk contacts
---show bob --json` output): `retalk import '<card json>'`, or `retalk import --as
-bobby '<card>'`.
-
-A card is **not a secret**: the keys are public and the fingerprint pins them,
-so it is safe to share in the clear — over retalk, chat, or email. `import`
-re-checks any keys against the fingerprint and refuses a card whose keys do not
-match (`PIN MISMATCH`), so a tampered introduction is rejected, never trusted.
-A card with no keys imports as an unverified contact, verified on first contact
-like any other. `contacts --show … --json` + `import` also copy a contact between
-two of your own identities without going through the relay at all.
-
-### Saving a message history
-
-By default retalk keeps **no** message log: `send` and `receive` move the
-ciphertext and forget the plaintext (pipe the output somewhere if you want a
-record). Opt in with `--save-messages` — on **both** `send` and `receive`, so the
-log has both sides — and read it back with `retalk history`:
-
-```sh
-retalk send --peer bob "hi" --save-messages       # keep your sent message
-retalk receive --peer bob --save-messages         # keep messages from bob
-retalk history --peer bob                          # the conversation, oldest first
-retalk history                                     # every saved message
-```
-
-To save everything without repeating the flag, set **`RETALK_SAVE_MESSAGE=1`**
-(truthy: `1`/`true`/`t`/`yes`/`y`/`on`); it turns saving on for every `send` and
-`receive`. `history` emits NDJSON tagged with `"direction"` (`"in"` received /
-`"out"` sent), interleaving both sides by time.
-
-Saved bodies are **sealed at rest** with a key derived from the identity's
-passphrase (the same secret that protects your keys), so the SQLite file does
-not hold plaintext; `history` unseals them on the way out. The seal is only as
-strong as the passphrase, so on a `--no-passphrase` identity (whose store key is
-a public constant) `--save-messages` warns that the copy is *not* meaningfully
-encrypted — there, file permissions are the only guard.
-
-### Selecting the user
-
-Each user's identity lives in its own folder (`~/.retalk/NAME/`).
-retalk never guesses which user you mean; every command resolves it in order:
-
-1. `--dir DIR`               an explicit identity directory (wins if given)
-2. `--user NAME` / `-u NAME`   the user named NAME (~/.retalk/NAME/)
-3. `RETALK_USER` env var     the same, set once for the shell
-4. otherwise: an error — nothing is created or guessed.
-
-Identities are always stored locally on disk; the only question is *where*.
-`--user NAME` keeps them in the shared home location
-(`~/.retalk/NAME/`), good when one person has a few named users.
-`--dir ./somewhere` keeps an identity in a folder you choose — use it to keep
-one inside a project directory, on a removable disk, or anywhere you want it
-self-contained and easy to back up or delete as a unit.
-
-Only `retalk init` creates an identity; other commands fail if the selected
-user has none. Each acting command prints `using <name> (<id>) from <dir>` to
-stderr so stdout stays clean for messages and JSON.
-
-Machines need a roughly correct clock. Server request signatures expire after
-about 2.5 minutes.
-
-## Two-minute local demo
-
-This runs three terminals on one machine: the relay, "alice", and "bob". In
-real use the two people sit on different machines — using separate terminals
-here keeps each identity's commands in one place, and lets each terminal set
-its own secret once instead of repeating it on every line.
-
-**Terminal 1 — the relay server**
-
-```sh
+# terminal 1 — the relay (leave it running; local demo, so no --audience needed)
 retalk-server --host 127.0.0.1 --port 8766
 ```
 
-- `retalk-server` starts the relay; it stores only public keys and ciphertext,
-  never plaintext.
-- `--host`/`--port` are the address it listens on. For a local demo the public
-  URL is the same, so `--audience` defaults to it; behind a TLS proxy you would
-  add `--audience https://...`.
-
-Leave this terminal running.
-
-**Terminal 2 — "alice"**
-
-Create "alice"'s identity, then set two variables so the later commands stay
-short:
-
 ```sh
-# create the user "alice"; --passphrase encrypts her keys, --relay is saved in the store
-retalk init --user alice --passphrase alice-secret --relay http://127.0.0.1:8766
-
-# point this terminal at "alice" so later commands don't repeat themselves:
-export RETALK_USER=alice               # which user to act as (replaces --user)
-export RETALK_PASSPHRASE=alice-secret  # unlocks her keys (replaces --passphrase)
-# RETALK_RELAY isn't needed: init saved the relay URL inside "alice"'s store
-
-retalk add <bob-id> --peer bob                # save "bob"'s id (from terminal 3) as the peer "bob"
-```
-
-`add` only needs `RETALK_USER` (no keys, no server contact). Sending and
-receiving come next, under **Exchange a message** below.
-
-**Terminal 3 — "bob"**
-
-Same steps with the user "bob" and his own passphrase:
-
-```sh
-retalk init --user bob --passphrase bob-secret --relay http://127.0.0.1:8766
-export RETALK_USER=bob
-export RETALK_PASSPHRASE=bob-secret
-retalk add <alice-id> --peer alice   # paste "alice"'s ID from terminal 2
-```
-
-Two users with two different passphrases is exactly why each terminal sets its
-own `RETALK_USER` and `RETALK_PASSPHRASE`: they cannot share them.
-
-**Exchange a message**
-
-The first message needs an order, because "alice" can only open an encrypted
-session once "bob"'s public keys are on the relay:
-
-```sh
-# Terminal 3 ("bob"): publish "bob"'s keys, then check for mail from "alice" (none yet)
-retalk receive --peer alice
-
-# Terminal 2 ("alice"): claim one of "bob"'s keys, encrypt, upload the ciphertext
+# terminal 2 — "alice"
+export RETALK_USER=alice RETALK_PASSPHRASE=alice-secret
+retalk init --relay http://127.0.0.1:8766      # prints alice's user id
+retalk add <bobs-id> --peer bob                # paste the id from terminal 3
 retalk send --peer bob "hello bob"
-
-# Terminal 3 ("bob"): decrypt and print it, then reply
-retalk receive --peer alice    # -> {... "name":"alice","text":"hello bob"}
-retalk send --peer alice "hi alice, got it"
-
-# Terminal 2 ("alice"): read the reply
-retalk receive --peer bob      # -> {... "name":"bob","text":"hi alice, got it"}
+retalk receive --peer bob                      # read bob's reply
 ```
-
-Every `receive` does three things: it republishes your keys if the relay lost
-them, prints each pending message as one JSON line (`{"id","from","name","text"}`
-— see [docs/STANDARD.md](docs/STANDARD.md)), and sends back an encrypted
-acknowledgement — after which the relay deletes the delivered ciphertext. Add
-`--follow` to keep one terminal live-tailing instead of draining once.
-
-**Inspect what the relay stored**
 
 ```sh
-sqlite3 server.db 'SELECT body FROM messages LIMIT 1'
+# terminal 3 — "bob"
+export RETALK_USER=bob RETALK_PASSPHRASE=bob-secret
+retalk init --relay http://127.0.0.1:8766      # prints bob's user id
+retalk add <alices-id> --peer alice            # paste the id from terminal 2
+retalk receive --peer alice                    # -> {..., "name":"alice", "text":"hello bob"}
+retalk send --peer alice "hi alice"
 ```
 
-You should see base64 ciphertext, not plaintext — and only until delivery,
-since delivered messages are removed from the server.
+Each terminal exports its own `RETALK_USER`/`RETALK_PASSPHRASE` because the
+two users have different secrets. `init` publishes each user's keys, so the
+sends work in any order once both have run it; every `receive` prints pending
+mail as JSON lines and acknowledges it, after which the relay deletes the
+ciphertext.
 
-## Two machines
-
-Machine A:
+Check that the relay never held plaintext — send one message nobody receives
+(delivered mail is deleted from the relay, so only pending mail is visible),
+then look inside `server.db`, which sits where terminal 1 started the relay:
 
 ```sh
-export RETALK_USER=alice                     # which user this machine acts as
-export RETALK_PASSPHRASE="your-passphrase"   # or pass --no-passphrase to init
-retalk init --user alice --relay https://server.example.com
-# Share the printed user ID with "Bob" out-of-band.
-
-retalk add <bob-user-id> --peer bob
-retalk send --peer bob "hello from across the internet"
-retalk receive --peer bob --follow
+retalk send --peer bob "one more"                       # ...and don't receive it
+sqlite3 server.db 'SELECT body FROM messages LIMIT 1'   # base64 ciphertext
 ```
 
-Machine B does the same with the user "bob" and "Alice"'s user ID.
+## Going further
 
-With `RETALK_USER` exported, later commands know which user to act as without
-repeating `--user`.
+The [docs index](docs/README.md) covers everything this page doesn't:
 
-## More docs
-
-Full reference documentation lives in [docs/](docs/README.md) -- the protocol,
-the server trust model, the data format, and deployment guides. Start at the
-index, or jump straight to a topic:
-
-- [docs/README.md](docs/README.md) -- documentation index and reference hub.
-- [docs/README.md#command-reference](docs/README.md#command-reference) -- every
-  CLI subcommand, what it does, and its flags.
-- [docs/README.md#creating-a-user](docs/README.md#creating-a-user) -- create an
-  identity, choose which user a command acts as, and save peers.
-- [docs/auth.md](docs/auth.md) -- signed requests and the exact wire format.
-- [docs/server.md](docs/server.md) -- what the relay stores, and what a hostile
-  server can and cannot do.
-- [docs/olm.md](docs/olm.md) -- one-time prekeys, fallback keys, and rotation.
-- [docs/STANDARD.md](docs/STANDARD.md) -- the JSON data contract for tooling.
-
-Deploying a server (Hugging Face, Cloudflare, GCP) and contributing or cutting a
-release are covered from the [docs index](docs/README.md).
+- [Sharing contacts](docs/README.md#sharing-contacts--share-import) —
+  introduce saved peers to each other with `share`/`import` instead of
+  copying fingerprints by hand.
+- [Saving a message history](docs/README.md#messaging--send-receive-history) —
+  opt-in, sealed-at-rest conversation logs with `--save-messages` /
+  `RETALK_SAVE_MESSAGE=1`, replayed by `history`.
+- [Selecting the user](docs/README.md#selecting-the-user) — `--user` vs
+  `--dir`, `RETALK_HOME`, and how commands resolve which identity acts.
+- [Filtering who can reach you](docs/README.md#filtering-who-can-reach-you) —
+  `block` and `--peers-only`, applied before any decryption.
+- [Scripting the CLI](docs/README.md#scripting-the-cli) — cron polling, `jq`
+  pipelines, a tiny auto-responder.
+- [Library usage](docs/README.md#library-usage) — the same features from
+  Python via `retalk.User`.
+- Protocol internals: [signed requests](docs/auth.md) ·
+  [key management](docs/olm.md) · [server trust model](docs/server.md) ·
+  [JSON data contract](docs/STANDARD.md).
