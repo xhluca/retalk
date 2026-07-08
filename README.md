@@ -168,15 +168,16 @@ the same three on theirs.
 ```sh
 # 1. Create your identity. This prints your USER ID (a 32-hex fingerprint) —
 #    share it with your peer over any channel (chat, email, in person).
-retalk init --user alice --passphrase <YOUR-PRIVATE-PASSPHRASE>
+retalk init --user alice --passphrase "<YOUR-PRIVATE-PASSPHRASE>"
 
-export RETALK_USER=alice                             # which user to act as
-export RETALK_PASSPHRASE=<YOUR-PRIVATE-PASSPHRASE>   # unlocks your keys
-# (or skip the exports and pass -u / -p on each command)
+# select alice for this shell session: auth verifies the passphrase, then
+# emits the RETALK_USER / RETALK_PASSPHRASE exports that eval applies
+eval "$(retalk auth alice "<YOUR-PRIVATE-PASSPHRASE>")"
+# alternatively: export those two vars yourself, or pass -u / -p per command
 
 # 2. Save your peer's ID under a name. --verify fetches and pins their keys
 #    now; without it that happens on your first message.
-retalk add <bobs-user-id> --peer bob --verify
+retalk add "<bobs-user-id>" --peer bob --verify
 
 # 3. Message each other.
 retalk send --peer bob "hello"
@@ -250,9 +251,11 @@ One line per subcommand, matching `retalk --help`. Run
 | `block` | Silently drop a sender's messages (`--remove` to undo, `--list` them). |
 | `sync` | Reconcile this identity with the relay (keys + outbox). |
 | `register` | Publish this identity's keys to the relay (make it reachable). |
+| `auth` | Select the user (and passphrase) for this terminal session: `eval "$(retalk auth alice …)"`. |
 | `send` | Encrypt and send one message. |
 | `receive` | Decrypt pending messages (`--follow` to keep listening). |
-| `history` | Replay messages saved by `send`/`receive --save-messages`. |
+| `history` | Replay messages saved by `send`/`receive --save`. |
+| `show` | Render the saved conversation with a peer as a chat (`--follow` keeps it live). |
 | `config` | Show or set owner-wide defaults (e.g. the default relay). |
 
 Every command picks the identity it acts as from `--dir DIR`, then
@@ -312,7 +315,7 @@ retalk-server --host 127.0.0.1 --port 8766
 # terminal 2 — "alice"
 export RETALK_USER=alice RETALK_PASSPHRASE=alice-secret
 retalk init --relay http://127.0.0.1:8766      # prints alice's user id
-retalk add <bobs-id> --peer bob                # paste the id from terminal 3
+retalk add "<bobs-id>" --peer bob                # paste the id from terminal 3
 retalk send --peer bob "hello bob"
 retalk receive --peer bob                      # read bob's reply
 ```
@@ -321,7 +324,7 @@ retalk receive --peer bob                      # read bob's reply
 # terminal 3 — "bob"
 export RETALK_USER=bob RETALK_PASSPHRASE=bob-secret
 retalk init --relay http://127.0.0.1:8766      # prints bob's user id
-retalk add <alices-id> --peer alice            # paste the id from terminal 2
+retalk add "<alices-id>" --peer alice            # paste the id from terminal 2
 retalk receive --peer alice                    # -> {..., "name":"alice", "text":"hello bob"}
 retalk send --peer alice "hi alice"
 ```
@@ -349,7 +352,7 @@ The [docs index](docs/README.md) covers everything this page doesn't:
   introduce saved peers to each other with `share`/`import` instead of
   copying fingerprints by hand.
 - [Saving a message history](docs/README.md#messaging--send-receive-history) —
-  opt-in, sealed-at-rest conversation logs with `--save-messages` /
+  opt-in, sealed-at-rest conversation logs with `--save` /
   `RETALK_SAVE_MESSAGE=1`, replayed by `history`.
 - [Selecting the user](docs/README.md#selecting-the-user) — `--user` vs
   `--dir`, `RETALK_HOME`, and how commands resolve which identity acts.

@@ -300,7 +300,7 @@ class User:
 
     def _at_rest_key(self):
         """A self-encryption keypair derived from the store key, for sealing
-        optional local copies of messages (`retalk receive --save-messages`).
+        optional local copies of messages (`retalk receive --save`).
         It is only as strong as the passphrase: a --no-passphrase identity
         derives the store key from a public constant, so its at-rest copies
         are not meaningfully encrypted (the caller is expected to warn)."""

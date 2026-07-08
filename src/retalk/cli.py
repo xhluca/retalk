@@ -23,8 +23,10 @@ import importlib.resources
 import json
 import os
 import re
+import shutil
 import sqlite3
 import sys
+import textwrap
 import time
 import urllib.error
 from pathlib import Path
@@ -208,14 +210,14 @@ def _resolve_passphrase(args, store_db: Path | None = None,
     ran = "retalk " + " ".join(sys.argv[1:])
     lines = [
         "# rerun with the passphrase inline:",
-        f"{ran} -p <YOUR-PASSPHRASE>",
+        f'{ran} -p "<YOUR-PASSPHRASE>"',
         "# or set it once for this shell, then rerun:",
-        "export RETALK_PASSPHRASE=<YOUR-PASSPHRASE>",
+        'export RETALK_PASSPHRASE="<YOUR-PASSPHRASE>"',
         ran,
     ]
     if creating:
         lines += [
-            "# or create the identity without one (unsafe: keys stored unencrypted):",
+            "# or create it with no passphrase -- unsafe, keys stored unencrypted:",
             f"{ran} --no-passphrase",
         ]
     _die("no passphrase provided" +
@@ -358,7 +360,7 @@ def _stage_contact(store_db: Path, rec: dict):
 
 def _save_messages_on(args) -> bool:
     """Whether to persist message bodies for `retalk history`. Off by default --
-    retalk keeps no message log unless you opt in, either with --save-messages or
+    retalk keeps no message log unless you opt in, either with --save or
     by setting RETALK_SAVE_MESSAGE to a truthy value (1/true/t/yes/y/on). The flag
     forces it on; otherwise the env var decides (anything else, including
     false/no/n/f or unset, means off)."""
@@ -391,7 +393,7 @@ def _ensure_messages(store_db: Path):
 
 
 def _save_message(store_db: Path, u, rec: dict):
-    """Persist one INCOMING chat message (`receive --save-messages`) with its body
+    """Persist one INCOMING chat message (`receive --save`) with its body
     sealed at rest by the identity's key (see User.encrypt_at_rest)."""
     _ensure_messages(store_db)
     sender = rec.get("from") or ""
@@ -404,7 +406,7 @@ def _save_message(store_db: Path, u, rec: dict):
 
 
 def _save_sent(store_db: Path, u, msg_id: str, to_fp: str, text: str):
-    """Persist one OUTGOING chat message (`send --save-messages`), body sealed at
+    """Persist one OUTGOING chat message (`send --save`), body sealed at
     rest, so `history` shows both sides of the conversation."""
     _ensure_messages(store_db)
     _store_sql(store_db,
@@ -558,7 +560,7 @@ def cmd_init(args):
                 "\n⚠ NOT registered: no relay is configured, so your keys were "
                 "not published\n"
                 "  and peers cannot message you. Set a relay, then register:\n"
-                "    retalk config --relay <url>\n"
+                "    retalk config --relay \"<url>\"\n"
                 f"    {reg}", "1;31"), file=sys.stderr)
 
     home = str(Path.home())
@@ -574,7 +576,7 @@ def cmd_init(args):
     print(f"Path:        {shown}", file=err)
     print(f"Fingerprint: {u.fingerprint()}", file=err)
     print("Relay:       "
-          + (server or "(none — set one with: retalk config --relay <url>)"),
+          + (server or "(none — set one with: retalk config --relay \"<url>\")"),
           file=err)
     # Print BOTH onboarding snippets, labeled, so you can pick the right one:
     #   - invite: you are inviting a peer who is NOT on retalk yet
@@ -598,6 +600,45 @@ def cmd_config(args):
             cfg.pop("relay", None)             # --relay "" clears it
         _write_config(cfg)
     print(json.dumps(cfg, indent=2))
+
+
+def _shq(s: str) -> str:
+    """Single-quote `s` for the shell (safe inside eval'd export lines)."""
+    return "'" + s.replace("'", "'\"'\"'") + "'"
+
+
+def cmd_auth(args):
+    """Select a user (+ passphrase) for the current terminal session: verify
+    the credentials actually unlock the identity, then print the export lines.
+    A child process cannot modify its parent shell, so the caller applies them
+    with:  eval "$(retalk auth USER ...)"  """
+    user = args.user or args.auth_user or os.environ.get("RETALK_USER")
+    if not user:
+        _die("auth needs a user: retalk auth USER, or -u USER")
+    secret = (args.passphrase or args.auth_passphrase
+              or os.environ.get("RETALK_PASSPHRASE"))
+    d = _data_home() / user
+    store_db = d / STORE_FILE
+    if not store_db.exists():
+        _die(f"no identity at {d} — create one with `retalk init -u {user}`")
+    disabled = _meta(store_db, "no_passphrase") == "1"
+    if not disabled and not secret:
+        _die(f"'{user}' is passphrase-protected: a passphrase is required —\n"
+             f"  retalk auth {user} \"<YOUR-PASSPHRASE>\"")
+    try:  # prove the credentials unlock the identity before exporting anything
+        u = User("", NO_PASSPHRASE if disabled else secret, store=str(store_db))
+    except Exception:
+        _die(f"could not unlock '{user}' (wrong passphrase?)")
+    print(f"export RETALK_USER={_shq(user)}")
+    if not disabled and secret:
+        print(f"export RETALK_PASSPHRASE={_shq(secret)}")
+    note = (" — no passphrase needed for this identity" if disabled else "")
+    print(_style(f"✓ authenticated as {user} ({u.fingerprint()}){note}",
+                 "1;32"), file=sys.stderr)
+    if sys.stdout.isatty():   # printed, not eval'd: show how to apply it
+        ran = "retalk " + " ".join(sys.argv[1:])
+        print(f'to apply it to this shell, run:  eval "$({ran})"',
+              file=sys.stderr)
 
 
 def _self_card(u, as_name):
@@ -631,16 +672,20 @@ def _invite_message(u, as_name):
     you. `#` comments + commands, colored like bash in a terminal."""
     c = _self_card(u, as_name)
     name = c["name"] or "me"
-    relay = c.get("relay") or "<relay-url>"
+    relay = c.get("relay") or '"<relay-url>"'   # quoted: <> would redirect in a shell
+    # NOTE: keep every command line comment-free and every comment on its own
+    # line with no ' ( ) ; -- stock macOS zsh has interactive comments OFF, so
+    # a trailing # becomes real arguments and an apostrophe swallows the paste.
     return _bash_block([
-        "# Let's talk over retalk, a CLI-based messaging",
-        "# 1. Install retalk (if not installed yet):",
-        "pip install -U retalk               # or: uv add retalk",
-        "# 2. Create your identity (pick any name; init also prints a reply to send me):",
-        f"retalk init --relay {relay} --passphrase <PRIVATE-PASSPHRASE> # -u <your-username>",
-        "# 3. Add me as a contact (specify your username for user-specific contact):",
-        f"retalk add {c['fingerprint']} --peer {name} --verify # -u <your-username>",
-        "# 4. Send me the 'reply' block that step 2 printed, so I can add you back",
+        "# Message me over retalk, an end-to-end-encrypted messaging CLI.",
+        "# 1. Install retalk if not installed yet -- or: uv tool install retalk",
+        "pip install -U retalk",
+        "# 2. Create your identity. init also prints a reply block to send me.",
+        "#    To name the identity, add: -u <your-username>",
+        f"retalk init --relay {relay} --passphrase \"<PRIVATE-PASSPHRASE>\"",
+        "# 3. Add me as a contact. For a user-specific contact, add: -u <your-username>",
+        f"retalk add {c['fingerprint']} --peer {name} --verify",
+        "# 4. Send me the reply block that step 2 printed, so I can add you back",
     ])
 
 
@@ -652,8 +697,8 @@ def _invite_reply(u, as_name):
     name = c["name"] or "me"
     return _bash_block([
         "# Got your invite for retalk.",
-        "# Add me back (specify your username for user-specific contact):",
-        f"retalk add {c['fingerprint']} --peer {name} --verify # --user <your-name>",
+        "# Add me back. For a user-specific contact, add: --user <your-name>",
+        f"retalk add {c['fingerprint']} --peer {name} --verify",
         "# Then we can message each other.",
     ])
 def _latest_identity() -> Path | None:
@@ -837,6 +882,11 @@ def _record_keys(args, target, fp, label):
     name = label or fp
     user_sel = bool(getattr(args, "dir", None) or getattr(args, "user", None)
                     or os.environ.get("RETALK_USER"))
+    # remember how the USER selected the identity — the relay-fetch branch may
+    # mutate args.dir to an auto-picked signer, which must not leak into the
+    # follow-up snippet below
+    orig_dir = getattr(args, "dir", None)
+    orig_user = getattr(args, "user", None) or os.environ.get("RETALK_USER")
     signed_by = None                            # the identity that signed a fetch
     ik_arg, sk_arg = getattr(args, "identity_key", None), getattr(args, "signing_key", None)
     if ik_arg or sk_arg:
@@ -886,6 +936,28 @@ def _record_keys(args, target, fp, label):
     print(f"Saved to:    {where}", file=err)
     if signed_by:
         print(f"Signed by:   {signed_by}", file=err)
+    # follow with a copy-paste block for actually talking to them. Command
+    # lines stay comment-free: stock macOS zsh has interactive comments OFF,
+    # so a trailing # would turn into real arguments.
+    ref = label or fp
+    sel = f" --dir {orig_dir}" if orig_dir else ""
+    lines = ["# message them:"]
+    if not sel:
+        lines.append("# RETALK_USER picks the identity that sends:")
+        lines.append(f"export RETALK_USER={orig_user}" if orig_user
+                     else 'export RETALK_USER="<your-username>"')
+    if not os.environ.get("RETALK_PASSPHRASE"):
+        lines += ["# and its passphrase, if it has one:",
+                  'export RETALK_PASSPHRASE="<YOUR-PASSPHRASE>"']
+    lines += [
+        f'retalk send --peer {ref} "hello"',
+        f"retalk receive --peer {ref} --follow",
+    ]
+    if sel:
+        lines[-2] += sel
+        lines[-1] += sel
+    lines.append("# receive --follow reads replies live -- ctrl-c to stop")
+    print("\n" + _bash_block(lines), file=err)
 
 
 def cmd_verify(args):
@@ -1156,6 +1228,97 @@ def cmd_history(args):
                           "text": u.decrypt_at_rest(body)}), flush=True)
 
 
+def cmd_show(args):
+    """Render the saved conversation between USER and PEER as a chat: time +
+    username per message, both directions interleaved. Reads only what was
+    saved (send/receive --save); --follow keeps it live by polling the relay
+    for PEER's new mail (saving it like `receive --save`) and rendering any
+    new saved rows — including ones another terminal writes."""
+    args.user = args.show_user            # the positional selects the identity
+    args.dir = None
+    store_db = _resolve_store(args) / STORE_FILE
+    _ensure_messages(store_db)
+    peers = _effective_peers(store_db)
+    fp = _resolve_peer(peers, args.show_peer)
+    if fp is None:
+        _die(f"no saved contact '{args.show_peer}' — add them first with "
+             "`retalk add <fingerprint>`")
+    nm = peers[fp][0] if fp in peers else None
+    peer_label = nm or (args.show_peer if not ID_RE.match(args.show_peer)
+                        else fp[:12] + "…")
+    me = _meta(store_db, "name") or args.show_user
+    # --follow talks to the relay; a plain show never does
+    u = _open_user(args, need_server=bool(args.follow), banner=False)
+
+    tty = sys.stdout.isatty()
+
+    def st(t, c):     # like _style, but for stdout (where the chat renders)
+        return f"\033[{c}m{t}\033[0m" if tty else t
+
+    # chat layout: peer bubbles on the left, yours on the right — like any
+    # messenger. Colors and italics only on a TTY; the layout itself always.
+    width = min(shutil.get_terminal_size((80, 24)).columns, 100)
+    bubble = max(24, min(56, width - 16))
+
+    title = f" 💬 {st(me, '1;36')} ⇄ {st(peer_label, '1;33')} "
+    bare = f" 💬 {me} ⇄ {peer_label} "
+    side = max(2, (width - len(bare) - 1) // 2)     # emoji ≈ 2 columns
+    print(st("─" * side, "2") + title + st("─" * side, "2"))
+    print(st(fp.center(width), "2"))
+    state = {"rowid": 0, "day": None}
+
+    def render_new():
+        rows = _store_sql(store_db,
+                          "SELECT rowid, direction, body, ts FROM messages "
+                          "WHERE peer_fp=? AND rowid>? ORDER BY ts, rowid",
+                          fp, state["rowid"])
+        for rowid, direction, body, ts in rows:
+            state["rowid"] = max(state["rowid"], rowid)
+            t = time.localtime(ts or 0)
+            day = time.strftime("%Y-%m-%d", t)
+            if day != state["day"]:
+                print("\n" + st(f"·· 📅 {day} ··".center(width), "2"))
+                state["day"] = day
+            hhmm = time.strftime("%H:%M", t)
+            lines = textwrap.wrap(u.decrypt_at_rest(body), bubble) or [""]
+            print()
+            if direction == "out":       # you: right-aligned, cyan
+                head = f"{hhmm} · {me} 🟢"
+                pad = " " * max(0, width - len(head) - 1)
+                print(pad + st(hhmm, "2;3") + st(" · ", "2")
+                      + st(me, "1;36") + " 🟢")
+                for ln in lines:
+                    print(" " * max(0, width - len(ln)) + st(ln, "36"))
+            else:                        # peer: left-aligned, yellow
+                print("🔵 " + st(peer_label, "1;33") + st(" · ", "2")
+                      + st(hhmm, "2;3"))
+                for ln in lines:
+                    print("   " + ln)
+            sys.stdout.flush()
+
+    render_new()
+    if not getattr(args, "follow", False):
+        if state["rowid"] == 0:
+            print(st("\n(no saved messages — save them with `--save` on send/"
+                     "receive, or RETALK_SAVE_MESSAGE=1)", "2"))
+        return
+    print(st("\n· listening for new messages — ctrl-c to stop ·"
+             .center(width), "2;3"), file=sys.stderr)
+    try:
+        last_sync = time.monotonic()
+        while True:
+            for m in u.receive(fp):       # fetch PEER's new mail, keep a copy
+                if "text" in m:
+                    _save_message(store_db, u, m)
+            render_new()
+            time.sleep(2)
+            if time.monotonic() - last_sync > 60:
+                u.sync(resend=False)      # key upkeep, like receive --follow
+                last_sync = time.monotonic()
+    except KeyboardInterrupt:
+        pass
+
+
 def cmd_sync(args):
     u = _open_user(args)
     summary = u.sync()                # full pass: keys + flush outbox
@@ -1250,18 +1413,20 @@ output conventions:
   refusal (no identity, wrong passphrase, unknown peer).
 
 quickstart (your peer runs the same steps on their machine):
-  retalk init --user alice --passphrase <YOUR-PASSPHRASE>
-  export RETALK_USER=alice                     # which user to act as
-  export RETALK_PASSPHRASE=<YOUR-PASSPHRASE>   # unlocks your keys (or pass -u/-p per command)
-  retalk add <bobs-user-id> --peer bob --verify
+  retalk init --user alice --passphrase "<YOUR-PASSPHRASE>"
+  # exports: which user to act as + its passphrase -- or pass -u/-p per command
+  export RETALK_USER=alice
+  export RETALK_PASSPHRASE="<YOUR-PASSPHRASE>"
+  retalk add "<bobs-user-id>" --peer bob --verify
   retalk send --peer bob "hello"
-  retalk receive --peer bob --follow           # drop --follow to read just once
-  # with no --relay, init uses the public test relay (no uptime guarantee) --
-  # use your own via `init --relay URL` or `retalk config --relay URL`
+  # drop --follow to read just once
+  retalk receive --peer bob --follow
+  # with no --relay, init uses the public test relay -- no uptime guarantee.
+  # use your own via init --relay URL, or: retalk config --relay URL
 
 run `retalk <command> --help` for the full story of each command.""")
     sub = p.add_subparsers(dest="command", required=True,
-                           metavar="{init,register,id,add,contacts,share,import,verify,block,sync,send,receive,history,config}")
+                           metavar="{init,register,auth,id,add,contacts,share,import,verify,block,sync,send,receive,history,show,config}")
 
     sp = sub.add_parser(
         "init", parents=[common], formatter_class=raw,
@@ -1670,7 +1835,7 @@ examples:
                     help="recipient: a saved peer name (from `retalk add`) "
                          "or a raw 32-hex user id")
     sp.add_argument("text", help="the message plaintext (quote it)")
-    sp.add_argument("--save-messages", action="store_true",
+    sp.add_argument("--save", dest="save_messages", action="store_true",
                     help="also keep a sealed local copy of THIS sent message, so "
                          "`retalk history` shows both sides of the conversation. "
                          "Off by default; RETALK_SAVE_MESSAGE=1 turns it on for "
@@ -1742,7 +1907,7 @@ Contacts peers share are also saved to the contact-inbox (see
                     help="do not save contacts that peers share with you "
                          "(`retalk share`) to the contact-inbox; by default they "
                          "are staged there for `retalk import --inbox`")
-    sp.add_argument("--save-messages", action="store_true",
+    sp.add_argument("--save", dest="save_messages", action="store_true",
                     help="also keep a local copy of each RECEIVED chat message, "
                          "sealed with this identity's key, for `retalk history`. "
                          "Off by default (retalk keeps no message log otherwise); "
@@ -1753,10 +1918,10 @@ Contacts peers share are also saved to the contact-inbox (see
 
     sp = sub.add_parser(
         "history", parents=[common], formatter_class=raw,
-        help="replay messages saved by `send`/`receive --save-messages`",
+        help="replay messages saved by `send`/`receive --save`",
         description="""\
-Print the messages this identity has saved (with `send --save-messages` and
-`receive --save-messages`), oldest first, as one JSON object per line (NDJSON):
+Print the messages this identity has saved (with `send --save` and
+`receive --save`), oldest first, as one JSON object per line (NDJSON):
 the Message shape `receive` emits plus a `direction` field --
 {"id", "from", "name", "direction", "text"}, where direction is "in" (received)
 or "out" (sent). Both sides of a conversation are interleaved by time. Each body
@@ -1764,7 +1929,7 @@ is decrypted from its at-rest seal on the way out, so this needs the identity's
 passphrase but never the relay.
 
 retalk keeps no message log unless you opt in -- per command with
---save-messages, or for every command with RETALK_SAVE_MESSAGE=1. With `--peer`,
+--save, or for every command with RETALK_SAVE_MESSAGE=1. With `--peer`,
 only the conversation with that peer is shown (both directions).""",
         epilog="""\
 examples:
@@ -1793,6 +1958,59 @@ examples:
                     help="set the owner-wide default relay URL; pass an empty "
                          "string to clear it")
     sp.set_defaults(fn=cmd_config)
+
+    sp = sub.add_parser(
+        "auth", parents=[common], formatter_class=raw,
+        help="select the user (and passphrase) for this terminal session",
+        description="""\
+Set up the current terminal session to act as USER — the one-command
+equivalent of exporting RETALK_USER and RETALK_PASSPHRASE by hand. It first
+verifies the credentials actually unlock the identity, then prints the export
+lines. A command cannot modify the shell that ran it, so apply them with eval:
+
+  eval "$(retalk auth alice "<YOUR-PASSPHRASE>")"
+
+PASSPHRASE is optional: for an identity created with --no-passphrase it is
+not needed (auth says so); for a passphrase-protected identity omitting it is
+a clear error. Flags win over positionals (-u USER, -p PASSPHRASE).""",
+        epilog="""\
+examples:
+  eval "$(retalk auth alice "<YOUR-PASSPHRASE>")"
+  eval "$(retalk auth bot)"
+  # afterwards, no -u or -p needed:
+  retalk send --peer bob "hello"
+  retalk receive --peer bob --follow""")
+    sp.add_argument("auth_user", metavar="USER", nargs="?",
+                    help="the user to act as (identity under ~/.retalk/USER/)")
+    sp.add_argument("auth_passphrase", metavar="PASSPHRASE", nargs="?",
+                    help="its passphrase; omit for a --no-passphrase identity")
+    sp.set_defaults(fn=cmd_auth)
+
+    sp = sub.add_parser(
+        "show", parents=[common], formatter_class=raw,
+        help="render the saved conversation with a peer as a chat",
+        description="""\
+Render the conversation between USER and PEER as a chat — a time and username
+per message, both directions interleaved, dated. It reads only the messages
+that were SAVED (send/receive --save, or RETALK_SAVE_MESSAGE=1): retalk keeps
+no log unless you opt in, so `show` displays exactly what was kept.
+
+With --follow the chat stays live: it polls the relay for PEER's new mail
+(saving each message like `receive --save` does) and renders new saved rows —
+including ones another terminal writes — until ctrl-c. A plain `show` never
+contacts the relay.""",
+        epilog="""\
+examples:
+  retalk show alice bob
+  retalk show alice bob --follow""")
+    sp.add_argument("show_user", metavar="USER",
+                    help="the identity whose saved conversation to render")
+    sp.add_argument("show_peer", metavar="PEER",
+                    help="the other party: a saved peer name or 32-hex id")
+    sp.add_argument("--follow", action="store_true",
+                    help="keep polling for new messages and render them as "
+                         "they arrive (ctrl-c to stop)")
+    sp.set_defaults(fn=cmd_show)
 
     args = p.parse_args()
     try:

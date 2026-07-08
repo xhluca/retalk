@@ -30,6 +30,7 @@ class TestAddByFingerprint(unittest.TestCase):
             Path(cfg).write_text("{}")          # hermetic: no default relay
         env = dict(os.environ, RETALK_PASSPHRASE="x", RETALK_HOME=home)
         env.pop("RETALK_USER", None)
+        env.pop("RETALK_SAVE_MESSAGE", None)
         env.pop("RETALK_RELAY", None)
         r = subprocess.run([sys.executable, "-m", "retalk.cli", *cmd],
                            capture_output=True, text=True, env=env)

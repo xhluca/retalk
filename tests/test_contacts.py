@@ -60,6 +60,7 @@ class TestContacts(unittest.TestCase):
                    RETALK_PASSPHRASE=secret,
                    RETALK_HOME=os.path.join(self.tmp, "store"))
         env.pop("RETALK_USER", None)
+        env.pop("RETALK_SAVE_MESSAGE", None)
         _h = os.path.join(self.tmp, "store"); os.makedirs(_h, exist_ok=True)
         _c = os.path.join(_h, "config.json")
         if not os.path.exists(_c): open(_c, "w").write("{}")  # hermetic: no default relay
