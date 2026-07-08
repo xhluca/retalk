@@ -30,6 +30,7 @@ import json
 import os
 import secrets
 import sqlite3
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -119,7 +120,22 @@ class User:
 
     def _init_store(self):
         self._exec("CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT)")
-        self._exec("CREATE TABLE IF NOT EXISTS sessions(peer TEXT PRIMARY KEY, blob TEXT)")
+        # One row per (peer, olm session): a pair can hold SEVERAL sessions —
+        # when both sides initiate at once each side makes its own — and
+        # decrypt tries each. A single-session-per-peer store overwrites its
+        # own session with the inbound one, both sides end up holding only the
+        # other's, and every later message fails MAC ("wedged").
+        self._exec("CREATE TABLE IF NOT EXISTS sessions("
+                   "peer TEXT, sid TEXT, blob TEXT, used REAL, "
+                   "PRIMARY KEY(peer, sid))")
+        cols = [r[1] for r in self._fetchall("PRAGMA table_info(sessions)")]
+        if "sid" not in cols:              # migrate a one-session-per-peer table
+            self._exec("ALTER TABLE sessions RENAME TO _sessions_old")
+            self._exec("CREATE TABLE sessions(peer TEXT, sid TEXT, blob TEXT, "
+                       "used REAL, PRIMARY KEY(peer, sid))")
+            self._exec("INSERT INTO sessions(peer, sid, blob, used) "
+                       "SELECT peer, '', blob, 0 FROM _sessions_old")
+            self._exec("DROP TABLE _sessions_old")
         # sent-but-unacknowledged ciphertext, for re-delivery (server loss/migration).
         # A row is deleted on an ack, or when a resend comes back refused (the
         # recipient negative-acked it on the relay).
@@ -169,14 +185,28 @@ class User:
     def _save_account(self, acct: v.Account):
         self._meta_set("account", acct.pickle(self._store_key))
 
-    def _load_session(self, peer: str) -> v.Session | None:
-        blob = self._fetchone("SELECT blob FROM sessions WHERE peer=?", peer)
-        return v.Session.from_pickle(blob, self._store_key) if blob else None
+    def _load_sessions(self, peer: str) -> list:
+        """Every Olm session held with `peer`, most recently used first.
+        Decrypt tries each; send uses the freshest. A legacy row from the
+        one-session-per-peer schema (sid='') is re-keyed by its real session
+        id on first load."""
+        out = []
+        for sid, blob in self._fetchall(
+                "SELECT sid, blob FROM sessions WHERE peer=? "
+                "ORDER BY used DESC", peer):
+            s = v.Session.from_pickle(blob, self._store_key)
+            if not sid:
+                self._exec("DELETE FROM sessions WHERE peer=? AND sid=''", peer)
+                self._save_session(peer, s)
+            out.append(s)
+        return out
 
     def _save_session(self, peer: str, session: v.Session):
-        self._exec("INSERT INTO sessions(peer, blob) VALUES(?,?) "
-                   "ON CONFLICT(peer) DO UPDATE SET blob=excluded.blob",
-                   peer, session.pickle(self._store_key))
+        self._exec("INSERT INTO sessions(peer, sid, blob, used) VALUES(?,?,?,?) "
+                   "ON CONFLICT(peer, sid) DO UPDATE SET "
+                   "blob=excluded.blob, used=excluded.used",
+                   peer, session.session_id,
+                   session.pickle(self._store_key), time.time())
 
     # ---------- signed server RPC ----------
 
@@ -402,7 +432,8 @@ class User:
             return mid
 
     def _send_envelope(self, to: str, payload: dict, record_outbox: bool):
-        session = self._load_session(to)
+        sessions = self._load_sessions(to)
+        session = sessions[0] if sessions else None   # the freshest one
         if session is None:
             claimed = self._call("claim_key", {"peer": to})
             self._verify_identity(to, claimed["identity_key"],
@@ -443,6 +474,11 @@ class User:
                 # before dropping it from the outbox so we stop resending it
                 if self._verify_nack(peer, body, res.get("sig")):
                     self._exec("DELETE FROM outbox WHERE id=?", oid)
+                    # The peer refused ciphertext we produced: either they
+                    # block us, or they could not decrypt it (wedged/crossed
+                    # sessions). Drop our sessions with them so the next send
+                    # starts a fresh one instead of re-wedging.
+                    self._exec("DELETE FROM sessions WHERE peer=?", peer)
                 continue
             sent += 1
         return sent
@@ -513,8 +549,10 @@ class User:
                 try:
                     if m["mtype"] == 0:
                         prekey = anymsg.to_pre_key()
-                        session = self._load_session(sender)
-                        if session is not None and session.session_matches(prekey):
+                        session = next(
+                            (s for s in self._load_sessions(sender)
+                             if s.session_matches(prekey)), None)
+                        if session is not None:
                             plaintext = session.decrypt(anymsg)
                         else:
                             keys = self._call("get_keys", {"peer": sender})
@@ -525,14 +563,27 @@ class User:
                                 v.Curve25519PublicKey.from_base64(keys["identity_key"]),
                                 prekey,
                             )
-                            # create_inbound_session consumed a one-time key
+                            # create_inbound_session consumed a one-time key.
+                            # The new session is ADDED next to any existing
+                            # ones (never overwrites): both sides may have
+                            # initiated at once, and the older session must
+                            # survive for the mail still in flight on it.
                             self._save_account(acct)
                     else:
-                        session = self._load_session(sender)
-                        if session is None:
+                        # a normal message names no session: try each stored
+                        # one for this sender (there can be several)
+                        session = plaintext = None
+                        for s in self._load_sessions(sender):
+                            try:
+                                plaintext = s.decrypt(anymsg)
+                                session = s
+                                break
+                            except Exception:
+                                continue
+                        if plaintext is None:
                             raise RuntimeError(
-                                f"normal message from {sender} but no stored session")
-                        plaintext = session.decrypt(anymsg)
+                                f"message from {sender} matches none of the "
+                                "stored sessions")
                 except PinMismatchError:
                     raise
                 except Exception:
@@ -541,10 +592,22 @@ class User:
                     # re-ack it (the first ack may have been lost) and drop it
                     dup_id = self._fetchone(
                         "SELECT msg_id FROM processed WHERE hash=?", body_hash)
-                    if dup_id is None:
-                        raise
-                    self._send_envelope(
-                        sender, {"id": dup_id, "kind": "ack"}, record_outbox=False)
+                    if dup_id is not None:
+                        self._send_envelope(
+                            sender, {"id": dup_id, "kind": "ack"},
+                            record_outbox=False)
+                        continue
+                    # Undecryptable and not a resend of anything we processed:
+                    # ciphertext we can never read (wedged pre-fix sessions, a
+                    # reset store, or tampering). Refuse it with a signed nack
+                    # — the sender drops it AND resets their sessions with us,
+                    # so their next send starts fresh — and keep receiving
+                    # instead of crashing the whole poll.
+                    self._send_nack(body_hash)
+                    print(f"[retalk] refused an undecryptable message from "
+                          f"{self.names.get(sender) or sender} (it matches no "
+                          "stored session); the sender was told to start a "
+                          "fresh session", file=sys.stderr)
                     continue
                 self._save_session(sender, session)
                 data = json.loads(plaintext.decode())

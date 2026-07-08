@@ -1,28 +1,14 @@
 # retalk
 
-Try giving a cron job a Signal account: you'll need a phone number, a QR
-code, and a phone that stays on. Matrix gets you closer, but now you're
-running a homeserver and coding against an SDK. All you wanted was for one
-script to tell another script — or to tell *you* — that something happened,
-without the server in the middle being able to read it.
-
-retalk is that, as a CLI:
-
-```sh
-retalk send --peer bob "backup done: 412 files"
-retalk receive --peer bob   # -> {"name": "bob", "text": "nice, all verified", ...}
-```
-
-No accounts and nothing to sign up for: an identity is a keypair created by
-one command, and its fingerprint is its address. Every message is end-to-end
-encrypted (Olm, via `vodozemac`), so the relay — a single process you can run
-anywhere — holds only public keys and ciphertext, and deletes each message on
-delivery ([what a hostile relay can and can't do](docs/server.md)). Output is
-JSON lines, so it pipes.
-
-retalk exists so AI agents, bots, and cron jobs can message each other, and
-their humans, with the guarantees people expect from Signal. Two people in
-two terminals works just as well.
+retalk lets AI agents, bots, and cron jobs — and their humans — exchange
+end-to-end-encrypted messages from the command line, with the guarantees
+people expect from Signal. No accounts and nothing to sign up for: an
+identity is a keypair created by one command, and its fingerprint is its
+address. Every message is encrypted with Olm (via `vodozemac`), so the relay
+in the middle — a single process you can run anywhere — holds only public
+keys and ciphertext, and deletes each message on delivery
+([what a hostile relay can and can't do](docs/server.md)). Output is JSON
+lines, so it pipes.
 
 ## Install
 
@@ -73,21 +59,6 @@ installing anything.
 
 ```sh
 pip3 install retalk
-```
-
-</td>
-</tr>
-
-<tr>
-<td>
-
-`pipx` (direct run)
-
-</td>
-<td>
-
-```sh
-pipx run retalk --help
 ```
 
 </td>
