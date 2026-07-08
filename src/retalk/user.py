@@ -30,6 +30,7 @@ import json
 import os
 import secrets
 import sqlite3
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -119,7 +120,17 @@ class User:
 
     def _init_store(self):
         self._exec("CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT)")
-        self._exec("CREATE TABLE IF NOT EXISTS sessions(peer TEXT PRIMARY KEY, blob TEXT)")
+        # MULTIPLE Olm sessions per peer. With a single session per peer,
+        # simultaneous first contact (both sides send a pre-key hello at once)
+        # left each side holding only the session built from the OTHER's
+        # pre-key -- crossed ratchets, and every later message failed its MAC.
+        # Keeping every session and trying each on decrypt makes that case
+        # converge instead of deadlock. `mru` orders them (most recently
+        # used first: the session that last worked is the one we send on).
+        self._migrate_single_session_table()   # BEFORE create: upgrades the old shape
+        self._exec("CREATE TABLE IF NOT EXISTS sessions("
+                   "peer TEXT, session_id TEXT, blob TEXT, mru REAL, "
+                   "PRIMARY KEY(peer, session_id))")
         # sent-but-unacknowledged ciphertext, for re-delivery (server loss/migration).
         # A row is deleted on an ack, or when a resend comes back refused (the
         # recipient negative-acked it on the relay).
@@ -169,14 +180,50 @@ class User:
     def _save_account(self, acct: v.Account):
         self._meta_set("account", acct.pickle(self._store_key))
 
-    def _load_session(self, peer: str) -> v.Session | None:
-        blob = self._fetchone("SELECT blob FROM sessions WHERE peer=?", peer)
-        return v.Session.from_pickle(blob, self._store_key) if blob else None
+    def _migrate_single_session_table(self):
+        """Upgrade a pre-multi-session store: sessions(peer PRIMARY KEY, blob)
+        -> sessions(peer, session_id, blob, mru). Atomic: the old table is
+        only dropped in the same transaction that fills the new one."""
+        conn = sqlite3.connect(self._store_path)
+        try:
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(sessions)")]
+            if cols != ["peer", "blob"]:
+                return                      # missing (fresh) or already new shape
+            rows = conn.execute("SELECT peer, blob FROM sessions").fetchall()
+            with conn:
+                conn.execute("ALTER TABLE sessions RENAME TO sessions_v1")
+                conn.execute("CREATE TABLE sessions("
+                             "peer TEXT, session_id TEXT, blob TEXT, mru REAL, "
+                             "PRIMARY KEY(peer, session_id))")
+                for peer, blob in rows:
+                    sid = v.Session.from_pickle(blob, self._store_key).session_id
+                    conn.execute("INSERT INTO sessions VALUES(?,?,?,?)",
+                                 (peer, sid, blob, time.time()))
+                conn.execute("DROP TABLE sessions_v1")
+        finally:
+            conn.close()
+
+    MAX_SESSIONS_PER_PEER = 5   # bound growth; old crossed sessions age out
+
+    def _load_sessions(self, peer: str) -> list[v.Session]:
+        """Every stored session with this peer, most recently used first."""
+        rows = self._fetchall(
+            "SELECT blob FROM sessions WHERE peer=? ORDER BY mru DESC", peer)
+        return [v.Session.from_pickle(r[0], self._store_key) for r in rows]
 
     def _save_session(self, peer: str, session: v.Session):
-        self._exec("INSERT INTO sessions(peer, blob) VALUES(?,?) "
-                   "ON CONFLICT(peer) DO UPDATE SET blob=excluded.blob",
-                   peer, session.pickle(self._store_key))
+        """Persist a session under (peer, session_id) and mark it most
+        recently used -- the next send to this peer rides it. Prunes the
+        least recently used sessions beyond MAX_SESSIONS_PER_PEER."""
+        self._exec("INSERT INTO sessions(peer, session_id, blob, mru) "
+                   "VALUES(?,?,?,?) ON CONFLICT(peer, session_id) "
+                   "DO UPDATE SET blob=excluded.blob, mru=excluded.mru",
+                   peer, session.session_id,
+                   session.pickle(self._store_key), time.time())
+        self._exec("DELETE FROM sessions WHERE peer=? AND session_id NOT IN ("
+                   "SELECT session_id FROM sessions WHERE peer=? "
+                   "ORDER BY mru DESC LIMIT ?)",
+                   peer, peer, self.MAX_SESSIONS_PER_PEER)
 
     # ---------- signed server RPC ----------
 
@@ -402,7 +449,8 @@ class User:
             return mid
 
     def _send_envelope(self, to: str, payload: dict, record_outbox: bool):
-        session = self._load_session(to)
+        sessions = self._load_sessions(to)
+        session = sessions[0] if sessions else None   # most recently used
         if session is None:
             claimed = self._call("claim_key", {"peer": to})
             self._verify_identity(to, claimed["identity_key"],
@@ -513,8 +561,12 @@ class User:
                 try:
                     if m["mtype"] == 0:
                         prekey = anymsg.to_pre_key()
-                        session = self._load_session(sender)
-                        if session is not None and session.session_matches(prekey):
+                        # try every stored session; simultaneous first contact
+                        # legitimately leaves several per peer
+                        session = next(
+                            (s for s in self._load_sessions(sender)
+                             if s.session_matches(prekey)), None)
+                        if session is not None:
                             plaintext = session.decrypt(anymsg)
                         else:
                             keys = self._call("get_keys", {"peer": sender})
@@ -528,23 +580,43 @@ class User:
                             # create_inbound_session consumed a one-time key
                             self._save_account(acct)
                     else:
-                        session = self._load_session(sender)
+                        # normal message: try each session, most recently used
+                        # first (a failed decrypt does not advance a ratchet)
+                        session = plaintext = None
+                        for cand in self._load_sessions(sender):
+                            try:
+                                plaintext = cand.decrypt(anymsg)
+                                session = cand
+                                break
+                            except Exception:
+                                continue
                         if session is None:
                             raise RuntimeError(
-                                f"normal message from {sender} but no stored session")
-                        plaintext = session.decrypt(anymsg)
+                                f"message from {sender} matched no stored session")
                 except PinMismatchError:
                     raise
-                except Exception:
+                except Exception as e:
                     # the ratchet refuses re-used message keys, so a re-sent
                     # copy of something we already decrypted fails here:
                     # re-ack it (the first ack may have been lost) and drop it
                     dup_id = self._fetchone(
                         "SELECT msg_id FROM processed WHERE hash=?", body_hash)
-                    if dup_id is None:
-                        raise
-                    self._send_envelope(
-                        sender, {"id": dup_id, "kind": "ack"}, record_outbox=False)
+                    if dup_id is not None:
+                        self._send_envelope(
+                            sender, {"id": dup_id, "kind": "ack"},
+                            record_outbox=False)
+                        continue
+                    # Undecryptable and NOT a known duplicate (e.g. sent under
+                    # a session lost to a crash or an old crossed-session bug).
+                    # Raising here poisoned the whole batch: the sender resent
+                    # the same ciphertext forever and every later message in
+                    # this inbox pass was lost. Instead: negative-ack it (the
+                    # relay then refuses resends, so the sender's outbox drops
+                    # it), warn, and keep going.
+                    print(f"[retalk] dropping undecryptable message from "
+                          f"{sender} ({type(e).__name__}: {e}) — nacked so "
+                          "the sender stops resending it", file=sys.stderr)
+                    self._send_nack(body_hash)
                     continue
                 self._save_session(sender, session)
                 data = json.loads(plaintext.decode())
