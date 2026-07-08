@@ -253,6 +253,7 @@ class TestSyncCLI(unittest.TestCase):
                    RETALK_RELAY=f"http://127.0.0.1:{CLI_PORT}",
                    RETALK_HOME=os.path.join(self.tmp, "store"))
         env.pop("RETALK_USER", None)
+        env.pop("RETALK_SAVE_MESSAGE", None)
         _h = os.path.join(self.tmp, "store"); os.makedirs(_h, exist_ok=True)
         _c = os.path.join(_h, "config.json")
         if not os.path.exists(_c): open(_c, "w").write("{}")  # hermetic: no default relay

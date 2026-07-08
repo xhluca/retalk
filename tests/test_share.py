@@ -68,6 +68,7 @@ class TestShare(unittest.TestCase):
                  RETALK_RELAY=f"http://127.0.0.1:{PORT}",
                  RETALK_HOME=os.path.join(self.tmp, "store"))
         e.pop("RETALK_USER", None)
+        e.pop("RETALK_SAVE_MESSAGE", None)
         if env:
             e.update(env)
         _h = os.path.join(self.tmp, "store"); os.makedirs(_h, exist_ok=True)
@@ -305,7 +306,7 @@ class TestShare(unittest.TestCase):
 
 
     def test_save_messages(self):
-        """receive --save-messages keeps a sealed local copy that `history`
+        """receive --save keeps a sealed local copy that `history`
         replays; without the flag nothing is kept; the body is encrypted at
         rest."""
         with tempfile.TemporaryDirectory() as tmp:
@@ -328,7 +329,7 @@ class TestShare(unittest.TestCase):
                 # 2. with the flag, the message is saved and history replays it
                 #    in the same Message shape `receive` emits
                 self.cli("send", "--peer", bid, "hello bob", "--dir", a)
-                self.cli("receive", "--all", "--save-messages", "--dir", b)
+                self.cli("receive", "--all", "--save", "--dir", b)
                 hist = [json.loads(l) for l in
                         self.cli("history", "--dir", b).stdout.splitlines()]
                 self.assertEqual(len(hist), 1)
@@ -345,19 +346,19 @@ class TestShare(unittest.TestCase):
 
                 # 4. --peer filters; saved messages keep their order
                 self.cli("send", "--peer", bid, "again", "--dir", a)
-                self.cli("receive", "--all", "--save-messages", "--dir", b)
+                self.cli("receive", "--all", "--save", "--dir", b)
                 texts = [json.loads(l)["text"] for l in
                          self.cli("history", "--peer", aid, "--dir", b)
                          .stdout.splitlines()]
                 self.assertEqual(texts, ["hello bob", "again"])
-                print("PASS: receive --save-messages persists sealed copies; "
+                print("PASS: receive --save persists sealed copies; "
                       "history replays them")
             finally:
                 server.terminate()
                 server.wait(timeout=10)
 
     def test_history_both_directions(self):
-        """send + receive --save-messages record both sides; history interleaves
+        """send + receive --save record both sides; history interleaves
         them per conversation, oldest first, each tagged with `direction`."""
         with tempfile.TemporaryDirectory() as tmp:
             self.tmp = tmp
@@ -374,13 +375,13 @@ class TestShare(unittest.TestCase):
 
                 # alice sends two (saving her side); bob saves on receive, replies
                 self.cli("send", "--peer", bid, "hi bob", "--dir", a,
-                         "--save-messages")
+                         "--save")
                 self.cli("send", "--peer", bid, "you there?", "--dir", a,
-                         "--save-messages")
-                self.cli("receive", "--all", "--save-messages", "--dir", b)
+                         "--save")
+                self.cli("receive", "--all", "--save", "--dir", b)
                 self.cli("send", "--peer", aid, "yep", "--dir", b,
-                         "--save-messages")
-                self.cli("receive", "--all", "--save-messages", "--dir", a)
+                         "--save")
+                self.cli("receive", "--all", "--save", "--dir", a)
 
                 # alice's conversation with bob: two out, then bob's reply in
                 ah = [json.loads(l) for l in

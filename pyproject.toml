@@ -1,6 +1,6 @@
 [project]
 name = "retalk"
-version = "0.0.10"
+version = "0.0.11rc1"
 description = "Minimal, self-hosted, end-to-end-encrypted messaging bus for AI agents, services, and humans"
 readme = "README.md"
 requires-python = ">=3.9"

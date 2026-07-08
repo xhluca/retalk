@@ -165,7 +165,7 @@ no passphrase, while an encrypted identity always requires one.
 Then exchange user IDs out-of-band and save your peer:
 
 ```sh
-retalk add <bob-user-id> --peer bob   # an "incomplete" contact: just name + fingerprint
+retalk add "<bob-user-id>" --peer bob   # an "incomplete" contact: just name + fingerprint
 retalk verify bob              # optional: fetch & record "bob"'s keys now
 ```
 
@@ -180,7 +180,7 @@ Common commands (with `RETALK_USER=alice` exported):
 
 ```sh
 retalk id                          # print my user ID
-retalk add <bob-user-id> --peer bob       # save a peer (name + fingerprint)
+retalk add "<bob-user-id>" --peer bob       # save a peer (name + fingerprint)
 retalk verify bob                  # fetch & record "bob"'s keys (optional)
 retalk contacts                    # list saved peers and verified status
 retalk contacts --show bob --json  # print "bob" as a shareable Contact card (JSON)
@@ -190,10 +190,10 @@ retalk import '<card json>'        # save a contact someone shared with you
 retalk import --inbox --list       # contacts peers shared (saved by `receive`)
 retalk import --inbox              # save all of them as peers
 retalk send --peer bob "hello"     # send one encrypted message
-retalk send --peer bob "hi" --save-messages  # keep your side too (opt-in)
+retalk send --peer bob "hi" --save  # keep your side too (opt-in)
 retalk receive --peer bob          # read only messages from "bob"
 retalk receive --peer bob --follow      # keep polling "bob"; maintain keys
-retalk receive --peer bob --save-messages   # also keep a sealed local copy
+retalk receive --peer bob --save   # also keep a sealed local copy
 retalk history --peer bob          # the whole conversation, sent + received
 retalk block eve                   # drop a sender's mail before decryption
 retalk block --remove eve          # stop dropping that sender
@@ -242,7 +242,7 @@ conventions.
 
 ## Command reference
 
-`retalk` has fourteen subcommands. This is the quick reference; run `retalk
+`retalk` has sixteen subcommands. This is the quick reference; run `retalk
 <command> --help` for the full text, and see [STANDARD.md](STANDARD.md) for the
 JSON each one emits. Most commands work entirely on your local store — only the
 ones that touch a mailbox reach the relay.
@@ -259,13 +259,16 @@ ones that touch a mailbox reach the relay.
 | `block` | Drop a sender's mail before decryption; `--remove` to undo, `--list` to view. | no |
 | `sync` | Reconcile keys and resend the outbox against the relay. | yes |
 | `register` | Publish this identity's keys to the relay (make it reachable). | yes |
+| `auth` | Print eval-able exports selecting the user + passphrase for this shell session. | no |
 | `send` | Encrypt and send one message. | yes |
 | `receive` | Fetch, decrypt, and print pending messages. | yes |
 | `history` | Replay saved messages (both sent and received) as a conversation. | no |
+| `show` | Render the saved conversation with a peer as a chat; `--follow` keeps it live. | no³ |
 | `config` | Show or set owner-wide defaults (e.g. the default relay). | no |
 
 ¹ `verify` (and `add --verify`) reaches the relay only when fetching keys; with `--identity-key`/`--signing-key` it stays offline.
 ² best-effort: `init` still succeeds when the relay is unreachable (or with `--no-register`), and the keys publish on first contact.
+³ a plain `show` is offline; `show --follow` polls the relay for new mail.
 
 ### Options every command shares
 
@@ -295,6 +298,22 @@ the new user id. Offline; keys publish automatically on first send/receive.
 - `--card` — print that same Contact card in a **human-readable** form (use `--json` to pipe it to `retalk import`).
 - `--invite-message` — render that card as a copy-paste **invite** for onboarding a peer out-of-band: install retalk, set the relay, and `retalk add` you, plus a prompt to send their id back.
 - `--as NAME` — with `--card`/`--invite-message`, the nickname you suggest the peer save you under (default: your display name).
+
+### Session — `auth`
+
+**`retalk auth USER [PASSPHRASE]`** — select the user (and passphrase) every
+later command in this terminal session acts as: it verifies the credentials
+actually unlock the identity, then prints the `export RETALK_USER=…` (and
+`RETALK_PASSPHRASE=…`) lines. A command cannot modify the shell that ran it,
+so apply them with eval:
+
+```sh
+eval "$(retalk auth alice "<YOUR-PASSPHRASE>")"
+```
+
+`PASSPHRASE` is optional: omitting it on a passphrase-protected identity is a
+clear error, and on a `--no-passphrase` identity auth confirms none is needed.
+Flags win over positionals (`-u USER`, `-p PASSPHRASE`). Entirely offline.
 
 ### Contacts — `add`, `verify`, `contacts`
 
@@ -387,7 +406,7 @@ that doesn't match the peer's fingerprint (or your verified keys) is refused wit
 a `{id, to}` receipt.
 
 - `--peer PEER` — recipient (required): a saved peer name or a raw user id.
-- `--save-messages` — also keep a sealed local copy of *this sent message*, so `history` shows both sides of the conversation. Off by default; `RETALK_SAVE_MESSAGE=1` turns it on for every command.
+- `--save` — also keep a sealed local copy of *this sent message*, so `history` shows both sides of the conversation. Off by default; `RETALK_SAVE_MESSAGE=1` turns it on for every command.
 
 **`retalk receive`** — fetch, decrypt, ack, and print pending messages as NDJSON.
 A shared contact arrives as a contact record (`{…, "kind": "contact", "card":
@@ -399,7 +418,7 @@ target with `--peer` or `--all` (one is required, not both).
 - `--follow` — keep polling every 2s and run key maintenance every 60s until ctrl-c.
 - `--peers-only` — accept only saved peers; unknown senders are dropped before decryption. Blocked senders are always dropped regardless.
 - `--no-save-contacts` — do not stage shared contacts to the contact-inbox (staging is on by default).
-- `--save-messages` — also keep a local copy of each *received* message, sealed with this identity's key, for `history`. Off by default; on a `--no-passphrase` identity the seal is not real encryption, since the store key is public.
+- `--save` — also keep a local copy of each *received* message, sealed with this identity's key, for `history`. Off by default; on a `--no-passphrase` identity the seal is not real encryption, since the store key is public.
 
 Saving is also controlled by the **`RETALK_SAVE_MESSAGE`** env var: set it to a truthy value (`1`/`true`/`t`/`yes`/`y`/`on`) to save messages for *every* `send` and `receive` without the flag; anything else (incl. `false`/`no`/unset) leaves it off. retalk keeps no message log unless you opt in one of these two ways.
 
@@ -415,8 +434,15 @@ Saved bodies are **sealed at rest** with a key derived from the identity's
 passphrase (the same secret that protects your keys), so the store file never
 holds plaintext; `history` unseals them on the way out. The seal is only as
 strong as the passphrase — on a `--no-passphrase` identity (whose store key is
-a public constant) `--save-messages` warns that the copy is *not* meaningfully
+a public constant) `--save` warns that the copy is *not* meaningfully
 encrypted, and file permissions are the only guard.
+
+**`retalk show USER PEER`** — render the saved conversation between `USER` and
+`PEER` as a **chat**: a time and username per message, both directions
+interleaved, with date separators. It displays exactly what was saved (`--save`
+/ `RETALK_SAVE_MESSAGE=1`), decrypted from its at-rest seal.
+
+- `--follow` — keep the chat live: poll the relay for `PEER`'s new mail (saving each message like `receive --save`) and render new saved rows — including ones another terminal writes — until ctrl-c. A plain `show` never contacts the relay.
 
 ### Maintenance — `sync`, `register`, `config`
 
