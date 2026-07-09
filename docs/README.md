@@ -242,7 +242,7 @@ conventions.
 
 ## Command reference
 
-`retalk` has sixteen subcommands. This is the quick reference; run `retalk
+`retalk` has fifteen subcommands. This is the quick reference; run `retalk
 <command> --help` for the full text, and see [STANDARD.md](STANDARD.md) for the
 JSON each one emits. Most commands work entirely on your local store — only the
 ones that touch a mailbox reach the relay.
@@ -259,7 +259,6 @@ ones that touch a mailbox reach the relay.
 | `block` | Drop a sender's mail before decryption; `--remove` to undo, `--list` to view. | no |
 | `sync` | Reconcile keys and resend the outbox against the relay. | yes |
 | `register` | Publish this identity's keys to the relay (make it reachable). | yes |
-| `auth` | Print eval-able exports selecting the user + passphrase for this shell session. | no |
 | `send` | Encrypt and send one message. | yes |
 | `receive` | Fetch, decrypt, and print pending messages. | yes |
 | `history` | Replay saved messages (both sent and received) as a conversation. | no |
@@ -298,22 +297,6 @@ the new user id. Offline; keys publish automatically on first send/receive.
 - `--card` — print that same Contact card in a **human-readable** form (use `--json` to pipe it to `retalk import`).
 - `--invite-message` — render that card as a copy-paste **invite** for onboarding a peer out-of-band: install retalk, set the relay, and `retalk add` you, plus a prompt to send their id back.
 - `--as NAME` — with `--card`/`--invite-message`, the nickname you suggest the peer save you under (default: your display name).
-
-### Session — `auth`
-
-**`retalk auth USER [PASSPHRASE]`** — select the user (and passphrase) every
-later command in this terminal session acts as: it verifies the credentials
-actually unlock the identity, then prints the `export RETALK_USER=…` (and
-`RETALK_PASSPHRASE=…`) lines. A command cannot modify the shell that ran it,
-so apply them with eval:
-
-```sh
-eval "$(retalk auth alice "<YOUR-PASSPHRASE>")"
-```
-
-`PASSPHRASE` is optional: omitting it on a passphrase-protected identity is a
-clear error, and on a `--no-passphrase` identity auth confirms none is needed.
-Flags win over positionals (`-u USER`, `-p PASSPHRASE`). Entirely offline.
 
 ### Contacts — `add`, `verify`, `contacts`
 
