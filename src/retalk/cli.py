@@ -602,45 +602,6 @@ def cmd_config(args):
     print(json.dumps(cfg, indent=2))
 
 
-def _shq(s: str) -> str:
-    """Single-quote `s` for the shell (safe inside eval'd export lines)."""
-    return "'" + s.replace("'", "'\"'\"'") + "'"
-
-
-def cmd_auth(args):
-    """Select a user (+ passphrase) for the current terminal session: verify
-    the credentials actually unlock the identity, then print the export lines.
-    A child process cannot modify its parent shell, so the caller applies them
-    with:  eval "$(retalk auth USER ...)"  """
-    user = args.user or args.auth_user or os.environ.get("RETALK_USER")
-    if not user:
-        _die("auth needs a user: retalk auth USER, or -u USER")
-    secret = (args.passphrase or args.auth_passphrase
-              or os.environ.get("RETALK_PASSPHRASE"))
-    d = _data_home() / user
-    store_db = d / STORE_FILE
-    if not store_db.exists():
-        _die(f"no identity at {d} — create one with `retalk init -u {user}`")
-    disabled = _meta(store_db, "no_passphrase") == "1"
-    if not disabled and not secret:
-        _die(f"'{user}' is passphrase-protected: a passphrase is required —\n"
-             f"  retalk auth {user} \"<YOUR-PASSPHRASE>\"")
-    try:  # prove the credentials unlock the identity before exporting anything
-        u = User("", NO_PASSPHRASE if disabled else secret, store=str(store_db))
-    except Exception:
-        _die(f"could not unlock '{user}' (wrong passphrase?)")
-    print(f"export RETALK_USER={_shq(user)}")
-    if not disabled and secret:
-        print(f"export RETALK_PASSPHRASE={_shq(secret)}")
-    note = (" — no passphrase needed for this identity" if disabled else "")
-    print(_style(f"✓ authenticated as {user} ({u.fingerprint()}){note}",
-                 "1;32"), file=sys.stderr)
-    if sys.stdout.isatty():   # printed, not eval'd: show how to apply it
-        ran = "retalk " + " ".join(sys.argv[1:])
-        print(f'to apply it to this shell, run:  eval "$({ran})"',
-              file=sys.stderr)
-
-
 def _self_card(u, as_name):
     """This user's OWN Contact card (see docs/STANDARD.md), plus the `relay` it
     uses -- the shareable form of your own identity ("share a personal user").
@@ -1426,7 +1387,7 @@ quickstart (your peer runs the same steps on their machine):
 
 run `retalk <command> --help` for the full story of each command.""")
     sub = p.add_subparsers(dest="command", required=True,
-                           metavar="{init,register,auth,id,add,contacts,share,import,verify,block,sync,send,receive,history,show,config}")
+                           metavar="{init,register,id,add,contacts,share,import,verify,block,sync,send,receive,history,show,config}")
 
     sp = sub.add_parser(
         "init", parents=[common], formatter_class=raw,
@@ -1958,33 +1919,6 @@ examples:
                     help="set the owner-wide default relay URL; pass an empty "
                          "string to clear it")
     sp.set_defaults(fn=cmd_config)
-
-    sp = sub.add_parser(
-        "auth", parents=[common], formatter_class=raw,
-        help="select the user (and passphrase) for this terminal session",
-        description="""\
-Set up the current terminal session to act as USER — the one-command
-equivalent of exporting RETALK_USER and RETALK_PASSPHRASE by hand. It first
-verifies the credentials actually unlock the identity, then prints the export
-lines. A command cannot modify the shell that ran it, so apply them with eval:
-
-  eval "$(retalk auth alice "<YOUR-PASSPHRASE>")"
-
-PASSPHRASE is optional: for an identity created with --no-passphrase it is
-not needed (auth says so); for a passphrase-protected identity omitting it is
-a clear error. Flags win over positionals (-u USER, -p PASSPHRASE).""",
-        epilog="""\
-examples:
-  eval "$(retalk auth alice "<YOUR-PASSPHRASE>")"
-  eval "$(retalk auth bot)"
-  # afterwards, no -u or -p needed:
-  retalk send --peer bob "hello"
-  retalk receive --peer bob --follow""")
-    sp.add_argument("auth_user", metavar="USER", nargs="?",
-                    help="the user to act as (identity under ~/.retalk/USER/)")
-    sp.add_argument("auth_passphrase", metavar="PASSPHRASE", nargs="?",
-                    help="its passphrase; omit for a --no-passphrase identity")
-    sp.set_defaults(fn=cmd_auth)
 
     sp = sub.add_parser(
         "show", parents=[common], formatter_class=raw,

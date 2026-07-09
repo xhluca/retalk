@@ -170,10 +170,10 @@ the same three on theirs.
 #    share it with your peer over any channel (chat, email, in person).
 retalk init --user alice --passphrase "<YOUR-PRIVATE-PASSPHRASE>"
 
-# select alice for this shell session: auth verifies the passphrase, then
-# emits the RETALK_USER / RETALK_PASSPHRASE exports that eval applies
-eval "$(retalk auth alice "<YOUR-PRIVATE-PASSPHRASE>")"
-# alternatively: export those two vars yourself, or pass -u / -p per command
+# tell this shell which user to act as, and its passphrase
+export RETALK_USER=alice
+export RETALK_PASSPHRASE="<YOUR-PRIVATE-PASSPHRASE>"
+# alternatively, pass -u / -p on each command instead
 
 # 2. Save your peer's ID under a name. --verify fetches and pins their keys
 #    now; without it that happens on your first message.
@@ -251,7 +251,6 @@ One line per subcommand, matching `retalk --help`. Run
 | `block` | Silently drop a sender's messages (`--remove` to undo, `--list` them). |
 | `sync` | Reconcile this identity with the relay (keys + outbox). |
 | `register` | Publish this identity's keys to the relay (make it reachable). |
-| `auth` | Select the user (and passphrase) for this terminal session: `eval "$(retalk auth alice …)"`. |
 | `send` | Encrypt and send one message. |
 | `receive` | Decrypt pending messages (`--follow` to keep listening). |
 | `history` | Replay messages saved by `send`/`receive --save`. |
