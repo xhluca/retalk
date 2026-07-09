@@ -168,21 +168,21 @@ the same three on theirs.
 ```sh
 # 1. Create your identity. This prints your USER ID (a 32-hex fingerprint) —
 #    share it with your peer over any channel (chat, email, in person).
-retalk init --user alice --passphrase "<YOUR-PRIVATE-PASSPHRASE>"
+retalk init --user alice --passphrase "<YOUR-PASSPHRASE>"
 
 # tell this shell which user to act as, and its passphrase
 export RETALK_USER=alice
-export RETALK_PASSPHRASE="<YOUR-PRIVATE-PASSPHRASE>"
+export RETALK_PASSPHRASE="<YOUR-PASSPHRASE>"
 # alternatively, pass -u / -p on each command instead
 
 # 2. Save your peer's ID under a name. --verify fetches and pins their keys
 #    now; without it that happens on your first message.
-retalk add "<bobs-user-id>" --peer bob --verify
+retalk add "<bobs-user-id>" --peer "bob" --verify
 
 # 3. Message each other.
-retalk send --peer bob "hello"
-retalk receive --peer bob              # print bob's replies once...
-retalk receive --peer bob --follow     # ...or keep listening
+retalk send --peer "bob" "hello"
+retalk receive --peer "bob"              # print bob's replies once...
+retalk receive --peer "bob" --follow     # ...or keep listening
 ```
 
 What the steps rely on:
@@ -243,7 +243,7 @@ One line per subcommand, matching `retalk --help`. Run
 | --- | --- |
 | `init` | Create a new identity (the only command that ever does) and publish its keys. |
 | `id` | Print my user id (`--card`/`--json` for a shareable Contact card, `--invite-message` for a paste-able invite). |
-| `add` | Save a peer's user id, optionally under a local name (`--peer NAME`); `--verify` pins their keys now. |
+| `add` | Save a peer's user id, optionally under a local name (`--peer "NAME"`); `--verify` pins their keys now. |
 | `verify` | Record a saved peer's keys (explicit first contact). |
 | `contacts` | List saved peers; `--show` one as a Contact card, `--remove` one. |
 | `share` | Send a saved contact to a peer (an introduction). |
@@ -314,18 +314,18 @@ retalk-server --host 127.0.0.1 --port 8766
 # terminal 2 — "alice"
 export RETALK_USER=alice RETALK_PASSPHRASE=alice-secret
 retalk init --relay http://127.0.0.1:8766      # prints alice's user id
-retalk add "<bobs-id>" --peer bob                # paste the id from terminal 3
-retalk send --peer bob "hello bob"
-retalk receive --peer bob                      # read bob's reply
+retalk add "<bobs-id>" --peer "bob"                # paste the id from terminal 3
+retalk send --peer "bob" "hello bob"
+retalk receive --peer "bob"                      # read bob's reply
 ```
 
 ```sh
 # terminal 3 — "bob"
 export RETALK_USER=bob RETALK_PASSPHRASE=bob-secret
 retalk init --relay http://127.0.0.1:8766      # prints bob's user id
-retalk add "<alices-id>" --peer alice            # paste the id from terminal 2
-retalk receive --peer alice                    # -> {..., "name":"alice", "text":"hello bob"}
-retalk send --peer alice "hi alice"
+retalk add "<alices-id>" --peer "alice"            # paste the id from terminal 2
+retalk receive --peer "alice"                    # -> {..., "name":"alice", "text":"hello bob"}
+retalk send --peer "alice" "hi alice"
 ```
 
 Each terminal exports its own `RETALK_USER`/`RETALK_PASSPHRASE` because the
@@ -339,7 +339,7 @@ Check that the relay never held plaintext — send one message nobody receives
 then look inside `server.db`, which sits where terminal 1 started the relay:
 
 ```sh
-retalk send --peer bob "one more"                       # ...and don't receive it
+retalk send --peer "bob" "one more"                       # ...and don't receive it
 sqlite3 server.db 'SELECT body FROM messages LIMIT 1'   # base64 ciphertext
 ```
 
