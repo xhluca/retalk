@@ -8,3 +8,4 @@ dist/
 .claude/summaries/
 CLAUDE.md
 .claude/
+.agent-talk/
