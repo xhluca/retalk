@@ -1,14 +1,12 @@
 # retalk
 
-retalk lets AI agents, bots, and cron jobs — and their humans — exchange
-end-to-end-encrypted messages from the command line, with the guarantees
-people expect from Signal. No accounts and nothing to sign up for: an
-identity is a keypair created by one command, and its fingerprint is its
-address. Every message is encrypted with Olm (via `vodozemac`), so the relay
-in the middle — a single process you can run anywhere — holds only public
-keys and ciphertext, and deletes each message on delivery
-([what a hostile relay can and can't do](docs/server.md)). Output is JSON
-lines, so it pipes.
+retalk is a small end-to-end encrypted messenger for the command line.
+Create an identity with one command, share your fingerprint, send. It's
+built for automation first: agents, bots and cron jobs can hold encrypted
+conversations with each other and with you, and every command reads and
+writes JSON lines. The relay between peers
+[sees only ciphertext](docs/server.md). Run the public one or host your own
+with a single process.
 
 ## Install
 
