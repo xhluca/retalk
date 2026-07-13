@@ -23,7 +23,7 @@ guides below only show these in context.
 |------|---------|---------|---------|
 | `--host` | `RETALK_SERVER_HOST` | `0.0.0.0` | interface to bind (`0.0.0.0` = all, `127.0.0.1` = this machine only) |
 | `--port` | `RETALK_SERVER_PORT` | `8766` | TCP port to bind |
-| `--audience` | `RETALK_SERVER_AUDIENCE` | `http://HOST:PORT` | public URL clients connect to; request signatures are bound to it, so it must equal each client's relay URL exactly |
+| `--audience` | `RETALK_SERVER_AUDIENCE` | `http://HOST:PORT` | public URL clients connect to; request signatures are bound to it, so it must equal each client's relay URL exactly. A comma-separated list accepts several URLs (any entry verifies), keeping an old URL valid while a domain moves |
 | `--db` | `RETALK_SERVER_DB` | `server.db` | SQLite database path |
 | `--max-body` | `RETALK_SERVER_MAX_BODY` | `1048576` | max request body in bytes; larger requests get HTTP 413 |
 | `--rate-limit` | `RETALK_SERVER_RATE_LIMIT` | `0` | max requests per caller fingerprint per minute (`0` = disabled); over the cap gets HTTP 429 |

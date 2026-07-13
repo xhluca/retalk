@@ -17,7 +17,9 @@ request captured here is worthless anywhere else. See docs/auth.md.
 Config (a CLI flag overrides the matching env var):
   --host        / RETALK_SERVER_HOST       interface to bind (default 0.0.0.0)
   --port        / RETALK_SERVER_PORT       port to bind (default 8766)
-  --audience    / RETALK_SERVER_AUDIENCE   public URL users connect to, e.g.
+  --audience    / RETALK_SERVER_AUDIENCE   public URL users connect to (a
+                comma-separated list accepts several, e.g. during a domain
+                move), e.g.
                 https://server.example.com — REQUIRED for any non-local
                 deployment; signatures verify against it (defaults to the bind
                 host:port, showing 0.0.0.0 as 127.0.0.1)
@@ -80,7 +82,14 @@ import vodozemac as v
 DB_PATH = os.environ.get("RETALK_SERVER_DB", "server.db")
 HOST = os.environ.get("RETALK_SERVER_HOST", "0.0.0.0")
 PORT = int(os.environ.get("RETALK_SERVER_PORT", "8766"))
-AUDIENCE = os.environ.get("RETALK_SERVER_AUDIENCE", f"http://127.0.0.1:{PORT}")
+def _split_audiences(raw: str) -> list:
+    """One URL, or a comma-separated list. Signatures verify against any
+    entry, so extra entries keep old URLs valid while a domain moves."""
+    return [a.strip() for a in raw.split(",") if a.strip()]
+
+
+AUDIENCES = _split_audiences(
+    os.environ.get("RETALK_SERVER_AUDIENCE", f"http://127.0.0.1:{PORT}"))
 # Abuse-hardening (all backward compatible; defaults must not break clients):
 #   MAX_BODY   request body cap in bytes (oversized -> HTTP 413)
 #   RATE_LIMIT requests per caller fingerprint per minute (0 = disabled)
@@ -186,12 +195,16 @@ def _caller(tool: str, args: dict, auth: dict) -> str:
     args_hash = hashlib.sha256(
         json.dumps(args, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
-    payload = (f"{tool}|{AUDIENCE}|{user_id}|{auth['timestamp']}|{auth['nonce']}|"
-               f"{args_hash}").encode()
-    try:
-        v.Ed25519PublicKey.from_base64(auth["signing_key"]).verify_signature(
-            payload, v.Ed25519Signature.from_base64(auth["signature"]))
-    except Exception:
+    for aud in AUDIENCES:
+        payload = (f"{tool}|{aud}|{user_id}|{auth['timestamp']}|{auth['nonce']}|"
+                   f"{args_hash}").encode()
+        try:
+            v.Ed25519PublicKey.from_base64(auth["signing_key"]).verify_signature(
+                payload, v.Ed25519Signature.from_base64(auth["signature"]))
+            break
+        except Exception:
+            continue
+    else:
         raise PermissionError(
             "bad signature (wrong key, audience, or argument canonicalization)")
     conn = _db()
@@ -718,7 +731,7 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    global DB_PATH, HOST, PORT, AUDIENCE
+    global DB_PATH, HOST, PORT, AUDIENCES
     global MAX_MAILBOX, MAX_MAILBOX_PER_SENDER, MAX_BODY, RATE_LIMIT, TIMEOUT
     global ADMIN_PASSWORD, REQUIRE_API_KEY, MAX_REFUSED, REFUSED_TTL
     global _RATE_LIMITER
@@ -734,7 +747,8 @@ def main():
                "                 binds locally)\n"
                "  --audience     the public URL clients connect to; request\n"
                "                 signatures are bound to it, so it must equal\n"
-               "                 each client's --relay URL exactly.\n"
+               "                 each client's --relay URL exactly (a comma-\n"
+               "                 separated list accepts several URLs).\n"
                "Locally they coincide. Behind a TLS proxy, --host/--port stay\n"
                "local (e.g. 127.0.0.1:8766) while --audience is your public\n"
                "https:// address. Each flag overrides the matching RETALK_*\n"
@@ -750,10 +764,12 @@ def main():
     ap.add_argument("--port", metavar="PORT", type=int,
                     help="TCP port to bind (overrides RETALK_SERVER_PORT; default "
                          "8766)")
-    ap.add_argument("--audience", metavar="URL",
+    ap.add_argument("--audience", metavar="URL[,URL...]",
                     help="public URL users connect to; request signatures are "
                          "bound to it, so it must match each client's --relay "
-                         "URL exactly (overrides RETALK_SERVER_AUDIENCE; defaults to "
+                         "URL exactly. A comma-separated list accepts several "
+                         "URLs, keeping old ones valid while a domain moves "
+                         "(overrides RETALK_SERVER_AUDIENCE; defaults to "
                          "http://HOST:PORT, showing 0.0.0.0 as 127.0.0.1)")
     ap.add_argument("--db", metavar="PATH",
                     help="SQLite database path (overrides RETALK_SERVER_DB; default "
@@ -811,10 +827,10 @@ def main():
     if args.port:
         PORT = args.port
     if args.audience:
-        AUDIENCE = args.audience
+        AUDIENCES = _split_audiences(args.audience)
     elif not os.environ.get("RETALK_SERVER_AUDIENCE"):
         host = "127.0.0.1" if HOST == "0.0.0.0" else HOST
-        AUDIENCE = f"http://{host}:{PORT}"
+        AUDIENCES = [f"http://{host}:{PORT}"]
     if args.max_body is not None:
         MAX_BODY = args.max_body
     if args.rate_limit is not None:
