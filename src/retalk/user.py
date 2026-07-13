@@ -398,18 +398,30 @@ class User:
                          fallback_max_age=fallback_max_age,
                          resend_after=resend_after)
 
-    def send(self, to: str, text: str) -> str:
+    def send(self, to: str, text: str, group: dict | None = None,
+             mid: str | None = None) -> str:
         """Encrypt and send a message to a peer user ID. The ciphertext is
         kept in a local outbox until the peer acknowledges decrypting it.
+
+        `group` tags the message as group mail: a {"id", "name", "members"}
+        dict carried inside the encrypted payload (group chat is client-side
+        fan-out — the caller sends one pairwise-encrypted copy per member, and
+        this dict is how receivers thread the copies and learn the roster).
+        `mid` overrides the per-copy message id's shared thread id: every copy
+        gets its own wire id (acks and the outbox stay strictly pairwise) while
+        payload["mid"] is identical across copies.
 
         Returns the message id (see docs/STANDARD.md) -- the same id the
         recipient sees, so the two sides can be correlated."""
         with self._locked():
-            mid = uuid.uuid4().hex
-            payload = {"id": mid, "kind": "msg", "text": text,
+            wire_id = uuid.uuid4().hex
+            payload = {"id": wire_id, "kind": "msg", "text": text,
                        "name": self.name}
+            if group is not None:
+                payload["group"] = group
+                payload["mid"] = mid or wire_id
             self._send_envelope(to, payload, record_outbox=True)
-            return mid
+            return wire_id
 
     def share(self, to: str, card: dict) -> str:
         """Encrypt and send a contact card to a peer user ID, introducing a
@@ -626,6 +638,12 @@ class User:
                     out.append({"id": data["id"], "from": sender, "name": name,
                                 "kind": "contact", "card": data.get("card", {})})
                 else:
-                    out.append({"id": data["id"], "from": sender,
-                                "name": name, "text": data["text"]})
+                    rec = {"id": data["id"], "from": sender,
+                           "name": name, "text": data["text"]}
+                    if isinstance(data.get("group"), dict):
+                        # group mail: carry the envelope's roster through so
+                        # the caller can thread it and update its local view
+                        rec["group"] = data["group"]
+                        rec["mid"] = data.get("mid") or data["id"]
+                    out.append(rec)
         return out

@@ -29,6 +29,7 @@ import sys
 import textwrap
 import time
 import urllib.error
+import uuid
 from pathlib import Path
 
 from .user import User, fingerprint
@@ -383,13 +384,17 @@ def _warn_unsealed_save(store_db: Path):
 def _ensure_messages(store_db: Path):
     _store_sql(store_db, "CREATE TABLE IF NOT EXISTS messages("
                "msg_id TEXT PRIMARY KEY, from_fp TEXT, from_name TEXT, "
-               "peer_fp TEXT, direction TEXT, body TEXT, ts REAL)")
+               "peer_fp TEXT, direction TEXT, body TEXT, ts REAL, "
+               "gid TEXT, gname TEXT)")
     cols = [r[1] for r in _store_sql(store_db, "PRAGMA table_info(messages)")]
     if "peer_fp" not in cols:        # migrate an older received-only table
         _store_sql(store_db, "ALTER TABLE messages ADD COLUMN peer_fp TEXT")
         _store_sql(store_db, "ALTER TABLE messages ADD COLUMN direction TEXT")
         _store_sql(store_db, "UPDATE messages SET peer_fp=from_fp, direction='in' "
                              "WHERE peer_fp IS NULL")   # old rows were all received
+    if "gid" not in cols:            # pre-group-chat table: add the group tags
+        _store_sql(store_db, "ALTER TABLE messages ADD COLUMN gid TEXT")
+        _store_sql(store_db, "ALTER TABLE messages ADD COLUMN gname TEXT")
 
 
 def _save_message(store_db: Path, u, rec: dict):
@@ -397,23 +402,70 @@ def _save_message(store_db: Path, u, rec: dict):
     sealed at rest by the identity's key (see User.encrypt_at_rest)."""
     _ensure_messages(store_db)
     sender = rec.get("from") or ""
+    g = rec.get("group") if isinstance(rec.get("group"), dict) else {}
     _store_sql(store_db,
                "INSERT OR IGNORE INTO messages(msg_id, from_fp, from_name, "
-               "peer_fp, direction, body, ts) VALUES(?,?,?,?,?,?,?)",
+               "peer_fp, direction, body, ts, gid, gname) "
+               "VALUES(?,?,?,?,?,?,?,?,?)",
                rec.get("id") or "", sender, rec.get("name") or "",
                sender, "in", u.encrypt_at_rest(rec.get("text") or ""),
-               time.time())
+               time.time(), g.get("id"), g.get("name"))
 
 
-def _save_sent(store_db: Path, u, msg_id: str, to_fp: str, text: str):
+def _save_sent(store_db: Path, u, msg_id: str, to_fp: str, text: str,
+               group: dict | None = None):
     """Persist one OUTGOING chat message (`send --save`), body sealed at
-    rest, so `history` shows both sides of the conversation."""
+    rest, so `history` shows both sides of the conversation. A group send
+    saves ONE row (keyed by the shared thread id), not one per copy."""
     _ensure_messages(store_db)
+    g = group or {}
     _store_sql(store_db,
                "INSERT OR IGNORE INTO messages(msg_id, from_fp, from_name, "
-               "peer_fp, direction, body, ts) VALUES(?,?,?,?,?,?,?)",
+               "peer_fp, direction, body, ts, gid, gname) "
+               "VALUES(?,?,?,?,?,?,?,?,?)",
                msg_id or "", u.fingerprint(), u.name or "", to_fp or "",
-               "out", u.encrypt_at_rest(text or ""), time.time())
+               "out", u.encrypt_at_rest(text or ""), time.time(),
+               g.get("id"), g.get("name"))
+
+
+# ---------- groups (client-side fan-out) ----------
+
+def _ensure_groups(store_db: Path):
+    _store_sql(store_db, "CREATE TABLE IF NOT EXISTS groups("
+               "gid TEXT PRIMARY KEY, name TEXT, members TEXT, ts REAL)")
+
+
+def _groups(store_db: Path) -> dict:
+    """{gid: (name, [member fingerprints])} for this identity's groups."""
+    _ensure_groups(store_db)
+    out = {}
+    for gid, name, members in _store_sql(
+            store_db, "SELECT gid, name, members FROM groups"):
+        try:
+            out[gid] = (name, json.loads(members or "[]"))
+        except ValueError:
+            out[gid] = (name, [])
+    return out
+
+
+def _group_by_name(store_db: Path, ref: str):
+    """Resolve a group by local name or gid -> (gid, name, members) or None."""
+    for gid, (name, members) in _groups(store_db).items():
+        if ref == gid or ref == name:
+            return gid, name, members
+    return None
+
+
+def _group_upsert(store_db: Path, gid: str, name: str, members: list):
+    """Save a group roster. Cooperative membership: an incoming envelope's
+    roster replaces the local one (last writer wins) — group chat has no
+    admin protocol, only what peers tell each other."""
+    _ensure_groups(store_db)
+    _store_sql(store_db,
+               "INSERT INTO groups(gid, name, members, ts) VALUES(?,?,?,?) "
+               "ON CONFLICT(gid) DO UPDATE SET name=excluded.name, "
+               "members=excluded.members, ts=excluded.ts",
+               gid, name, json.dumps(sorted(set(members))), time.time())
 
 
 def _open_user(args, need_server: bool = True, banner: bool = True) -> User:
@@ -1105,15 +1157,135 @@ def cmd_block(args):
         print(f"blocked {args.peer} ({fp})", file=sys.stderr)
 
 
+def cmd_group(args):
+    store_db = _resolve_store(args) / STORE_FILE
+    act = args.action
+    mstr = getattr(args, "members_flag", None) or getattr(args, "members", None)
+
+    def resolve_members(refs):
+        """Member refs (saved names or raw 32-hex ids) -> fingerprints."""
+        peers = _effective_peers(store_db)
+        out = []
+        for ref in refs:
+            fp = _resolve_peer(peers, ref)
+            if fp is None:
+                _die(f"unknown member '{ref}': use a saved contact name or a "
+                     "32-hex fingerprint")
+            out.append(fp)
+        return out
+
+    if act == "create":
+        if not args.name:
+            _die("group create needs a NAME")
+        if ID_RE.match(args.name):
+            _die("group name looks like a fingerprint — pick a human name")
+        if _group_by_name(store_db, args.name):
+            _die(f"a group named '{args.name}' already exists")
+        members = resolve_members(mstr.split(",") if mstr else [])
+        if not members:
+            _die("a group needs at least one member: --members NAME_OR_ID,...")
+        gid = uuid.uuid4().hex
+        _group_upsert(store_db, gid, args.name, members)
+        print(json.dumps({"group_id": gid, "name": args.name,
+                          "members": sorted(set(members))}))
+        print(f"created group '{args.name}' with {len(set(members))} member(s). "
+              f'Send with: retalk send --group {args.name} "hello"',
+              file=sys.stderr)
+        return
+
+    if act == "list":
+        for gid, (name, members) in sorted(_groups(store_db).items(),
+                                           key=lambda kv: kv[1][0] or ""):
+            if args.json:
+                print(json.dumps({"group_id": gid, "name": name,
+                                  "members": members}))
+            else:
+                print(f"{name}\t{gid}\t{len(members)} member(s)")
+        return
+
+    # every other action names an existing group
+    g = _group_by_name(store_db, args.name or "")
+    if g is None:
+        _die(f"no group '{args.name}' — see `retalk group list`")
+    gid, gname, members = g
+
+    if act == "members":
+        names = {fp: nm for fp, (nm, _i, _s) in
+                 _effective_peers(store_db).items()}
+        for fp in members:
+            print(f"{names.get(fp) or '(unnamed)'}\t{fp}")
+    elif act == "add":
+        added = resolve_members(mstr.split(",") if mstr else [])
+        if not added:
+            _die("group add needs members: retalk group add NAME PEER[,PEER...]")
+        _group_upsert(store_db, gid, gname, members + added)
+        print(f"added {len(set(added) - set(members))} member(s) to '{gname}' "
+              "— the new roster reaches everyone on your next group send",
+              file=sys.stderr)
+    elif act == "remove":
+        dropped = set(resolve_members(mstr.split(",") if mstr else []))
+        kept = [fp for fp in members if fp not in dropped]
+        if kept == members:
+            _die("none of those are members — see `retalk group members "
+                 f"{gname}`")
+        _group_upsert(store_db, gid, gname, kept)
+        print(f"removed {len(members) - len(kept)} member(s) from '{gname}' "
+              "— cooperative membership: they stop getting YOUR copies now, "
+              "and everyone else's after your roster reaches them",
+              file=sys.stderr)
+    elif act == "delete":
+        _store_sql(store_db, "DELETE FROM groups WHERE gid=?", gid)
+        print(f"deleted group '{gname}' locally (peers keep their own copy)",
+              file=sys.stderr)
+
+
 def cmd_send(args):
+    group_ref = getattr(args, "group", None)
+    if group_ref and args.peer:
+        _die("give --peer or --group, not both")
+    if not group_ref and not args.peer:
+        _die("send needs a recipient: --peer PEER, or --group NAME")
     u = _open_user(args)
     store_db = _resolve_store(args) / STORE_FILE
-    to = _peer_to_id(args.peer, store_db)
     save = _save_messages_on(args)
     if save:
         _warn_unsealed_save(store_db)
 
     u.sync()                       # keys + resend the unacked outbox along with this one
+
+    if group_ref:                  # fan-out: one pairwise-encrypted copy per member
+        g = _group_by_name(store_db, group_ref)
+        if g is None:
+            _die(f"no group '{group_ref}' — create one with "
+                 "`retalk group create NAME --members ...`")
+        gid, gname, members = g
+        me = u.fingerprint()
+        roster = sorted(set(members) | {me})   # envelope roster includes self
+        envelope = {"id": gid, "name": gname, "members": roster}
+        mid = uuid.uuid4().hex                 # shared thread id across copies
+        sent, failed = [], []
+        for fp in roster:
+            if fp == me:
+                continue
+            try:
+                u.send(fp, args.text, group=envelope, mid=mid)
+                sent.append(fp)
+            except Exception as e:             # one dead member never blocks the rest
+                failed.append((fp, str(e)))
+        if save:
+            _save_sent(store_db, u, mid, gid, args.text,
+                       group={"id": gid, "name": gname})
+        print(json.dumps({"id": mid, "group": gname, "group_id": gid,
+                          "sent": len(sent), "failed": len(failed)}))
+        print(f"sent to group '{gname}' ({len(sent)}/{len(sent) + len(failed)} "
+              "members)", file=sys.stderr)
+        for fp, err in failed:
+            print(f"  ✗ {fp}: {err}", file=sys.stderr)
+        if failed:
+            sys.exit(2)
+        return
+
+    to = _peer_to_id(args.peer, store_db)
     mid = u.send(to, args.text)
     if save:                       # keep our side of the conversation for `history`
         _save_sent(store_db, u, mid, to, args.text)
@@ -1146,8 +1318,21 @@ def cmd_receive(args):
         for m in batch:                      # standard message / contact objects
             if args.save_contacts and m.get("kind") == "contact":
                 _stage_contact(store_db, m)  # to the inbox for `import --inbox`
-            elif save and "text" in m:
+                print(json.dumps(m), flush=True)
+                continue
+            g = m.get("group") if isinstance(m.get("group"), dict) else None
+            if g and g.get("id"):
+                # cooperative membership: adopt the sender's roster (and name)
+                # — this also materializes a group you were just added to
+                _group_upsert(store_db, g["id"], g.get("name") or g["id"][:8],
+                              [fp for fp in g.get("members", [])
+                               if ID_RE.match(str(fp))])
+            if save and "text" in m:
                 _save_message(store_db, u, m)  # sealed copy for `retalk history`
+            if g:                            # printed shape: flat group tags
+                m = dict(m, group=g.get("name") or "",
+                         group_id=g.get("id") or "")
+                m.pop("mid", None)  # library-level thread id, not CLI shape
             print(json.dumps(m), flush=True)
 
     try:
@@ -1170,46 +1355,79 @@ def cmd_history(args):
     u = _open_user(args, need_server=False, banner=False)
     store_db = _resolve_store(args) / STORE_FILE
     _ensure_messages(store_db)
-    # filter by the OTHER party (peer_fp), so a conversation shows both the
-    # messages you received from them and the ones you sent to them.
-    peer_fp = _peer_to_id(args.peer, store_db) if args.peer else None
-    where = "WHERE peer_fp=? " if peer_fp else ""
+    if args.peer and getattr(args, "group", None):
+        _die("give --peer or --group, not both")
+    # filter by the OTHER party (peer_fp) or by group, so a conversation shows
+    # both the messages you received and the ones you sent.
+    if getattr(args, "group", None):
+        g = _group_by_name(store_db, args.group)
+        if g is None:
+            _die(f"no group '{args.group}' — see `retalk group list`")
+        where, params = "WHERE gid=? ", [g[0]]
+    elif args.peer:
+        where, params = "WHERE peer_fp=? ", [_peer_to_id(args.peer, store_db)]
+    else:
+        where, params = "", []
     rows = _store_sql(store_db,
-                      "SELECT msg_id, from_fp, from_name, direction, body "
-                      f"FROM messages {where}ORDER BY ts",
-                      *([peer_fp] if peer_fp else []))
+                      "SELECT msg_id, from_fp, from_name, direction, body, "
+                      f"gid, gname FROM messages {where}ORDER BY ts", *params)
     # prefer the current saved-peer name; fall back to the label stored at receive
     names = {fp: nm for fp, (nm, _ik, _sk) in _effective_peers(store_db).items()}
     self_name = u.name or "me"
-    for msg_id, from_fp, from_name, direction, body in rows:
+    for msg_id, from_fp, from_name, direction, body, gid, gname in rows:
         name = self_name if direction == "out" else (names.get(from_fp)
                                                       or from_name)
-        print(json.dumps({"id": msg_id, "from": from_fp, "name": name,
-                          "direction": direction or "in",
-                          "text": u.decrypt_at_rest(body)}), flush=True)
+        rec = {"id": msg_id, "from": from_fp, "name": name,
+               "direction": direction or "in",
+               "text": u.decrypt_at_rest(body)}
+        if gid:
+            rec["group"], rec["group_id"] = gname or "", gid
+        print(json.dumps(rec), flush=True)
 
 
 def cmd_show(args):
-    """Render the saved conversation between USER and PEER as a chat: time +
-    username per message, both directions interleaved. Reads only what was
-    saved (send/receive --save); --follow keeps it live by polling the relay
-    for PEER's new mail (saving it like `receive --save`) and rendering any
-    new saved rows — including ones another terminal writes."""
+    """Render a saved conversation as a chat: time + username per message,
+    both directions interleaved. `show USER PEER` is the two-party view;
+    `show USER --group NAME` renders the whole room, one color per sender.
+    Reads only what was saved (send/receive --save); --follow keeps it live by
+    polling the relay (saving like `receive --save`) and rendering any new
+    saved rows — including ones another terminal writes."""
     args.user = args.show_user            # the positional selects the identity
     args.dir = None
+    group_ref = getattr(args, "group", None)
+    if group_ref and args.show_peer:
+        _die("give PEER or --group, not both")
+    if not group_ref and not args.show_peer:
+        _die("show needs a conversation: a PEER, or --group NAME")
     store_db = _resolve_store(args) / STORE_FILE
     _ensure_messages(store_db)
     peers = _effective_peers(store_db)
-    fp = _resolve_peer(peers, args.show_peer)
-    if fp is None:
-        _die(f"no saved contact '{args.show_peer}' — add them first with "
-             "`retalk add <fingerprint>`")
-    nm = peers[fp][0] if fp in peers else None
-    peer_label = nm or (args.show_peer if not ID_RE.match(args.show_peer)
-                        else fp[:12] + "…")
+    names = {f: nm for f, (nm, _i, _s) in peers.items() if nm}
+
+    if group_ref:
+        g = _group_by_name(store_db, group_ref)
+        if g is None:
+            _die(f"no group '{group_ref}' — see `retalk group list`")
+        gid, gname, members = g
+        where, key = "gid=?", gid
+        other_label, sub = gname, f"{len(members)} member(s) · {gid}"
+        follow_fps = members
+    else:
+        fp = _resolve_peer(peers, args.show_peer)
+        if fp is None:
+            _die(f"no saved contact '{args.show_peer}' — add them first with "
+                 "`retalk add <fingerprint>`")
+        nm = peers[fp][0] if fp in peers else None
+        other_label = nm or (args.show_peer if not ID_RE.match(args.show_peer)
+                             else fp[:12] + "…")
+        where, key, sub = "peer_fp=?", fp, fp
+        follow_fps = [fp]
     me = _meta(store_db, "name") or args.show_user
+    my_fp = None
     # --follow talks to the relay; a plain show never does
     u = _open_user(args, need_server=bool(args.follow), banner=False)
+    my_fp = u.fingerprint()
+    follow_fps = [f for f in follow_fps if f != my_fp]
 
     tty = sys.stdout.isatty()
 
@@ -1221,19 +1439,28 @@ def cmd_show(args):
     width = min(shutil.get_terminal_size((80, 24)).columns, 100)
     bubble = max(24, min(56, width - 16))
 
-    title = f" 💬 {st(me, '1;36')} ⇄ {st(peer_label, '1;33')} "
-    bare = f" 💬 {me} ⇄ {peer_label} "
+    title = f" 💬 {st(me, '1;36')} ⇄ {st(other_label, '1;33')} "
+    bare = f" 💬 {me} ⇄ {other_label} "
     side = max(2, (width - len(bare) - 1) // 2)     # emoji ≈ 2 columns
     print(st("─" * side, "2") + title + st("─" * side, "2"))
-    print(st(fp.center(width), "2"))
+    print(st(sub.center(width), "2"))
     state = {"rowid": 0, "day": None}
+    # per-sender look in a group: cycle marker + color by first appearance
+    palette = [("🔵", "1;33"), ("🟣", "1;35"), ("🟡", "1;32"),
+               ("🟠", "1;34"), ("🔴", "1;31"), ("🟤", "1;36")]
+    looks = {}
+
+    def look(sender_fp):
+        if sender_fp not in looks:
+            looks[sender_fp] = palette[len(looks) % len(palette)]
+        return looks[sender_fp]
 
     def render_new():
         rows = _store_sql(store_db,
-                          "SELECT rowid, direction, body, ts FROM messages "
-                          "WHERE peer_fp=? AND rowid>? ORDER BY ts, rowid",
-                          fp, state["rowid"])
-        for rowid, direction, body, ts in rows:
+                          "SELECT rowid, direction, body, ts, from_fp, "
+                          f"from_name FROM messages WHERE {where} AND rowid>? "
+                          "ORDER BY ts, rowid", key, state["rowid"])
+        for rowid, direction, body, ts, from_fp, from_name in rows:
             state["rowid"] = max(state["rowid"], rowid)
             t = time.localtime(ts or 0)
             day = time.strftime("%Y-%m-%d", t)
@@ -1250,8 +1477,13 @@ def cmd_show(args):
                       + st(me, "1;36") + " 🟢")
                 for ln in lines:
                     print(" " * max(0, width - len(ln)) + st(ln, "36"))
-            else:                        # peer: left-aligned, yellow
-                print("🔵 " + st(peer_label, "1;33") + st(" · ", "2")
+            else:                        # a peer: left-aligned, own look
+                mark, color = (look(from_fp) if group_ref
+                               else ("🔵", "1;33"))
+                who = (names.get(from_fp) or from_name
+                       or (from_fp or "")[:12] + "…") if group_ref \
+                    else other_label
+                print(f"{mark} " + st(who, color) + st(" · ", "2")
                       + st(hhmm, "2;3"))
                 for ln in lines:
                     print("   " + ln)
@@ -1268,9 +1500,18 @@ def cmd_show(args):
     try:
         last_sync = time.monotonic()
         while True:
-            for m in u.receive(fp):       # fetch PEER's new mail, keep a copy
-                if "text" in m:
-                    _save_message(store_db, u, m)
+            for sender in follow_fps:     # every roster member in a group
+                for m in u.receive(sender):
+                    if "text" in m:
+                        g = (m.get("group")
+                             if isinstance(m.get("group"), dict) else None)
+                        if g and g.get("id"):
+                            _group_upsert(
+                                store_db, g["id"],
+                                g.get("name") or g["id"][:8],
+                                [x for x in g.get("members", [])
+                                 if ID_RE.match(str(x))])
+                        _save_message(store_db, u, m)
             render_new()
             time.sleep(2)
             if time.monotonic() - last_sync > 60:
@@ -1387,7 +1628,7 @@ quickstart (your peer runs the same steps on their machine):
 
 run `retalk <command> --help` for the full story of each command.""")
     sub = p.add_subparsers(dest="command", required=True,
-                           metavar="{init,register,id,add,contacts,share,import,verify,block,sync,send,receive,history,show,config}")
+                           metavar="{init,register,id,add,group,contacts,share,import,verify,block,sync,send,receive,history,show,config}")
 
     sp = sub.add_parser(
         "init", parents=[common], formatter_class=raw,
@@ -1791,10 +2032,15 @@ id matches the one the recipient will see.""",
 examples:
   retalk send --peer bob "hello"
   retalk send --peer f1041c25c87351d8550b31cc6b13ab04 "hi, stranger"
+  retalk send --group team "standup in 5"
   retalk send --peer bob "psst" --dir ./alice --relay http://127.0.0.1:8766""")
-    sp.add_argument("--peer", metavar="PEER", required=True,
+    sp.add_argument("--peer", metavar="PEER",
                     help="recipient: a saved peer name (from `retalk add`) "
                          "or a raw 32-hex user id")
+    sp.add_argument("--group", metavar="NAME",
+                    help="send to a group instead: one pairwise-encrypted copy "
+                         "per member (see `retalk group --help`); cannot be "
+                         "combined with --peer")
     sp.add_argument("text", help="the message plaintext (quote it)")
     sp.add_argument("--save", dest="save_messages", action="store_true",
                     help="also keep a sealed local copy of THIS sent message, so "
@@ -1900,6 +2146,9 @@ examples:
     sp.add_argument("--peer", metavar="PEER",
                     help="show only the conversation with this peer, both "
                          "directions (a saved peer name or a 32-hex user id)")
+    sp.add_argument("--group", metavar="NAME",
+                    help="show only this group's messages (see "
+                         "`retalk group list`); cannot be combined with --peer")
     sp.set_defaults(fn=cmd_history)
 
     sp = sub.add_parser(
@@ -1936,15 +2185,55 @@ contacts the relay.""",
         epilog="""\
 examples:
   retalk show alice bob
-  retalk show alice bob --follow""")
+  retalk show alice bob --follow
+  retalk show alice --group team --follow""")
     sp.add_argument("show_user", metavar="USER",
                     help="the identity whose saved conversation to render")
-    sp.add_argument("show_peer", metavar="PEER",
+    sp.add_argument("show_peer", metavar="PEER", nargs="?",
                     help="the other party: a saved peer name or 32-hex id")
+    sp.add_argument("--group", metavar="NAME",
+                    help="render this group's room instead of a two-party "
+                         "chat: every sender gets their own color; --follow "
+                         "polls every member for new mail")
     sp.add_argument("--follow", action="store_true",
                     help="keep polling for new messages and render them as "
                          "they arrive (ctrl-c to stop)")
     sp.set_defaults(fn=cmd_show)
+
+    sp = sub.add_parser(
+        "group", parents=[common], formatter_class=raw,
+        help="manage groups (client-side fan-out group chat)",
+        description="""\
+Group chat, retalk style: a group is a LOCAL roster of fingerprints, and
+`retalk send --group NAME` encrypts one pairwise copy per member — the relay
+never learns the roster (it just sees N ordinary messages). Each copy carries
+the roster inside the encrypted envelope, so receivers materialize the group
+automatically, can reply to everyone, and adopt roster changes (cooperative
+membership: the last sender's roster wins; there are no admins).""",
+        epilog="""\
+examples:
+  retalk group create team --members bob,carol
+  retalk group list
+  retalk group members team
+  retalk group add team dave
+  retalk group remove team carol
+  retalk group delete team
+  retalk send --group team "standup in 5"
+  retalk show alice --group team --follow""")
+    sp.add_argument("action", metavar="ACTION",
+                    choices=["create", "list", "members", "add", "remove",
+                             "delete"],
+                    help="one of: create, list, members, add, remove, delete")
+    sp.add_argument("name", metavar="NAME", nargs="?",
+                    help="the group's local name (every action except list)")
+    sp.add_argument("members", metavar="MEMBERS", nargs="?",
+                    help="comma-separated saved contact names or 32-hex ids "
+                         "(for add/remove; create also accepts --members)")
+    sp.add_argument("--members", dest="members_flag", metavar="LIST",
+                    help="comma-separated members, e.g. --members bob,carol")
+    sp.add_argument("--json", action="store_true",
+                    help="with list: one JSON object per group")
+    sp.set_defaults(fn=cmd_group)
 
     args = p.parse_args()
     try:

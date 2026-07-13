@@ -33,10 +33,18 @@ copies (kept by `receive --save`) in this same shape, oldest first.
 | `from` | string | the sender's user id (a key fingerprint, not the message id). |
 | `name` | string | display label: your saved peer name; else the sender's self-chosen name prefixed `~` (unverified); else `""`. |
 | `text` | string | the decrypted message body. |
+| `group` | string | *(group mail only)* the group's name, as the sender knows it. |
+| `group_id` | string | *(group mail only)* the group's stable 32-hex id — thread on this, names can drift. |
 
 ```json
 {"id":"7d1f...c0","from":"1041c25c...","name":"bob","text":"hello"}
+{"id":"9a2e...11","from":"1041c25c...","name":"bob","group":"team","group_id":"5f0c...9d","text":"standup in 5"}
 ```
+
+A group message is an ordinary pairwise message whose encrypted envelope also
+carries the sender's roster; each member receives their own copy (client-side
+fan-out — the relay sees nothing group-shaped). `retalk history` adds the same
+two fields on saved group rows.
 
 There is no timestamp field: message timing is metadata the relay sees, not
 part of the authenticated message, so it is deliberately not surfaced here.

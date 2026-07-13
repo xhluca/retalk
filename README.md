@@ -242,6 +242,7 @@ One line per subcommand, matching `retalk --help`. Run
 | `init` | Create a new identity (the only command that ever does) and publish its keys. |
 | `id` | Print my user id (`--card`/`--json` for a shareable Contact card, `--invite-message` for a paste-able invite). |
 | `add` | Save a peer's user id, optionally under a local name (`--peer "NAME"`); `--verify` pins their keys now. |
+| `group` | Manage groups: local rosters for fan-out group chat (`create`/`list`/`members`/`add`/`remove`/`delete`). |
 | `verify` | Record a saved peer's keys (explicit first contact). |
 | `contacts` | List saved peers; `--show` one as a Contact card, `--remove` one. |
 | `share` | Send a saved contact to a peer (an introduction). |
@@ -249,10 +250,10 @@ One line per subcommand, matching `retalk --help`. Run
 | `block` | Silently drop a sender's messages (`--remove` to undo, `--list` them). |
 | `sync` | Reconcile this identity with the relay (keys + outbox). |
 | `register` | Publish this identity's keys to the relay (make it reachable). |
-| `send` | Encrypt and send one message. |
+| `send` | Encrypt and send one message (`--peer` for a person, `--group` for a room). |
 | `receive` | Decrypt pending messages (`--follow` to keep listening). |
 | `history` | Replay messages saved by `send`/`receive --save`. |
-| `show` | Render the saved conversation with a peer as a chat (`--follow` keeps it live). |
+| `show` | Render a saved conversation as a chat (`--group` for rooms, `--follow` keeps it live). |
 | `config` | Show or set owner-wide defaults (e.g. the default relay). |
 
 Every command picks the identity it acts as from `--dir DIR`, then

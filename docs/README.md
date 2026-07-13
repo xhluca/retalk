@@ -242,7 +242,7 @@ conventions.
 
 ## Command reference
 
-`retalk` has fifteen subcommands. This is the quick reference; run `retalk
+`retalk` has sixteen subcommands. This is the quick reference; run `retalk
 <command> --help` for the full text, and see [STANDARD.md](STANDARD.md) for the
 JSON each one emits. Most commands work entirely on your local store — only the
 ones that touch a mailbox reach the relay.
@@ -252,6 +252,7 @@ ones that touch a mailbox reach the relay.
 | `init` | Create a new identity (keypair + store) and publish its keys. The only command that creates one. | yes² |
 | `id` | Print this identity's user id (its public-key fingerprint). | no |
 | `add` | Save a peer's user id, optionally under a local name; `--verify` pins their keys now. | no¹ |
+| `group` | Manage local group rosters for fan-out group chat. | no |
 | `verify` | Record a saved peer's public keys (explicit first contact). | yes¹ |
 | `contacts` | List saved peers; `--show` one as a Contact card, `--remove` one. | no |
 | `share` | Send a contact to a peer (an introduction). | yes |
@@ -426,6 +427,36 @@ interleaved, with date separators. It displays exactly what was saved (`--save`
 / `RETALK_SAVE_MESSAGE=1`), decrypted from its at-rest seal.
 
 - `--follow` — keep the chat live: poll the relay for `PEER`'s new mail (saving each message like `receive --save`) and render new saved rows — including ones another terminal writes — until ctrl-c. A plain `show` never contacts the relay.
+- `--group NAME` — render a group's room instead of a two-party chat (in place of `PEER`): every sender gets their own color and marker; `--follow` polls every roster member.
+
+### Groups — `group`, `send --group`
+
+Group chat is **client-side fan-out**: a group is a *local* roster of
+fingerprints, and `retalk send --group NAME` encrypts one ordinary pairwise
+copy per member. The relay never learns the roster — it just sees N messages —
+and no new cryptography is involved. Inside each encrypted envelope travels
+`{group: {id, name, members}}` plus a shared thread id (`mid`), so receivers
+thread the copies, **materialize the group automatically** on first contact,
+and can reply to everyone with the same `send --group`.
+
+Membership is **cooperative**: each incoming group message's roster replaces
+the receiver's local copy (last sender wins). There are no admins and no
+enforcement — encryption still gates who can *read* (each copy is pairwise
+Olm), but anyone in the room can grow or shrink their own roster and it
+propagates with their next message. Removing yourself is `group delete`
+(peers stop copying you once their rosters catch up).
+
+**`retalk group ACTION ...`** — manage rosters, entirely offline:
+
+- `group create NAME --members bob,carol` — new group (members are saved contact names or raw 32-hex ids).
+- `group list` (`--json`) — your groups with sizes.
+- `group members NAME` — the roster with local names.
+- `group add NAME PEER[,PEER]` / `group remove NAME PEER` — edit the roster; changes reach everyone on your next group send.
+- `group delete NAME` — forget the group locally.
+
+Group messages appear in `receive` output with flat `group`/`group_id` fields,
+in `history --group NAME`, and as a multi-party room in
+`show USER --group NAME [--follow]`.
 
 ### Maintenance — `sync`, `register`, `config`
 
