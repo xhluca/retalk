@@ -97,11 +97,12 @@ class TestShow(unittest.TestCase):
 
     def test_follow_renders_incoming_live(self):
         self.cli("send", "--peer", "bob", "opener", "-u", "alice", "--save")
+        # binary pipe: a non-blocking read on a TEXT stream raises TypeError
+        # in the codec layer whenever the pipe is empty (bites on slow CI)
         proc = subprocess.Popen(
             [sys.executable, "-m", "retalk.cli", "show", "bob", "alice",
              "--follow"],
-            env=self._env(), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            text=True)
+            env=self._env(), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         try:
             time.sleep(2)                       # let the first poll run
             self.cli("send", "--peer", "bob", "a live one", "-u", "alice")
@@ -109,7 +110,7 @@ class TestShow(unittest.TestCase):
             got = ""
             os.set_blocking(proc.stdout.fileno(), False)
             while time.time() < deadline and "a live one" not in got:
-                got += proc.stdout.read() or ""
+                got += (proc.stdout.read() or b"").decode("utf-8", "replace")
                 time.sleep(0.5)
         finally:
             proc.terminate()
