@@ -468,6 +468,30 @@ def _group_upsert(store_db: Path, gid: str, name: str, members: list):
                gid, name, json.dumps(sorted(set(members))), time.time())
 
 
+def _group_materialize(store_db: Path, g: dict):
+    """Adopt a group arriving inside a message envelope. Group NAMES are local
+    handles (like peer names) and must stay unambiguous: a foreign group whose
+    name is already taken by a DIFFERENT local group gets a numeric suffix
+    (team -> team-2), and a known group never steals another group's name —
+    otherwise `send --group NAME` would pick one of two rooms at random."""
+    gid = g.get("id")
+    if not gid:
+        return
+    members = [fp for fp in g.get("members", []) if ID_RE.match(str(fp))]
+    name = g.get("name") or gid[:8]
+    groups = _groups(store_db)
+    taken = {nm for other, (nm, _m) in groups.items() if other != gid}
+    if gid in groups:
+        if name in taken:               # sender's name belongs to another room
+            name = groups[gid][0]       # keep our existing local handle
+    else:
+        base, n = name, 1
+        while name in taken:
+            n += 1
+            name = f"{base}-{n}"
+    _group_upsert(store_db, gid, name, members)
+
+
 def _open_user(args, need_server: bool = True, banner: bool = True) -> User:
     d = _resolve_store(args)
     store_db = d / STORE_FILE
@@ -1321,12 +1345,10 @@ def cmd_receive(args):
                 print(json.dumps(m), flush=True)
                 continue
             g = m.get("group") if isinstance(m.get("group"), dict) else None
-            if g and g.get("id"):
+            if g:
                 # cooperative membership: adopt the sender's roster (and name)
                 # — this also materializes a group you were just added to
-                _group_upsert(store_db, g["id"], g.get("name") or g["id"][:8],
-                              [fp for fp in g.get("members", [])
-                               if ID_RE.match(str(fp))])
+                _group_materialize(store_db, g)
             if save and "text" in m:
                 _save_message(store_db, u, m)  # sealed copy for `retalk history`
             if g:                            # printed shape: flat group tags
@@ -1505,12 +1527,8 @@ def cmd_show(args):
                     if "text" in m:
                         g = (m.get("group")
                              if isinstance(m.get("group"), dict) else None)
-                        if g and g.get("id"):
-                            _group_upsert(
-                                store_db, g["id"],
-                                g.get("name") or g["id"][:8],
-                                [x for x in g.get("members", [])
-                                 if ID_RE.match(str(x))])
+                        if g:
+                            _group_materialize(store_db, g)
                         _save_message(store_db, u, m)
             render_new()
             time.sleep(2)

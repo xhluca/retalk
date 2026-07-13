@@ -56,8 +56,10 @@ class TestGroups(unittest.TestCase):
         self.server.terminate()
         self.server.wait(timeout=10)
 
-    def _env(self):
-        home = os.path.join(self.tmp, "store")
+    def _env(self, user):
+        # one RETALK_HOME per user: four separate simulated machines that
+        # share nothing but the relay (no common config or global contacts)
+        home = os.path.join(self.tmp, f"home-{user}")
         os.makedirs(home, exist_ok=True)
         cfg = os.path.join(home, "config.json")
         if not os.path.exists(cfg):
@@ -69,8 +71,16 @@ class TestGroups(unittest.TestCase):
         return env
 
     def cli(self, *cmd, expect=0):
+        cmd = list(cmd)
+        if "-u" in cmd:                        # whose machine runs this?
+            user = cmd[cmd.index("-u") + 1]
+        elif cmd and cmd[0] == "show":
+            user = cmd[1]
+        else:
+            self.fail(f"can't tell whose machine runs {cmd}")
         r = subprocess.run([sys.executable, "-m", "retalk.cli", *cmd],
-                           capture_output=True, text=True, env=self._env())
+                           capture_output=True, text=True,
+                           env=self._env(user))
         self.assertEqual(r.returncode, expect,
                          f"{cmd}: rc={r.returncode}\n{r.stderr}")
         return r
@@ -149,7 +159,7 @@ class TestGroups(unittest.TestCase):
     def test_migration_and_errors(self):
         # a pre-group messages table (no gid/gname) migrates in place
         self.cli("send", "--peer", "bob", "dm", "-u", "alice", "--save")
-        db = os.path.join(self.tmp, "store", "alice", "store.db")
+        db = os.path.join(self.tmp, "home-alice", "alice", "store.db")
         con = sqlite3.connect(db)
         with con:
             con.execute("CREATE TABLE _m AS SELECT msg_id, from_fp, from_name,"
@@ -223,7 +233,8 @@ class TestGroups(unittest.TestCase):
         proc = subprocess.Popen(
             [sys.executable, "-m", "retalk.cli", "show", "alice",
              "--group", "team", "--follow"],
-            env=self._env(), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            env=self._env("alice"), stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL)
         try:
             time.sleep(2)                          # let the first poll run
             self.cli("send", "--group", "team", "bob live post", "-u", "bob")
@@ -240,6 +251,65 @@ class TestGroups(unittest.TestCase):
         self.assertIn("🔵 bob", got)               # sender got a room look
         self.assertIn("bob live post", got)        # and the live message landed
         print("PASS: show --group --follow renders live room traffic")
+
+    def test_multiple_groups_isolated_views(self):
+        # one user in two rooms at once: tags, filters, and audiences never
+        # bleed between them
+        self.cli("group", "create", "team", "--members", "bob,carol",
+                 "-u", "alice")
+        self.cli("group", "create", "family", "--members", "dave",
+                 "-u", "alice")
+        self.cli("send", "--group", "team", "work ping", "-u", "alice",
+                 "--save")
+        self.cli("send", "--group", "family", "dinner at 7", "-u", "alice",
+                 "--save")
+        bob = self.recv("bob", "alice")
+        self.assertEqual([(m["group"], m["text"]) for m in bob],
+                         [("team", "work ping")])
+        dave = self.recv("dave", "alice")
+        self.assertEqual([(m["group"], m["text"]) for m in dave],
+                         [("family", "dinner at 7")])
+        t = [json.loads(l)["text"] for l in
+             self.cli("history", "--group", "team", "-u", "alice")
+             .stdout.splitlines()]
+        f = [json.loads(l)["text"] for l in
+             self.cli("history", "--group", "family", "-u", "alice")
+             .stdout.splitlines()]
+        self.assertEqual((t, f), (["work ping"], ["dinner at 7"]))
+        out = self.cli("show", "alice", "--group", "team").stdout
+        self.assertIn("work ping", out)
+        self.assertNotIn("dinner at 7", out)
+        print("PASS: two concurrent rooms stay fully isolated")
+
+    def test_group_name_collision_gets_suffixed(self):
+        # bob already has his OWN room called "team"; alice's different
+        # "team" arrives and must not shadow it (or vice versa)
+        self.cli("group", "create", "team", "--members", "carol", "-u", "bob")
+        r = self.cli("group", "create", "team", "--members", "bob,carol",
+                     "-u", "alice")
+        alice_gid = json.loads(r.stdout)["group_id"]
+        self.cli("send", "--group", "team", "alice's room", "-u", "alice")
+        self.recv("bob", "alice")
+        rows = [json.loads(l) for l in
+                self.cli("group", "list", "--json", "-u", "bob")
+                .stdout.splitlines()]
+        byname = {g["name"]: g for g in rows}
+        self.assertEqual(len(rows), 2)
+        self.assertIn("team", byname)             # bob's room keeps its name
+        self.assertIn("team-2", byname)           # the foreign one is suffixed
+        self.assertEqual(byname["team-2"]["group_id"], alice_gid)
+        # bob's `send --group team` deterministically means HIS room
+        self.cli("send", "--group", "team", "bobs own room", "-u", "bob")
+        got = self.recv("carol", "bob")
+        self.assertEqual(got[0]["group_id"], byname["team"]["group_id"])
+        # further traffic on alice's room updates team-2 without rename churn
+        self.cli("send", "--group", "team", "again", "-u", "alice")
+        self.recv("bob", "alice")
+        names = {json.loads(l)["name"] for l in
+                 self.cli("group", "list", "--json", "-u", "bob")
+                 .stdout.splitlines()}
+        self.assertEqual(names, {"team", "team-2"})
+        print("PASS: same-named foreign group is suffixed, never ambiguous")
 
 
 if __name__ == "__main__":
