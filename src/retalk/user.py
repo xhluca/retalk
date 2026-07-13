@@ -145,7 +145,11 @@ class User:
         # A row is deleted on an ack, or when a resend comes back refused (the
         # recipient negative-acked it on the relay).
         self._exec("CREATE TABLE IF NOT EXISTS outbox("
-                   "id TEXT PRIMARY KEY, peer TEXT, mtype INT, body TEXT, ts REAL)")
+                   "id TEXT PRIMARY KEY, peer TEXT, mtype INT, body TEXT, "
+                   "ts REAL, gid TEXT)")
+        ocols = [r[1] for r in self._fetchall("PRAGMA table_info(outbox)")]
+        if "gid" not in ocols:             # pre-group outbox: add the tag
+            self._exec("ALTER TABLE outbox ADD COLUMN gid TEXT")
         # hash of every processed ciphertext -> its message id, to re-ack duplicates
         self._exec("CREATE TABLE IF NOT EXISTS processed(hash TEXT PRIMARY KEY, msg_id TEXT)")
 
@@ -425,7 +429,8 @@ class User:
             if group is not None:
                 payload["group"] = group
                 payload["mid"] = mid or wire_id
-            self._send_envelope(to, payload, record_outbox=True)
+            self._send_envelope(to, payload, record_outbox=True,
+                                gid=(group or {}).get("id"))
             return wire_id
 
     def leave_group(self, to: str, group_id: str) -> str:
@@ -437,7 +442,7 @@ class User:
             mid = uuid.uuid4().hex
             self._send_envelope(to, {"id": mid, "kind": "group_leave",
                                      "group_id": group_id},
-                                record_outbox=True)
+                                record_outbox=True, gid=group_id)
             return mid
 
     def share(self, to: str, card: dict) -> str:
@@ -460,7 +465,8 @@ class User:
             self._send_envelope(to, payload, record_outbox=True)
             return mid
 
-    def _send_envelope(self, to: str, payload: dict, record_outbox: bool):
+    def _send_envelope(self, to: str, payload: dict, record_outbox: bool,
+                       gid: str | None = None):
         sessions = self._load_sessions(to)
         session = sessions[0] if sessions else None   # the freshest one
         if session is None:
@@ -475,8 +481,9 @@ class User:
         mtype, body = msg.to_parts()
         body_b64 = base64.b64encode(body).decode()
         if record_outbox:
-            self._exec("INSERT INTO outbox(id, peer, mtype, body, ts) VALUES(?,?,?,?,?)",
-                       payload["id"], to, mtype, body_b64, time.time())
+            self._exec("INSERT INTO outbox(id, peer, mtype, body, ts, gid) "
+                       "VALUES(?,?,?,?,?,?)",
+                       payload["id"], to, mtype, body_b64, time.time(), gid)
         result = self._call("send_message",
                                   {"to": to, "mtype": mtype, "body": body_b64})
         self._save_session(to, session)
@@ -491,10 +498,10 @@ class User:
 
     def _flush_outbox(self, older_than: float) -> int:
         rows = self._fetchall(
-            "SELECT id, peer, mtype, body FROM outbox WHERE ts<=?",
+            "SELECT id, peer, mtype, body, gid FROM outbox WHERE ts<=?",
             time.time() - older_than)
         sent = 0
-        for oid, peer, mtype, body in rows:
+        for oid, peer, mtype, body, gid in rows:
             res = self._call("send_message",
                              {"to": peer, "mtype": mtype, "body": body})
             if isinstance(res, dict) and res.get("refused"):
@@ -508,6 +515,23 @@ class User:
                     # sessions). Drop our sessions with them so the next send
                     # starts a fresh one instead of re-wedging.
                     self._exec("DELETE FROM sessions WHERE peer=?", peer)
+                    if gid:
+                        # a refused GROUP copy is the refuser saying "I am
+                        # not in that room" (signed by them): correct our
+                        # roster so we stop producing copies for them at all
+                        try:
+                            row = self._fetchone(
+                                "SELECT members FROM groups WHERE gid=?", gid)
+                            if row:
+                                kept = [fp for fp in json.loads(row)
+                                        if fp != peer]
+                                self._exec(
+                                    "UPDATE groups SET members=?, ts=? "
+                                    "WHERE gid=?",
+                                    json.dumps(sorted(set(kept))),
+                                    time.time(), gid)
+                        except sqlite3.OperationalError:
+                            pass      # library-only store: no groups table
                 continue
             sent += 1
         return sent

@@ -455,9 +455,13 @@ propagates with their next message.
 it sends every member an encrypted `group_leave` notice through the relay so
 their clients drop you from their rosters (no more wasted copies), and it
 writes a local tombstone so any straggler's copy is **refused** (a signed
-negative-ack, exactly like `block`) instead of delivered — the straggler's
-outbox heals on their next sync. Because the tombstone is local state, the
-leave survives members who never got the notice and even a relay reset.
+negative-ack, exactly like `block`) instead of delivered. The refusal also
+travels BACK: on the straggler's next sync their client verifies the
+leaver's signed refusal, drops the message, and removes the leaver from its
+own roster — so even a member who never reads the notice (or who re-adds
+the leaver later) self-corrects and stops producing copies. Because the
+tombstone is local state, the leave survives members who never got the
+notice and even a relay reset.
 Rejoining works too: `group join NAME` clears your tombstone, and the room
 reappears the moment a member adds you back and posts.
 

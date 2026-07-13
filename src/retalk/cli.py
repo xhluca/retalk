@@ -483,6 +483,15 @@ def _left_groups(store_db: Path) -> dict:
     return dict(_store_sql(store_db, "SELECT gid, name FROM left_groups"))
 
 
+def _apply_group_leave(store_db: Path, m: dict):
+    """Process a group_leave control record: drop the sender from that
+    group's roster so no more copies are fanned out their way."""
+    gl = _groups(store_db).get(m.get("group_id") or "")
+    if gl:
+        _group_upsert(store_db, m["group_id"], gl[0],
+                      [fp for fp in gl[1] if fp != m.get("from")])
+
+
 def _group_cap(args, store_db: Path) -> int:
     """The relay's advisory max group size (roster incl. yourself), from GET
     /info. Cached in the identity store; 100 when no relay ever answered."""
@@ -1449,10 +1458,7 @@ def cmd_receive(args):
             if m.get("kind") == "group_leave":
                 # the sender left that room: drop them from the roster so no
                 # more copies are fanned out their way
-                gl = _groups(store_db).get(m.get("group_id") or "")
-                if gl:
-                    _group_upsert(store_db, m["group_id"], gl[0],
-                                  [fp for fp in gl[1] if fp != m["from"]])
+                _apply_group_leave(store_db, m)
                 print(json.dumps(m), flush=True)
                 continue
             g = m.get("group") if isinstance(m.get("group"), dict) else None
@@ -1635,6 +1641,9 @@ def cmd_show(args):
         while True:
             for sender in follow_fps:     # every roster member in a group
                 for m in u.receive(sender):
+                    if m.get("kind") == "group_leave":
+                        _apply_group_leave(store_db, m)
+                        continue
                     if "text" in m:
                         g = (m.get("group")
                              if isinstance(m.get("group"), dict) else None)

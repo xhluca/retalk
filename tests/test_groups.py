@@ -362,6 +362,28 @@ class TestGroups(unittest.TestCase):
                          .fetchone()[0], 0)
         con.close()
 
+        # ...and the refusal CORRECTED carol's roster: bob is gone from her
+        # copy, so her next group send produces no copy for him at all
+        self.assertNotIn(self.fp["bob"], self.roster("carol", gid))
+        r = self.cli("send", "--group", "team", "carol knows now",
+                     "-u", "carol")
+        self.assertEqual(json.loads(r.stdout)["sent"], 1)   # alice only
+        self.recv("alice", "carol")
+        # her queued leave notice is still consumable (and idempotent)
+        notes = [json.loads(l) for l in
+                 self.cli("receive", "--peer", "bob", "-u", "carol")
+                 .stdout.splitlines()]
+        self.assertIn("group_leave", [n.get("kind") for n in notes])
+
+        # re-adding WITHOUT bob rejoining stays refused — and the refusal
+        # teaches alice all over again
+        self.cli("group", "add", "team", "bob", "-u", "alice")
+        self.cli("send", "--group", "team", "too soon", "-u", "alice")
+        self.assertEqual(
+            self.cli("receive", "--peer", "alice", "-u", "bob").stdout, "")
+        self.cli("sync", "-u", "alice")     # refusal -> roster drops bob again
+        self.assertNotIn(self.fp["bob"], self.roster("alice", gid))
+
         # rejoining: clear the tombstone, get re-added, mail flows again
         self.cli("group", "join", "team", "-u", "bob")
         self.cli("group", "add", "team", "bob", "-u", "alice")
@@ -369,7 +391,22 @@ class TestGroups(unittest.TestCase):
         got = [m["text"] for m in self.recv("bob", "alice")]
         self.assertEqual(got, ["welcome back"])
         self.assertIsNotNone(self.roster("bob", gid))
-        print("PASS: leave notifies, refuses stragglers, and rejoin works")
+        print("PASS: leave notifies, refusals correct rosters, rejoin works")
+
+    def test_leave_with_relay_down_still_protects(self):
+        self.cli("group", "create", "team", "--members", "bob,carol",
+                 "-u", "alice")
+        self.cli("send", "--group", "team", "hi", "-u", "alice")
+        self.recv("bob", "alice")
+        self.server.terminate()             # the relay vanishes
+        self.server.wait(timeout=10)
+        r = self.cli("group", "leave", "team", "-u", "bob")
+        self.assertIn("told 0/2", r.stderr)         # nobody reachable...
+        self.assertEqual(self.cli("group", "list", "-u", "bob").stdout, "")
+        # ...but the tombstone is local, so the leave still holds
+        r = self.cli("group", "join", "team", "-u", "bob")
+        self.assertIn("rejoined", r.stderr)
+        print("PASS: leave works offline — tombstone never needs the relay")
 
     def test_group_cap_from_relay(self):
         # a second relay that only allows rooms of 3 (RETALK_SERVER_MAX_GROUP_SIZE)
