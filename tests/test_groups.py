@@ -56,7 +56,7 @@ class TestGroups(unittest.TestCase):
         self.server.terminate()
         self.server.wait(timeout=10)
 
-    def cli(self, *cmd, expect=0):
+    def _env(self):
         home = os.path.join(self.tmp, "store")
         os.makedirs(home, exist_ok=True)
         cfg = os.path.join(home, "config.json")
@@ -66,8 +66,11 @@ class TestGroups(unittest.TestCase):
         for k in ("RETALK_USER", "RETALK_PASSPHRASE", "RETALK_RELAY",
                   "RETALK_SAVE_MESSAGE"):
             env.pop(k, None)
+        return env
+
+    def cli(self, *cmd, expect=0):
         r = subprocess.run([sys.executable, "-m", "retalk.cli", *cmd],
-                           capture_output=True, text=True, env=env)
+                           capture_output=True, text=True, env=self._env())
         self.assertEqual(r.returncode, expect,
                          f"{cmd}: rc={r.returncode}\n{r.stderr}")
         return r
@@ -165,6 +168,78 @@ class TestGroups(unittest.TestCase):
         r = self.cli("group", "create", "team", "-u", "alice", expect=2)
         self.assertIn("at least one member", r.stderr)
         print("PASS: messages-table migration and group error paths")
+
+    def test_membership_management(self):
+        self.cli("group", "create", "team", "--members", "bob,carol",
+                 "-u", "alice")
+        # members: roster with local names
+        out = self.cli("group", "members", "team", "-u", "alice").stdout
+        self.assertIn("bob", out)
+        self.assertIn(self.fp["carol"], out)
+        # duplicate name refused
+        r = self.cli("group", "create", "team", "--members", "bob",
+                     "-u", "alice", expect=2)
+        self.assertIn("already exists", r.stderr)
+        # remove carol: she stops getting alice's copies, bob still does
+        self.cli("group", "remove", "team", "carol", "-u", "alice")
+        self.cli("send", "--group", "team", "post-removal", "-u", "alice")
+        self.assertEqual(self.recv("carol", "alice"), [])
+        self.assertEqual([m["text"] for m in self.recv("bob", "alice")],
+                         ["post-removal"])
+        # removing a non-member is a clear error
+        r = self.cli("group", "remove", "team", "carol", "-u", "alice",
+                     expect=2)
+        self.assertIn("none of those are members", r.stderr)
+        # delete: the group is gone locally, sends to it refuse
+        self.cli("group", "delete", "team", "-u", "alice")
+        self.assertNotIn("team", self.cli("group", "list", "-u", "alice")
+                         .stdout)
+        r = self.cli("send", "--group", "team", "x", "-u", "alice", expect=2)
+        self.assertIn("no group", r.stderr)
+        print("PASS: members/remove/delete manage the roster as documented")
+
+    def test_fanout_partial_failure_isolated(self):
+        # one roster member that exists nowhere: their copy fails, the
+        # others' still go out, and the receipt says exactly that
+        ghost = "0123456789abcdef0123456789abcdef"
+        self.cli("group", "create", "team", "--members",
+                 f"bob,carol,{ghost}", "-u", "alice")
+        r = self.cli("send", "--group", "team", "who is missing?",
+                     "-u", "alice", expect=2)      # exit 2 flags the failure
+        receipt = json.loads(r.stdout)
+        self.assertEqual((receipt["sent"], receipt["failed"]), (2, 1))
+        self.assertIn(ghost, r.stderr)
+        for who in ("bob", "carol"):               # the live members got it
+            self.assertEqual([m["text"] for m in self.recv(who, "alice")],
+                             ["who is missing?"])
+        print("PASS: a dead member never blocks the rest of the fan-out")
+
+    def test_show_group_follow_live(self):
+        self.cli("group", "create", "team", "--members", "bob,carol",
+                 "-u", "alice")
+        self.cli("send", "--group", "team", "opener", "-u", "alice", "--save")
+        self.recv("bob", "alice")                  # bob materializes the group
+        # alice leaves the room open with --follow; bob posts while it runs
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "retalk.cli", "show", "alice",
+             "--group", "team", "--follow"],
+            env=self._env(), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        try:
+            time.sleep(2)                          # let the first poll run
+            self.cli("send", "--group", "team", "bob live post", "-u", "bob")
+            deadline = time.time() + 15
+            got = ""
+            os.set_blocking(proc.stdout.fileno(), False)
+            while time.time() < deadline and "bob live post" not in got:
+                got += (proc.stdout.read() or b"").decode("utf-8", "replace")
+                time.sleep(0.5)
+        finally:
+            proc.terminate()
+            proc.wait(timeout=10)
+        self.assertIn("opener", got)               # backlog rendered
+        self.assertIn("🔵 bob", got)               # sender got a room look
+        self.assertIn("bob live post", got)        # and the live message landed
+        print("PASS: show --group --follow renders live room traffic")
 
 
 if __name__ == "__main__":

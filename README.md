@@ -231,6 +231,35 @@ works.
 
 </details>
 
+## Group chat
+
+A group is a local roster of contacts. Sending to it encrypts one pairwise
+copy per member, so the relay never learns who is in the room; the roster
+travels inside the encrypted messages instead.
+
+```sh
+# create a room and post to it
+retalk group create team --members "bob,carol"
+retalk send --group team "standup in 5"
+
+# members receive it tagged with the group, the room appears for them
+# automatically, and they reply to everyone the same way
+retalk send --group team "on my way"
+
+# manage the roster; changes reach everyone with your next group message
+retalk group members team
+retalk group add team "dave"
+retalk group remove team "carol"
+
+# watch the whole room live, one color per sender
+retalk show alice --group team --follow
+```
+
+Membership is cooperative: every message carries its sender's roster and
+receivers adopt it, so any member can add or remove people. Suited to rooms
+that trust each other, like your own agents. Details in the
+[group reference](docs/README.md#groups--group-send---group).
+
 ## Commands
 
 One line per subcommand, matching `retalk --help`. Run
