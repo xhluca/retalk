@@ -46,6 +46,12 @@ carries the sender's roster; each member receives their own copy (client-side
 fan-out — the relay sees nothing group-shaped). `retalk history` adds the same
 two fields on saved group rows.
 
+Leaving a group emits a **control record** to each member instead of a chat
+message — `receive` prints it as
+`{"id", "from", "name", "kind": "group_leave", "group_id"}` and the client
+removes the sender from that group's roster. Like contact records, a consumer
+must not mistake it for chat: there is no `text` field.
+
 There is no timestamp field: message timing is metadata the relay sees, not
 part of the authenticated message, so it is deliberately not surfaced here.
 

@@ -85,7 +85,8 @@ class User:
                  store: str = "user.db", identity_keys: dict | None = None,
                  names: dict | None = None, blocked: set | None = None,
                  receive_policy: str = "open", known: set | None = None,
-                 api_key: str | None = None):
+                 api_key: str | None = None,
+                 left_groups: set | None = None):
         self.server_url = server_url
         self.name = name
         # optional relay access key (admission only) sent as a Bearer header;
@@ -98,6 +99,10 @@ class User:
         self.names = names or {}
         # fingerprints whose mail is silently dropped before any crypto work
         self.blocked = set(blocked) if blocked else set()
+        # group ids this user LEFT: their mail is refused (signed nack, like a
+        # block) after decryption identifies the group -- the group id lives
+        # inside the envelope, so it cannot be filtered any earlier
+        self.left_groups = set(left_groups) if left_groups else set()
         # "open" accepts anyone; "peers-only" accepts only known peers
         self.receive_policy = receive_policy
         # known-peer fingerprints; defaults to the union of pins and names so
@@ -423,6 +428,18 @@ class User:
             self._send_envelope(to, payload, record_outbox=True)
             return wire_id
 
+    def leave_group(self, to: str, group_id: str) -> str:
+        """Tell one member, over the normal encrypted channel, that this user
+        left the group -- their client removes us from its roster so no more
+        copies are fanned out our way (bandwidth, not secrecy: stragglers who
+        still send get refused via the negative-ack path)."""
+        with self._locked():
+            mid = uuid.uuid4().hex
+            self._send_envelope(to, {"id": mid, "kind": "group_leave",
+                                     "group_id": group_id},
+                                record_outbox=True)
+            return mid
+
     def share(self, to: str, card: dict) -> str:
         """Encrypt and send a contact card to a peer user ID, introducing a
         third user. Like send(), the ciphertext is kept in the local outbox
@@ -623,6 +640,13 @@ class User:
                     continue
                 self._save_session(sender, session)
                 data = json.loads(plaintext.decode())
+                g = data.get("group") if isinstance(data.get("group"), dict) \
+                    else None
+                if g and g.get("id") in self.left_groups:
+                    # a room this user LEFT: refuse instead of ack, so the
+                    # sender's outbox drops it and stops resending
+                    self._send_nack(body_hash)
+                    continue
                 if data["kind"] == "ack":
                     self._exec("DELETE FROM outbox WHERE id=?", data["id"])
                     continue
@@ -632,7 +656,13 @@ class User:
                     sender, {"id": data["id"], "kind": "ack"}, record_outbox=False)
                 name = self.names.get(sender) or (
                     f"~{data['name']}" if data.get("name") else "")
-                if data.get("kind") == "contact":
+                if data.get("kind") == "group_leave":
+                    # the sender left a group: a control record, not chat --
+                    # the caller removes them from its local roster
+                    out.append({"id": data["id"], "from": sender, "name": name,
+                                "kind": "group_leave",
+                                "group_id": data.get("group_id") or ""})
+                elif data.get("kind") == "contact":
                     # a shared contact card (`retalk share`): a distinct record
                     # so a consumer never mistakes a card for a chat message
                     out.append({"id": data["id"], "from": sender, "name": name,

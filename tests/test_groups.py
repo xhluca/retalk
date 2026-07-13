@@ -311,6 +311,121 @@ class TestGroups(unittest.TestCase):
         self.assertEqual(names, {"team", "team-2"})
         print("PASS: same-named foreign group is suffixed, never ambiguous")
 
+    def roster(self, who, gid):
+        rows = [json.loads(l) for l in
+                self.cli("group", "list", "--json", "-u", who)
+                .stdout.splitlines()]
+        for g in rows:
+            if g["group_id"] == gid:
+                return g["members"]
+        return None
+
+    def test_leave_full_protocol(self):
+        r = self.cli("group", "create", "team", "--members", "bob,carol",
+                     "-u", "alice")
+        gid = json.loads(r.stdout)["group_id"]
+        self.cli("send", "--group", "team", "hello room", "-u", "alice")
+        self.recv("bob", "alice")
+        self.recv("carol", "alice")
+
+        # bob leaves: every other member is notified over the relay
+        r = self.cli("group", "leave", "team", "-u", "bob")
+        self.assertIn("told 2/2", r.stderr)
+        self.assertEqual(self.cli("group", "list", "-u", "bob").stdout, "")
+
+        # alice processes the control record and drops bob from her roster...
+        out = [json.loads(l) for l in
+               self.cli("receive", "--peer", "bob", "-u", "alice")
+               .stdout.splitlines()]
+        self.assertEqual(out[0]["kind"], "group_leave")
+        self.assertEqual(out[0]["group_id"], gid)
+        self.assertNotIn(self.fp["bob"], self.roster("alice", gid))
+        # ...so her next group send fans out to carol only
+        r = self.cli("send", "--group", "team", "after the leave",
+                     "-u", "alice")
+        self.assertEqual(json.loads(r.stdout)["sent"], 1)
+
+        # a straggler who hasn't read the notice yet still copies bob: bob's
+        # client refuses it (nothing surfaces, no re-materialized room) and
+        # the straggler's outbox heals on sync
+        self.cli("send", "--group", "team", "carol did not know yet",
+                 "-u", "carol")
+        self.assertEqual(
+            self.cli("receive", "--peer", "carol", "-u", "bob").stdout, "")
+        self.assertEqual(self.cli("group", "list", "-u", "bob").stdout, "")
+        self.recv("alice", "carol")     # alice acks her copy normally
+        self.cli("sync", "-u", "carol")     # bob's copy: refused -> dropped
+        self.cli("receive", "--peer", "alice", "-u", "carol")  # ingest ack
+        con = sqlite3.connect(os.path.join(self.tmp, "home-carol", "carol",
+                                           "store.db"))
+        self.assertEqual(con.execute("SELECT COUNT(*) FROM outbox")
+                         .fetchone()[0], 0)
+        con.close()
+
+        # rejoining: clear the tombstone, get re-added, mail flows again
+        self.cli("group", "join", "team", "-u", "bob")
+        self.cli("group", "add", "team", "bob", "-u", "alice")
+        self.cli("send", "--group", "team", "welcome back", "-u", "alice")
+        got = [m["text"] for m in self.recv("bob", "alice")]
+        self.assertEqual(got, ["welcome back"])
+        self.assertIsNotNone(self.roster("bob", gid))
+        print("PASS: leave notifies, refuses stragglers, and rejoin works")
+
+    def test_group_cap_from_relay(self):
+        # a second relay that only allows rooms of 3 (RETALK_SERVER_MAX_GROUP_SIZE)
+        port2 = PORT + 100
+        env = dict(os.environ,
+                   RETALK_SERVER_DB=os.path.join(self.tmp, "server2.db"),
+                   RETALK_SERVER_HOST="127.0.0.1",
+                   RETALK_SERVER_PORT=str(port2),
+                   RETALK_SERVER_AUDIENCE=f"http://127.0.0.1:{port2}",
+                   RETALK_SERVER_MAX_GROUP_SIZE="3")
+        srv2 = subprocess.Popen([sys.executable, "-m", "retalk.server"],
+                                env=env, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+        try:
+            wait_for_port(port2)
+            # 3 users incl. self fits the cap of 3
+            self.cli("group", "create", "trio", "--members", "bob,carol",
+                     "--relay", f"http://127.0.0.1:{port2}", "-u", "alice")
+            # a 4th does not — and the error names the relay's limit
+            r = self.cli("group", "add", "trio", "dave",
+                         "--relay", f"http://127.0.0.1:{port2}", "-u", "alice",
+                         expect=2)
+            self.assertIn("relay allows 3", r.stderr)
+            # the default relay (no cap configured) allows the same 4th user
+            self.cli("group", "create", "quartet",
+                     "--members", "bob,carol,dave", "-u", "alice")
+        finally:
+            srv2.terminate()
+            srv2.wait(timeout=10)
+        print("PASS: the relay's max_group_size caps create/add")
+
+    def test_rename_is_local_and_stable(self):
+        r = self.cli("group", "create", "team", "--members", "bob",
+                     "-u", "alice")
+        gid = json.loads(r.stdout)["group_id"]
+        self.cli("send", "--group", "team", "one", "-u", "alice")
+        self.recv("bob", "alice")
+        # bob renames HIS label; alice's next message must not clobber it
+        self.cli("group", "rename", "team", "squad", "-u", "bob")
+        self.cli("send", "--group", "team", "two", "-u", "alice")
+        self.recv("bob", "alice")
+        names = {json.loads(l)["name"]: json.loads(l)["group_id"] for l in
+                 self.cli("group", "list", "--json", "-u", "bob")
+                 .stdout.splitlines()}
+        self.assertEqual(names, {"squad": gid})
+        # and bob addresses the room by HIS name
+        self.cli("send", "--group", "squad", "from bob", "-u", "bob")
+        self.assertEqual([m["text"] for m in self.recv("alice", "bob")],
+                         ["from bob"])
+        # renaming onto a taken name errors
+        self.cli("group", "create", "other", "--members", "carol", "-u", "bob")
+        r = self.cli("group", "rename", "squad", "other", "-u", "bob",
+                     expect=2)
+        self.assertIn("already exists", r.stderr)
+        print("PASS: rename is a local label; envelopes never clobber it")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -29,6 +29,7 @@ import sys
 import textwrap
 import time
 import urllib.error
+import urllib.request
 import uuid
 from pathlib import Path
 
@@ -468,6 +469,40 @@ def _group_upsert(store_db: Path, gid: str, name: str, members: list):
                gid, name, json.dumps(sorted(set(members))), time.time())
 
 
+def _ensure_left(store_db: Path):
+    _store_sql(store_db, "CREATE TABLE IF NOT EXISTS left_groups("
+               "gid TEXT PRIMARY KEY, name TEXT, ts REAL)")
+
+
+def _left_groups(store_db: Path) -> dict:
+    """{gid: name} of groups this user LEFT. A left group's mail is refused
+    (signed nack, like a block) and it never re-materializes -- until
+    `retalk group join` clears the tombstone. Local state, so it survives
+    members forgetting and relay resets alike."""
+    _ensure_left(store_db)
+    return dict(_store_sql(store_db, "SELECT gid, name FROM left_groups"))
+
+
+def _group_cap(args, store_db: Path) -> int:
+    """The relay's advisory max group size (roster incl. yourself), from GET
+    /info. Cached in the identity store; 100 when no relay ever answered."""
+    server = (getattr(args, "relay", None) or os.environ.get("RETALK_RELAY")
+              or _meta(store_db, "server_url") or _default_relay())
+    if server:
+        try:
+            with urllib.request.urlopen(
+                    server.rstrip("/") + "/info", timeout=4) as r:
+                cap = int(json.loads(r.read().decode())
+                          .get("max_group_size", 100))
+            _store_sql(store_db, "INSERT INTO meta(k, v) VALUES('group_cap',?)"
+                       " ON CONFLICT(k) DO UPDATE SET v=excluded.v", str(cap))
+            return cap
+        except Exception:
+            pass                       # offline: fall back to the cached value
+    cached = _meta(store_db, "group_cap")
+    return int(cached) if cached else 100
+
+
 def _group_materialize(store_db: Path, g: dict):
     """Adopt a group arriving inside a message envelope. Group NAMES are local
     handles (like peer names) and must stay unambiguous: a foreign group whose
@@ -477,13 +512,18 @@ def _group_materialize(store_db: Path, g: dict):
     gid = g.get("id")
     if not gid:
         return
+    if gid in _left_groups(store_db):   # left rooms never come back on their own
+        return
     members = [fp for fp in g.get("members", []) if ID_RE.match(str(fp))]
+    cached = _meta(store_db, "group_cap")
+    if len(members) > (int(cached) if cached else 100):
+        return                          # oversized foreign roster: don't adopt
     name = g.get("name") or gid[:8]
     groups = _groups(store_db)
     taken = {nm for other, (nm, _m) in groups.items() if other != gid}
     if gid in groups:
-        if name in taken:               # sender's name belongs to another room
-            name = groups[gid][0]       # keep our existing local handle
+        name = groups[gid][0]           # the local handle is the user's own:
+                                        # envelopes update rosters, never names
     else:
         base, n = name, 1
         while name in taken:
@@ -506,6 +546,7 @@ def _open_user(args, need_server: bool = True, banner: bool = True) -> User:
     names = {fp: name for fp, (name, _ik, _sk) in peers.items() if name}
     known = set(peers)
     blocked = _blocked_set(store_db)
+    left = set(_left_groups(store_db))
     # --peers-only this run, or the setting persisted by an earlier flag
     policy = ("peers-only"
               if (getattr(args, "peers_only", False)
@@ -517,7 +558,7 @@ def _open_user(args, need_server: bool = True, banner: bool = True) -> User:
         u = User(server, secret, name=_meta(store_db, "name") or "",
                  store=str(store_db), identity_keys=identity_keys, names=names,
                  blocked=blocked, receive_policy=policy, known=known,
-                 api_key=api_key)
+                 api_key=api_key, left_groups=left)
     except Exception:
         _die(f"could not unlock the identity at {d} (wrong passphrase?)")
     if banner:
@@ -1208,6 +1249,10 @@ def cmd_group(args):
         members = resolve_members(mstr.split(",") if mstr else [])
         if not members:
             _die("a group needs at least one member: --members NAME_OR_ID,...")
+        cap = _group_cap(args, store_db)
+        if len(set(members)) + 1 > cap:          # the roster counts you too
+            _die(f"group too large: {len(set(members)) + 1} users, and this "
+                 f"relay allows {cap} (its GET /info max_group_size)")
         gid = uuid.uuid4().hex
         _group_upsert(store_db, gid, args.name, members)
         print(json.dumps({"group_id": gid, "name": args.name,
@@ -1227,6 +1272,20 @@ def cmd_group(args):
                 print(f"{name}\t{gid}\t{len(members)} member(s)")
         return
 
+    if act == "join":
+        # clear a leave-tombstone: nothing else — the room reappears with the
+        # first message after a member adds this user back
+        ref = args.name or ""
+        for gid, nm in _left_groups(store_db).items():
+            if ref == gid or ref == nm:
+                _store_sql(store_db, "DELETE FROM left_groups WHERE gid=?",
+                           gid)
+                print(f"rejoined '{nm}': ask a member to add you back — the "
+                      "room reappears with their next group message",
+                      file=sys.stderr)
+                return
+        _die(f"'{ref}' is not a group you left — see `retalk group list`")
+
     # every other action names an existing group
     g = _group_by_name(store_db, args.name or "")
     if g is None:
@@ -1242,6 +1301,11 @@ def cmd_group(args):
         added = resolve_members(mstr.split(",") if mstr else [])
         if not added:
             _die("group add needs members: retalk group add NAME PEER[,PEER...]")
+        cap = _group_cap(args, store_db)
+        if len(set(members) | set(added)) + 1 > cap:
+            _die(f"group too large: {len(set(members) | set(added)) + 1} "
+                 f"users, and this relay allows {cap} (its GET /info "
+                 "max_group_size)")
         _group_upsert(store_db, gid, gname, members + added)
         print(f"added {len(set(added) - set(members))} member(s) to '{gname}' "
               "— the new roster reaches everyone on your next group send",
@@ -1257,6 +1321,44 @@ def cmd_group(args):
               "— cooperative membership: they stop getting YOUR copies now, "
               "and everyone else's after your roster reaches them",
               file=sys.stderr)
+    elif act == "rename":
+        new = mstr
+        if not new:
+            _die("group rename needs the new name: retalk group rename OLD NEW")
+        if ID_RE.match(new):
+            _die("group name looks like a fingerprint — pick a human name")
+        if any(nm == new for other, (nm, _m) in _groups(store_db).items()
+               if other != gid):
+            _die(f"a group named '{new}' already exists")
+        _group_upsert(store_db, gid, new, members)
+        print(f"renamed group '{gname}' -> '{new}' (your local label only — "
+              "the group id stays the same and peers keep their own names)",
+              file=sys.stderr)
+    elif act == "leave":
+        # 1. tell every member over the relay so they stop fanning copies our
+        #    way (bandwidth); best-effort — stragglers get refused instead
+        u = _open_user(args, need_server=False, banner=False)
+        me = u.fingerprint()
+        others = [fp for fp in members if fp != me]
+        notified = 0
+        for fp in others:
+            try:
+                u.leave_group(fp, gid)
+                notified += 1
+            except Exception:
+                pass
+        # 2. tombstone: this room's mail is refused from now on (like a
+        #    block, and just as durable — local state, so members forgetting
+        #    or a relay reset cannot bring it back)
+        _ensure_left(store_db)
+        _store_sql(store_db, "INSERT INTO left_groups(gid, name, ts) "
+                   "VALUES(?,?,?) ON CONFLICT(gid) DO UPDATE SET "
+                   "name=excluded.name, ts=excluded.ts",
+                   gid, gname, time.time())
+        _store_sql(store_db, "DELETE FROM groups WHERE gid=?", gid)
+        print(f"left '{gname}': told {notified}/{len(others)} member(s); "
+              "anyone who still sends gets refused automatically. Rejoin "
+              f"later with `retalk group join {gname}`", file=sys.stderr)
     elif act == "delete":
         _store_sql(store_db, "DELETE FROM groups WHERE gid=?", gid)
         print(f"deleted group '{gname}' locally (peers keep their own copy)",
@@ -1342,6 +1444,15 @@ def cmd_receive(args):
         for m in batch:                      # standard message / contact objects
             if args.save_contacts and m.get("kind") == "contact":
                 _stage_contact(store_db, m)  # to the inbox for `import --inbox`
+                print(json.dumps(m), flush=True)
+                continue
+            if m.get("kind") == "group_leave":
+                # the sender left that room: drop them from the roster so no
+                # more copies are fanned out their way
+                gl = _groups(store_db).get(m.get("group_id") or "")
+                if gl:
+                    _group_upsert(store_db, m["group_id"], gl[0],
+                                  [fp for fp in gl[1] if fp != m["from"]])
                 print(json.dumps(m), flush=True)
                 continue
             g = m.get("group") if isinstance(m.get("group"), dict) else None
@@ -2235,13 +2346,17 @@ examples:
   retalk group members team
   retalk group add team dave
   retalk group remove team carol
+  retalk group rename team work-team
+  retalk group leave team
+  retalk group join team
   retalk group delete team
   retalk send --group team "standup in 5"
   retalk show alice --group team --follow""")
     sp.add_argument("action", metavar="ACTION",
                     choices=["create", "list", "members", "add", "remove",
-                             "delete"],
-                    help="one of: create, list, members, add, remove, delete")
+                             "rename", "leave", "join", "delete"],
+                    help="one of: create, list, members, add, remove, "
+                         "rename, leave, join, delete")
     sp.add_argument("name", metavar="NAME", nargs="?",
                     help="the group's local name (every action except list)")
     sp.add_argument("members", metavar="MEMBERS", nargs="?",

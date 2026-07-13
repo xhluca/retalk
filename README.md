@@ -250,14 +250,24 @@ retalk send --group team "on my way"
 retalk group members team
 retalk group add team "dave"
 retalk group remove team "carol"
+retalk group rename team "work-team"
 
 # watch the whole room live, one color per sender
 retalk show alice --group team --follow
+
+# leave for real: members are told to stop, stragglers get refused
+# automatically, and the room cannot come back until you rejoin
+retalk group leave team
+retalk group join team
 ```
 
-Membership is cooperative: every message carries its sender's roster and
-receivers adopt it, so any member can add or remove people. Suited to rooms
-that trust each other, like your own agents. Details in the
+Groups are identified by a unique 32-hex id; the name is just your local
+label (rename it freely, two people can call the same room different
+things, and a clashing name errors at create). Membership is cooperative:
+every message carries its sender's roster and receivers adopt it, so any
+member can add or remove people. Suited to rooms that trust each other,
+like your own agents. Rooms are capped at 100 users by default (relay
+operators can change that). Details in the
 [group reference](docs/README.md#groups--group-send---group).
 
 ## Commands

@@ -100,6 +100,11 @@ RATE_WINDOW = 60  # seconds; the rate limit is "requests per this window"
 # recipient can record arbitrary hashes, so this is bounded by oldest-eviction
 # to stop the table growing without limit; 0 = unlimited (not recommended).
 MAX_REFUSED = int(os.environ.get("RETALK_SERVER_MAX_REFUSED", "1000"))
+# Advisory policy for clients: the largest group roster this relay wants
+# fanned out through it. The relay never SEES groups (they live inside the
+# encrypted envelopes) -- clients fetch this from GET /info and enforce it
+# locally at group create/add/adopt time.
+MAX_GROUP_SIZE = int(os.environ.get("RETALK_SERVER_MAX_GROUP_SIZE", "100"))
 # Time-to-live (seconds) for negative-acks: an expired one stops blocking and is
 # pruned, so the refused table shrinks over time, not only at the cap. A sender
 # that resends after expiry just gets re-dropped and re-nacked. 0 = no expiry.
@@ -606,6 +611,11 @@ class _Handler(BaseHTTPRequestHandler):
         return urlsplit(self.path).path.rstrip("/").rsplit("/", 1)[-1] == "admin"
 
     def do_GET(self):
+        # public, unauthenticated policy info (no secrets: just server limits)
+        if urlsplit(self.path).path.rstrip("/").rsplit("/", 1)[-1] == "info":
+            self._reply(200, json.dumps(
+                {"max_group_size": MAX_GROUP_SIZE}).encode())
+            return
         if not self._is_admin():
             self._reply(404, json.dumps({"error": "not found"}).encode())
             return
@@ -721,6 +731,7 @@ def main():
     global DB_PATH, HOST, PORT, AUDIENCE
     global MAX_MAILBOX, MAX_MAILBOX_PER_SENDER, MAX_BODY, RATE_LIMIT, TIMEOUT
     global ADMIN_PASSWORD, REQUIRE_API_KEY, MAX_REFUSED, REFUSED_TTL
+    global MAX_GROUP_SIZE
     global _RATE_LIMITER
     import argparse
     ap = argparse.ArgumentParser(
@@ -798,6 +809,10 @@ def main():
                          "pruned, so the refused table shrinks over time "
                          "(overrides RETALK_SERVER_REFUSED_TTL; default 604800 "
                          "= 7 days, 0 = no expiry)")
+    ap.add_argument("--max-group-size", metavar="N", type=int,
+                    help="advisory cap on group roster size, served at GET "
+                         "/info and enforced by clients at group create/add "
+                         "(overrides RETALK_SERVER_MAX_GROUP_SIZE; default 100)")
     args = ap.parse_args()
 
     if args.db:
@@ -806,6 +821,8 @@ def main():
         MAX_MAILBOX = args.max_mailbox
     if args.max_mailbox_per_sender is not None:
         MAX_MAILBOX_PER_SENDER = args.max_mailbox_per_sender
+    if args.max_group_size is not None:
+        MAX_GROUP_SIZE = args.max_group_size
     if args.host:
         HOST = args.host
     if args.port:
