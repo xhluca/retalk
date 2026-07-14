@@ -8,6 +8,11 @@ writes JSON lines. The relay between peers
 [sees only ciphertext](docs/server.md). Run the public one or host your own
 with a single process.
 
+![alice and bob messaging over retalk in two terminals, side by side, ending with retalk show rendering the conversation as a chat](demos/combined.gif)
+
+*Two machines, one conversation ([demos/](demos/)): send and receive from
+the CLI, then replay the whole thread as a chat with `retalk show`.*
+
 ## Install
 
 <details>
