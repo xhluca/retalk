@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>retalk - end-to-end encrypted messaging for the command line</title>
+<meta name="description" content="retalk is a small end-to-end encrypted messenger for the command line, built for automation first: agents, bots and cron jobs hold encrypted conversations. The relay sees only ciphertext.">
+<meta property="og:title" content="retalk">
+<meta property="og:description" content="A small end-to-end encrypted messenger for the command line, built for automation first.">
+<meta property="og:image" content="https://retalk.dev/assets/show-web.png">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>💬</text></svg>">
+<style>
+  :root {
+    --bg: #0e1418; --panel: #151d23; --line: #22303a; --ink: #dbe4ea;
+    --dim: #7b8b96; --accent: #38b28c; --accent-dim: #1f4d3f; --code: #101820;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--bg); color: var(--ink);
+    font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  code { background: var(--code); border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; font-size: 0.92em; }
+  pre {
+    background: var(--code); border: 1px solid var(--line); border-radius: 8px;
+    padding: 14px 16px; overflow-x: auto; font-size: 14px; line-height: 1.55;
+  }
+  pre code { background: none; border: none; padding: 0; }
+  .c { color: var(--dim); }
+  .g { color: var(--accent); }
+  header {
+    position: sticky; top: 0; z-index: 5; background: rgba(14, 20, 24, .92);
+    backdrop-filter: blur(6px); border-bottom: 1px solid var(--line);
+  }
+  nav {
+    max-width: 980px; margin: 0 auto; padding: 12px 20px;
+    display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+  }
+  nav .brand { font-weight: 700; font-size: 18px; color: var(--ink); }
+  nav .brand span { color: var(--accent); }
+  nav a.item { color: var(--dim); font-size: 14px; }
+  nav a.item:hover { color: var(--ink); text-decoration: none; }
+  nav .spacer { flex: 1; }
+  main { max-width: 980px; margin: 0 auto; padding: 0 20px; }
+  section { padding: 44px 0 8px; }
+  .hero { padding: 64px 0 24px; text-align: center; }
+  .hero h1 { font-size: 42px; line-height: 1.15; letter-spacing: -0.5px; }
+  .hero h1 em { color: var(--accent); font-style: normal; }
+  .hero p.tag { color: var(--dim); font-size: 19px; max-width: 700px; margin: 18px auto 0; }
+  .hero .cta { margin: 26px 0 10px; display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+  .btn {
+    display: inline-block; padding: 10px 18px; border-radius: 8px; font-size: 15px;
+    border: 1px solid var(--line); color: var(--ink); background: var(--panel);
+  }
+  .btn:hover { text-decoration: none; border-color: var(--accent); }
+  .btn.primary { background: var(--accent-dim); border-color: var(--accent); }
+  .install-line {
+    display: inline-flex; align-items: center; gap: 10px; margin-top: 8px;
+    background: var(--code); border: 1px solid var(--line); border-radius: 8px;
+    padding: 9px 14px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 15px;
+  }
+  .install-line button {
+    background: none; border: 1px solid var(--line); border-radius: 5px;
+    color: var(--dim); cursor: pointer; font-size: 12px; padding: 3px 8px;
+  }
+  .install-line button:hover { color: var(--ink); border-color: var(--accent); }
+  .demo img, .shot img {
+    width: 100%; border: 1px solid var(--line); border-radius: 10px; display: block;
+  }
+  .demo p.cap, .shot p.cap { color: var(--dim); font-size: 14px; text-align: center; margin-top: 10px; }
+  h2 { font-size: 26px; margin-bottom: 6px; }
+  h2 .em { margin-right: 8px; }
+  section > p.lead { color: var(--dim); max-width: 760px; margin-bottom: 18px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; margin-top: 22px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 18px; }
+  .card h3 { font-size: 16px; margin-bottom: 6px; }
+  .card p { color: var(--dim); font-size: 14.5px; }
+  .card p code { font-size: 0.9em; }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; align-items: start; margin-top: 18px; }
+  @media (max-width: 760px) { .cols { grid-template-columns: 1fr; } .hero h1 { font-size: 32px; } }
+  .steps { counter-reset: step; margin-top: 18px; }
+  .step { display: flex; gap: 14px; margin-bottom: 18px; }
+  .step .n {
+    counter-increment: step; flex: 0 0 30px; height: 30px; border-radius: 50%;
+    background: var(--accent-dim); border: 1px solid var(--accent); color: var(--ink);
+    display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 700;
+  }
+  .step .n::before { content: counter(step); }
+  .step .body { flex: 1; min-width: 0; }
+  .step .body p { color: var(--dim); font-size: 14.5px; margin-bottom: 8px; }
+  footer { border-top: 1px solid var(--line); margin-top: 56px; }
+  footer .inner {
+    max-width: 980px; margin: 0 auto; padding: 26px 20px; color: var(--dim); font-size: 14px;
+    display: flex; gap: 16px; flex-wrap: wrap; align-items: center;
+  }
+  footer .spacer { flex: 1; }
+</style>
+</head>
+<body>
+
+<header>
+  <nav>
+    <a class="brand" href="#">💬 re<span>talk</span></a>
+    <span class="spacer"></span>
+    <a class="item" href="#demo">Demo</a>
+    <a class="item" href="#quickstart">Quickstart</a>
+    <a class="item" href="#how">How it works</a>
+    <a class="item" href="#groups">Groups</a>
+    <a class="item" href="https://github.com/xhluca/retalk/tree/main/docs">Docs</a>
+    <a class="item" href="https://github.com/xhluca/retalk">GitHub</a>
+  </nav>
+</header>
+
+<main>
+
+<div class="hero">
+  <h1>End-to-end encrypted messaging<br>for the <em>command line</em></h1>
+  <p class="tag">retalk is a small E2EE messenger built for automation first:
+  agents, bots and cron jobs hold encrypted conversations with each other and
+  with you. Every command reads and writes JSON lines. The relay between
+  peers sees only ciphertext.</p>
+  <div class="cta">
+    <a class="btn primary" href="#quickstart">Get started</a>
+    <a class="btn" href="https://github.com/xhluca/retalk">View on GitHub</a>
+  </div>
+  <div class="install-line">
+    <span><span class="c">$</span> pip install retalk</span>
+    <button onclick="navigator.clipboard.writeText('pip install retalk'); this.textContent='copied'; setTimeout(() => this.textContent='copy', 1200)">copy</button>
+  </div>
+</div>
+
+<section id="demo" class="demo">
+  <h2><span class="em">🖥️</span>Two machines, one conversation</h2>
+  <p class="lead">alice and bob, side by side, over the real CLI: send,
+  receive, then replay the whole thread as a chat with <code>retalk show</code>.</p>
+  <img src="assets/combined.gif" alt="alice and bob messaging over retalk in two terminals, ending with retalk show rendering the conversation as a chat" loading="lazy">
+  <p class="cap">Recorded against a live relay. The relay stored only ciphertext the whole time.</p>
+</section>
+
+<section id="quickstart">
+  <h2><span class="em">🚀</span>Quickstart</h2>
+  <p class="lead">Three steps get you messaging. You run them on your machine;
+  your peer runs the same three on theirs.</p>
+  <div class="steps">
+    <div class="step"><div class="n"></div><div class="body">
+      <p>Create your identity. This prints your user ID, a 32-hex fingerprint
+      of your public keys. Share it with your peer over any channel.</p>
+<pre><code><span class="g">retalk</span> init --user alice --passphrase "&lt;YOUR-PASSPHRASE&gt;"
+<span class="c">export RETALK_USER=alice</span>
+<span class="c">export RETALK_PASSPHRASE="&lt;YOUR-PASSPHRASE&gt;"</span></code></pre>
+    </div></div>
+    <div class="step"><div class="n"></div><div class="body">
+      <p>Save your peer's ID under a name. <code>--verify</code> fetches and
+      pins their keys now; without it that happens on your first message.</p>
+<pre><code><span class="g">retalk</span> add "&lt;bobs-user-id&gt;" --peer "bob" --verify</code></pre>
+    </div></div>
+    <div class="step"><div class="n"></div><div class="body">
+      <p>Message each other.</p>
+<pre><code><span class="g">retalk</span> send --peer "bob" "hello"
+<span class="g">retalk</span> receive --peer "bob" --follow</code></pre>
+    </div></div>
+  </div>
+  <p class="lead" style="margin-top:6px">With no <code>--relay</code>, commands
+  use the public test relay at <code>https://relay.retalk.dev</code> (best
+  effort, no uptime guarantee). Point at your own with
+  <code>retalk init --relay URL</code>.</p>
+</section>
+
+<section id="how">
+  <h2><span class="em">🔒</span>How it works</h2>
+  <div class="grid">
+    <div class="card"><h3>🪪 Identity is a fingerprint</h3>
+      <p>Your user ID is the sha256 fingerprint of your public keys, so
+      clients detect and reject a server that swaps keys. Names are local
+      labels, never identity.</p></div>
+    <div class="card"><h3>🔐 Encryption is Olm</h3>
+      <p>Messages are sealed pairwise with the Olm double ratchet (via
+      <code>vodozemac</code>, the Matrix implementation), with one-time
+      prekeys so peers can reach you while you are offline.</p></div>
+    <div class="card"><h3>📦 The relay is untrusted</h3>
+      <p>It stores public keys and undelivered ciphertext, nothing else. No
+      accounts, no tokens: every request is self-signed, and signatures are
+      bound to the relay URL so captured requests replay nowhere.</p></div>
+    <div class="card"><h3>🔁 Delivery is at-least-once</h3>
+      <p>Senders keep an outbox until the recipient's encrypted ack arrives;
+      duplicates are dropped by message ID. A relay reset or migration loses
+      nothing.</p></div>
+    <div class="card"><h3>⚙️ Built to be scripted</h3>
+      <p>stdout is NDJSON data, stderr is banners and errors. One stable
+      <a href="https://github.com/xhluca/retalk/blob/main/docs/STANDARD.md">JSON contract</a>
+      for messages, receipts and contact cards pipes straight into
+      <code>jq</code>.</p></div>
+    <div class="card"><h3>🏠 Self-hosting is one process</h3>
+      <p>One Python process, one SQLite file, no server-side user setup.
+      Run it behind Caddy, a Cloudflare tunnel, or a free Hugging Face
+      Space. <a href="https://github.com/xhluca/retalk/blob/main/docs/server.md">Server docs</a>.</p></div>
+  </div>
+</section>
+
+<section id="groups">
+  <h2><span class="em">👥</span>Groups, without telling the relay</h2>
+  <p class="lead">A group is a local roster of contacts. Sending to it
+  encrypts one pairwise copy per member, so the relay never learns who is in
+  the room; the roster travels inside the encrypted messages. Leaving is
+  real: members are told to stop, stragglers get refused cryptographically,
+  and rejoining works.</p>
+<pre><code><span class="g">retalk</span> group create team --members "bob,carol"
+<span class="g">retalk</span> send --group team "standup in 5"
+<span class="g">retalk</span> show alice --group team --follow</code></pre>
+</section>
+
+<section id="webview" class="shot">
+  <h2><span class="em">💬</span>Your conversations, replayable</h2>
+  <p class="lead">Saving is opt-in (<code>--save</code> or
+  <code>RETALK_SAVE_MESSAGE=1</code>) and sealed at rest with your identity
+  keys. Replay as NDJSON with <code>retalk history</code>, as a terminal chat
+  with <code>retalk show</code>, or serve every conversation as a local web
+  app with <code>retalk show --web</code>: bound to 127.0.0.1, token-guarded,
+  and it never contacts the relay.</p>
+  <img src="assets/show-web.png" alt="retalk show --web: a sidebar of conversations and a chat-bubble thread view" loading="lazy">
+  <p class="cap"><code>retalk show --web</code>: a sidebar of chats and a live-updating thread view.</p>
+</section>
+
+<section>
+  <h2><span class="em">🤝</span>Agents talk too</h2>
+  <p class="lead">retalk powers
+  <a href="https://agent-talk.pages.dev">agent-talk</a>, a plugin that lets
+  coding agents (Claude Code, Codex, and friends) message each other across
+  sessions and machines, end-to-end encrypted, with the humans reading along.
+  If your agents need to coordinate, start there; retalk is the wire
+  underneath.</p>
+</section>
+
+</main>
+
+<footer>
+  <div class="inner">
+    <span>💬 retalk · MIT</span>
+    <span class="spacer"></span>
+    <a href="https://github.com/xhluca/retalk">GitHub</a>
+    <a href="https://github.com/xhluca/retalk/tree/main/docs">Docs</a>
+    <a href="https://pypi.org/project/retalk/">PyPI</a>
+    <a href="https://agent-talk.pages.dev">agent-talk</a>
+  </div>
+</footer>
+
+</body>
+</html>
