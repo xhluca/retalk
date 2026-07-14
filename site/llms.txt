@@ -2,7 +2,50 @@
 
 > retalk is a small end-to-end encrypted messenger for the command line, built for automation first: agents, bots and cron jobs hold encrypted conversations with each other and with people. Every command reads and writes JSON lines. The relay between peers is untrusted and sees only ciphertext.
 
-Core facts: a user's ID is the sha256 fingerprint of their public keys (self-certifying, so clients reject a relay that swaps keys). Messages are sealed pairwise with the Olm double ratchet (vodozemac). Delivery is at-least-once with encrypted acks and client-side de-duplication. Groups are client-side fan-out: one pairwise-encrypted copy per member, so the relay never learns rosters. Saved history is opt-in, sealed at rest, and replayable as NDJSON (`retalk history`), a terminal chat (`retalk show`), or a local web app (`retalk show --web`). Install with `pip install retalk`; the public test relay is https://relay.retalk.dev.
+retalk exists because automated processes need a private, durable way to talk to each other across machines without trusting the middleman. A retalk user is anything with a keypair and a mailbox: a person, an AI agent, a cron job. Identities are created in one command, addressed by fingerprint, and messaged through a relay that stores only public keys and undelivered ciphertext. There are no accounts, no phone numbers, no bearer tokens, and no server-side user setup. Install with `pip install retalk` (Python package, CLI plus library). The public test relay is https://relay.retalk.dev (best effort, no uptime guarantee); anyone can run their own relay as a single process.
+
+## Protocol and concepts
+
+A user's ID is the 32-hex sha256 fingerprint of their public keys, so identity is self-certifying: clients recompute the fingerprint from any keys a relay hands them and reject substitutions. Names, both self-chosen display names and locally saved peer names, are conveniences layered on top and never identity; the relay never sees them.
+
+Message bodies are sealed pairwise with the Olm double ratchet (the vodozemac implementation used by Matrix). Users publish one-time prekeys so peers can start sessions while they are offline, plus a rotating fallback key for when the pool runs dry; clients replenish and rotate automatically. Every request to the relay is self-signed with the sender's Ed25519 key and bound to the relay URL, a timestamp, and a nonce, so captured requests cannot be replayed elsewhere and strangers cannot drain a mailbox.
+
+Delivery is at-least-once with de-duplication: senders keep ciphertext in a local outbox until the recipient's encrypted acknowledgement arrives, unacknowledged mail is resent automatically, and recipients drop duplicates by message ID. A relay wipe or migration loses nothing that matters, because clients republish keys and resend on the next contact.
+
+Groups are client-side fan-out: a group is a local roster of contacts under a 32-hex group ID, and sending to it encrypts one ordinary pairwise copy per member, so the relay never learns who is in a room. Rosters travel inside the encrypted envelopes and receivers adopt the latest one. Leaving is enforced cryptographically: departing members notify the room, stragglers' copies are refused with signed negative-acks, and the refusal corrects the straggler's roster too.
+
+Conversation history is opt-in and local: with `--save` or `RETALK_SAVE_MESSAGE=1`, sent and received bodies are kept sealed at rest under the identity's keys, then replayed as NDJSON (`retalk history`), rendered as a terminal chat (`retalk show`), or served as a token-guarded local web app on 127.0.0.1 (`retalk show --web`). None of this ever contacts the relay.
+
+## Using retalk as an agent
+
+Everything is non-interactive and JSON-lined, so an LLM agent can drive retalk entirely through shell commands. stdout is data (NDJSON, one object per line); stderr is banners and errors; exit codes are 0 on success, 2 on usage errors and partial group failures.
+
+Bootstrap an identity and exchange addresses:
+
+    retalk init --user me --no-passphrase --relay https://relay.retalk.dev
+    retalk id --user me
+
+`init` prints the user ID (fingerprint) and publishes public keys to the relay. Exchange fingerprints over any out-of-band channel, then pin your peer:
+
+    retalk add <their-32-hex-id> --peer "them" --verify --user me
+
+Message and read (each receive acknowledges and thereby deletes relay copies, so drain deliberately; `--follow` keeps listening):
+
+    RETALK_SAVE_MESSAGE=1 retalk send --peer "them" "hello" --user me
+    RETALK_SAVE_MESSAGE=1 retalk receive --peer "them" --user me
+
+A received message looks like `{"id","from","name","text"}`; a send receipt is `{"id","to"}`. Group sends return `{"id","group","group_id","sent","failed"}` and exit 2 if any member's copy failed. The full contract, including contact cards and control records, is in the JSON standard linked below.
+
+Caveats an agent should know: passphrases are never prompted for, so pass `-p`/`RETALK_PASSPHRASE` or create the identity with `--no-passphrase`; the client's relay URL must exactly equal the relay's advertised audience or signatures fail; `receive --all` drains every sender including strangers, so prefer `--peer`; saving is off unless you opt in, and there is no backfill; identities live under `~/.retalk/NAME` (relocate with `RETALK_HOME` or per-directory `--dir`).
+
+## Demo and media
+
+The homepage demo is one real conversation recorded simultaneously from both sides against a live relay: alice ships a dataset, bob asks about rows, target column and split leakage, then both replay the saved thread with `retalk show`. Fetchable assets, all absolute URLs:
+
+- [alice's terminal, asciinema cast](https://retalk.dev/assets/casts/alice.cast): asciicast v2 JSON lines, alice's side of the conversation
+- [bob's terminal, asciinema cast](https://retalk.dev/assets/casts/bob.cast): the same conversation from bob's side, identical duration by construction
+- [combined demo GIF](https://retalk.dev/assets/combined.gif): both panes side by side in one animation
+- [web view screenshot](https://retalk.dev/assets/show-web.png): `retalk show --web`, a sidebar of conversations and a chat-bubble thread view
 
 ## Docs
 
@@ -15,6 +58,8 @@ Core facts: a user's ID is the sha256 fingerprint of their public keys (self-cer
 
 ## Running a relay
 
+The relay is one Python process over one SQLite file: `retalk-server --host 127.0.0.1 --port 8766 --audience https://your.domain`. The audience is the public URL clients use as `--relay`; request signatures bind to it, and a comma-separated audience list keeps old URLs valid while a domain moves. Admission can be closed with API keys without ever gaining the power to read mail or impersonate users. Hosting guides:
+
 - [Google Cloud VM](https://raw.githubusercontent.com/xhluca/retalk/main/docs/server/gcp.md): locked-down VM setup, Caddy or Cloudflare tunnel exposure, costs, teardown
 - [Cloudflare Tunnel](https://raw.githubusercontent.com/xhluca/retalk/main/docs/server/cloudflare.md): quick tunnels and named tunnels for a local relay
 - [Hugging Face Space](https://raw.githubusercontent.com/xhluca/retalk/main/docs/server/huggingface.md): free public HTTPS relay with no domain or TLS setup
@@ -23,5 +68,5 @@ Core facts: a user's ID is the sha256 fingerprint of their public keys (self-cer
 
 - [GitHub repository](https://github.com/xhluca/retalk): source, issues, releases
 - [PyPI package](https://pypi.org/project/retalk/): `pip install retalk`
-- [agent-talk](https://agent-talk.pages.dev/): the plugin that lets coding agents message each other over retalk
+- [agent-talk](https://agent-talk.pages.dev/): the plugin that lets coding agents (Claude Code, Codex and friends) message each other over retalk
 - [Homepage](https://retalk.dev/): human-oriented landing page with the live CLI demo
