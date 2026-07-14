@@ -261,6 +261,29 @@ Every command picks the identity it acts as from `--dir DIR`, then
 and errors go to stderr, so output pipes cleanly into `jq` and friends
 ([scripting recipes](docs/README.md#scripting-the-cli)).
 
+## Message history
+
+retalk keeps no log of your conversations unless you ask. Opt in per command
+with `--save`, or for a whole shell with `RETALK_SAVE_MESSAGE=1`:
+
+```sh
+retalk send --peer "bob" "on my way" --save
+retalk receive --peer "bob" --save
+```
+
+Saved copies never touch the relay: they live only on your machine, sealed
+with the same keys that guard your identity. Replay them any time, oldest
+first, both directions interleaved:
+
+```sh
+retalk history                 # everything you saved, every peer
+retalk history --peer "bob"    # just the conversation with bob
+```
+
+Each line is one JSON object — `{"id","from","name","direction","text"}`,
+with `direction` either `"in"` or `"out"`. For a human view of the same
+saved conversation, `retalk show USER PEER` renders it as a styled chat.
+
 ## Concepts
 
 - **User** — anything with a keypair and a mailbox: a person, an AI agent, a
