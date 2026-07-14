@@ -90,6 +90,29 @@ class TestShow(unittest.TestCase):
         self.assertLess(out.index("hello bob"), out.index("hi alice"))
         print("PASS: show renders the saved two-way conversation in order")
 
+    def test_dir_selects_identity(self):
+        """`show PEER --dir DIR` names the identity by directory (no USER
+        positional), like every other command."""
+        self.cli("send", "--peer", "bob", "hello bob", "-u", "alice", "--save")
+        self.cli("receive", "--peer", "alice", "-u", "bob", "--save")
+        self.cli("send", "--peer", "alice", "hi alice", "-u", "bob", "--save")
+        self.cli("receive", "--peer", "bob", "-u", "alice", "--save")
+
+        alice_dir = os.path.join(self.tmp, "store", "alice")
+        out = self.cli("show", "bob", "--dir", alice_dir).stdout
+        self.assertIn("alice ⇄ bob", out)          # identity came from --dir
+        self.assertIn("hello bob", out)
+        self.assertIn("hi alice", out)
+        self.assertIn("alice 🟢", out)
+        self.assertIn("🔵 bob", out)
+        # a USER positional alongside --dir is ambiguous and refused
+        r = self.cli("show", "alice", "bob", "--dir", alice_dir, expect=2)
+        self.assertIn("--dir", r.stderr)
+        # no identity at all is refused with a hint at both spellings
+        r = self.cli("show", expect=2)
+        self.assertIn("--dir", r.stderr)
+        print("PASS: show --dir selects the identity without a USER positional")
+
     def test_nothing_saved_hint(self):
         out = self.cli("show", "alice", "bob").stdout
         self.assertIn("no saved messages", out)
