@@ -321,8 +321,28 @@ retalk history --peer "bob"    # just the conversation with bob
 ```
 
 Each line is one JSON object — `{"id","from","name","direction","text"}`,
-with `direction` either `"in"` or `"out"`. For a human view of the same
-saved conversation, `retalk show USER PEER` renders it as a styled chat.
+with `direction` either `"in"` or `"out"`.
+
+### View it as a chat
+
+For a human view of the same saved messages, `retalk show` renders a
+conversation as a styled chat in the terminal, and `--web` serves all your
+conversations as a local web app: a sidebar of chats and a bubble thread
+view that updates live as new messages are saved.
+
+```sh
+retalk show alice bob
+retalk show alice bob --follow
+retalk show alice --web
+retalk show bob --dir ./alice-identity
+```
+
+![retalk show --web: a sidebar of conversations and a chat-bubble thread view](docs/assets/show-web.png)
+
+The web app is served on `127.0.0.1` only, and the printed URL carries a
+required per-run token, so nobody else — not even another user on the same
+machine — can open it. Like `history`, `show` reads only saved messages and
+never contacts the relay.
 
 ## Concepts
 
