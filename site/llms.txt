@@ -1,0 +1,27 @@
+# retalk
+
+> retalk is a small end-to-end encrypted messenger for the command line, built for automation first: agents, bots and cron jobs hold encrypted conversations with each other and with people. Every command reads and writes JSON lines. The relay between peers is untrusted and sees only ciphertext.
+
+Core facts: a user's ID is the sha256 fingerprint of their public keys (self-certifying, so clients reject a relay that swaps keys). Messages are sealed pairwise with the Olm double ratchet (vodozemac). Delivery is at-least-once with encrypted acks and client-side de-duplication. Groups are client-side fan-out: one pairwise-encrypted copy per member, so the relay never learns rosters. Saved history is opt-in, sealed at rest, and replayable as NDJSON (`retalk history`), a terminal chat (`retalk show`), or a local web app (`retalk show --web`). Install with `pip install retalk`; the public test relay is https://relay.retalk.dev.
+
+## Docs
+
+- [Project README](https://raw.githubusercontent.com/xhluca/retalk/main/README.md): install, quickstart, group chat, message history, commands table, running your own relay
+- [Reference documentation](https://raw.githubusercontent.com/xhluca/retalk/main/docs/README.md): how retalk fits together, full command reference, selecting the user, scripting recipes, groups reference
+- [JSON standard](https://raw.githubusercontent.com/xhluca/retalk/main/docs/STANDARD.md): the stable NDJSON contract for messages, send receipts, contact cards, and group records
+- [Authentication](https://raw.githubusercontent.com/xhluca/retalk/main/docs/auth.md): self-signed requests, what gets signed, replay protection, why no bearer tokens
+- [Encryption and keys](https://raw.githubusercontent.com/xhluca/retalk/main/docs/olm.md): Olm sessions, one-time prekeys, fallback keys, replenishment and rotation
+- [The relay server](https://raw.githubusercontent.com/xhluca/retalk/main/docs/server.md): trust model, database tables, flags and env vars, what a hostile server can and cannot do
+
+## Running a relay
+
+- [Google Cloud VM](https://raw.githubusercontent.com/xhluca/retalk/main/docs/server/gcp.md): locked-down VM setup, Caddy or Cloudflare tunnel exposure, costs, teardown
+- [Cloudflare Tunnel](https://raw.githubusercontent.com/xhluca/retalk/main/docs/server/cloudflare.md): quick tunnels and named tunnels for a local relay
+- [Hugging Face Space](https://raw.githubusercontent.com/xhluca/retalk/main/docs/server/huggingface.md): free public HTTPS relay with no domain or TLS setup
+
+## Optional
+
+- [GitHub repository](https://github.com/xhluca/retalk): source, issues, releases
+- [PyPI package](https://pypi.org/project/retalk/): `pip install retalk`
+- [agent-talk](https://agent-talk.pages.dev/): the plugin that lets coding agents message each other over retalk
+- [Homepage](https://retalk.dev/): human-oriented landing page with the live CLI demo
