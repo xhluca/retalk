@@ -186,7 +186,7 @@ retalk receive --peer "bob" --follow     # ...or keep listening
 What the steps rely on:
 
 - **Relay.** With no `--relay`, commands use the public test relay
-  `https://retalk-relay.mcgill-nlp.org` — fine for trying retalk out, but
+  `https://relay.retalk.dev` — fine for trying retalk out, but
   best-effort with **no uptime guarantee**. Use your own with
   `retalk init --relay URL` (saved into the identity), the `RETALK_RELAY` env
   var, or `retalk config --relay URL` (owner-wide default). See
@@ -324,7 +324,7 @@ and errors go to stderr, so output pipes cleanly into `jq` and friends
 
 > [!NOTE]
 > This is **optional**: the public test relay
-> `https://retalk-relay.mcgill-nlp.org` works out of the box (no uptime
+> `https://relay.retalk.dev` works out of the box (no uptime
 > guarantee — testing only). Self-host for anything you rely on.
 
 ```sh

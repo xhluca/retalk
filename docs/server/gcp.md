@@ -5,10 +5,11 @@ free-tier-sized machine, locked-down SSH, installing retalk, and the
 commands to stop and delete it when you're done. Everything here was run
 end to end on a fresh project.
 
-The VM only needs to make outbound connections (to install software and,
-once running, to hold a Cloudflare Tunnel open). It does not need any
-inbound ports open to the world. See [cloudflare.md](cloudflare.md) for
-the public-HTTPS half; this page is just the machine.
+For the public-HTTPS half there are two options, covered at the end of
+this page: serve your own domain straight from the VM with Caddy (opens
+ports 80/443), or hold a Cloudflare Tunnel open (outbound-only — no
+inbound ports at all; see [cloudflare.md](cloudflare.md)). Everything else
+on this page is just the machine.
 
 ## Before you start
 
@@ -111,10 +112,47 @@ RETALK_PASSPHRASE=a ~/rt/bin/retalk init --dir ~/alice --display-name alice
 # ... add a peer, send, receive — see the main README
 ```
 
-To make the server reachable from other machines, run it behind a
-Cloudflare Tunnel and set `RETALK_SERVER_AUDIENCE` to the public URL. Follow
-[cloudflare.md](cloudflare.md) on this same VM; nothing GCP-specific
-changes.
+To make the server reachable from other machines, give it a public HTTPS
+URL and set `RETALK_SERVER_AUDIENCE` to that URL. Two ways:
+
+- **Your own domain, served from the VM (Caddy).** An A record points at
+  the VM's IP and [Caddy](https://caddyserver.com) terminates TLS with an
+  automatic Let's Encrypt certificate. Opens ports 80/443 and makes the
+  VM's IP public; steps below.
+- **Cloudflare Tunnel.** No inbound ports at all; the VM dials out to
+  Cloudflare. Follow [cloudflare.md](cloudflare.md) on this same VM;
+  nothing GCP-specific changes. The tunnel's DNS route must live in the
+  same Cloudflare account that owns the tunnel.
+
+For the Caddy way, first pin the VM's IP (so it survives a stop/start) and
+open HTTP/HTTPS for this VM only:
+
+```sh
+IP=$(gcloud compute instances describe retalk-server --zone us-central1-a \
+  --format="value(networkInterfaces[0].accessConfigs[0].natIP)")
+gcloud compute addresses create retalk-relay-ip --region=us-central1 --addresses="$IP"
+gcloud compute firewall-rules create retalk-relay-https --allow=tcp:80,tcp:443 \
+  --source-ranges=0.0.0.0/0 --target-tags=retalk-relay
+gcloud compute instances add-tags retalk-server --zone=us-central1-a --tags=retalk-relay
+```
+
+Create an A record for your hostname (say `relay.example.com`) pointing at
+that IP. If the zone lives on Cloudflare, set the record to **DNS only**,
+so Caddy can answer the ACME challenge itself. Then, on the VM:
+
+```sh
+sudo apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl
+curl -1sLf "https://dl.cloudsmith.io/public/caddy/stable/gpg.key" | sudo gpg --yes --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -1sLf "https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt" | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+sudo apt-get update && sudo apt-get install -y caddy
+printf "%s\n" "relay.example.com {" "    reverse_proxy 127.0.0.1:8766" "}" | sudo tee /etc/caddy/Caddyfile
+sudo systemctl enable --now caddy
+sudo systemctl reload caddy
+```
+
+Caddy fetches the certificate on the first request and renews it by
+itself. The retalk server keeps listening on `127.0.0.1:8766`, now with
+`RETALK_SERVER_AUDIENCE=https://relay.example.com`.
 
 ## Security
 
@@ -134,9 +172,10 @@ default Compute service account; Google
 [recommends this](https://cloud.google.com/iam/docs/best-practices-service-accounts#default-service-account).)
 
 **Keep SSH off the public internet.** The firewall rule above only allows
-SSH from Google's IAP range, and the VM has no other inbound ports open
-(the Cloudflare Tunnel is outbound-only). Do not add a `0.0.0.0/0` rule for
-port 22 or for retalk's port.
+SSH from Google's IAP range. On the tunnel setup the VM has no other
+inbound ports open at all (the Cloudflare Tunnel is outbound-only); on the
+Caddy setup only 80/443 are open, and only Caddy listens there. Either
+way, do not add a `0.0.0.0/0` rule for port 22 or for retalk's port.
 
 **What a full compromise would expose.** Even if someone got root on the
 VM and copied the database, retalk stores only public key material and
