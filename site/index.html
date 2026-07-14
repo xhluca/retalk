@@ -9,6 +9,7 @@
 <meta property="og:description" content="A small end-to-end encrypted messenger for the command line, built for automation first.">
 <meta property="og:image" content="https://retalk.dev/assets/show-web.png">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>💬</text></svg>">
+<link rel="stylesheet" href="assets/vendor/asciinema-player/asciinema-player.css">
 <style>
   :root {
     --bg: #0e1418; --panel: #151d23; --line: #22303a; --ink: #dbe4ea;
@@ -70,6 +71,13 @@
   .demo img, .shot img {
     width: 100%; border: 1px solid var(--line); border-radius: 10px; display: block;
   }
+  .panes { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  @media (max-width: 760px) { .panes { grid-template-columns: 1fr; } }
+  .panes .player {
+    border: 1px solid var(--line); border-radius: 10px; overflow: hidden;
+    background: #121314; min-height: 120px;
+  }
+  .panes .ap-player { border-radius: 0; }
   .demo p.cap, .shot p.cap { color: var(--dim); font-size: 14px; text-align: center; margin-top: 10px; }
   h2 { font-size: 26px; margin-bottom: 6px; }
   h2 .em { margin-right: 8px; }
@@ -136,7 +144,13 @@
   <h2><span class="em">🖥️</span>Two machines, one conversation</h2>
   <p class="lead">alice and bob, side by side, over the real CLI: send,
   receive, then replay the whole thread as a chat with <code>retalk show</code>.</p>
-  <img src="assets/combined.gif" alt="alice and bob messaging over retalk in two terminals, ending with retalk show rendering the conversation as a chat" loading="lazy">
+  <div class="panes">
+    <div class="player" data-cast="assets/casts/alice.cast" data-sync-group="demo" data-speed="1.4"></div>
+    <div class="player" data-cast="assets/casts/bob.cast" data-sync-group="demo" data-speed="1.4"></div>
+  </div>
+  <noscript>
+    <img src="assets/combined.gif" alt="alice and bob messaging over retalk in two terminals, ending with retalk show rendering the conversation as a chat" loading="lazy">
+  </noscript>
   <p class="cap">Recorded against a live relay. The relay stored only ciphertext the whole time.</p>
 </section>
 
@@ -247,5 +261,7 @@
   </div>
 </footer>
 
+<script src="assets/vendor/asciinema-player/asciinema-player.min.js"></script>
+<script src="assets/players.js"></script>
 </body>
 </html>
