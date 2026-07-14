@@ -1524,6 +1524,65 @@ def cmd_history(args):
         print(json.dumps(rec), flush=True)
 
 
+def _show_web(args):
+    """Serve every saved conversation as a local web app (`show --web`):
+    sidebar of peers plus a bubble thread view, reading the same sealed rows
+    as `show`/`history`. Never contacts the relay — new messages appear when
+    any saving reader writes them. Bound to 127.0.0.1 and guarded by a
+    per-run URL token, since bodies are decrypted for display."""
+    store_db = _resolve_store(args) / STORE_FILE
+    _ensure_messages(store_db)
+    u = _open_user(args, need_server=False, banner=False)
+    me = _meta(store_db, "name") or args.show_user or "me"
+
+    def conversations():
+        peers = _effective_peers(store_db)
+        stats = {fp: (n, ts) for fp, n, ts in _store_sql(
+            store_db, "SELECT peer_fp, COUNT(*), MAX(ts) FROM messages "
+                      "GROUP BY peer_fp")}
+        convos = []
+        for fp, (nm, _ik, _sk) in peers.items():
+            n, ts = stats.pop(fp, (0, None))
+            convos.append({"fingerprint": fp, "name": nm or fp[:12] + "…",
+                           "count": n, "last_ts": ts})
+        for fp, (n, ts) in stats.items():  # saved rows from removed contacts
+            if fp:
+                convos.append({"fingerprint": fp, "name": fp[:12] + "…",
+                               "count": n, "last_ts": ts})
+        convos.sort(key=lambda c: (-(c["last_ts"] or 0), c["name"]))
+        return convos
+
+    def messages(peer_fp, after):
+        peers = _effective_peers(store_db)
+        out = []
+        for rowid, direction, from_name, body, ts in _store_sql(
+                store_db,
+                "SELECT rowid, direction, from_name, body, ts FROM messages "
+                "WHERE peer_fp=? AND rowid>? ORDER BY ts, rowid",
+                peer_fp, after):
+            if (direction or "in") == "out":
+                name = me
+            else:
+                name = (peers.get(peer_fp, (None, "", ""))[0] or from_name
+                        or peer_fp[:12] + "…")
+            out.append({"rowid": rowid, "direction": direction or "in",
+                        "name": name, "text": u.decrypt_at_rest(body),
+                        "ts": ts or 0})
+        return out
+
+    from retalk import webview
+    httpd, _token, url = webview.start(args.port, me, conversations, messages)
+    print(f"retalk web view for {me} — open:\n  {url}", file=sys.stderr)
+    print("127.0.0.1 only; the token in the URL is required. ctrl-c to stop.",
+          file=sys.stderr)
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        httpd.server_close()
+
+
 def cmd_show(args):
     """Render a saved conversation as a chat: time + username per message,
     both directions interleaved. `show USER PEER` is the two-party view;
@@ -1534,10 +1593,15 @@ def cmd_show(args):
     args.user = args.show_user            # the positional selects the identity
     args.dir = None
     group_ref = getattr(args, "group", None)
+    if getattr(args, "web", False):
+        if group_ref or args.show_peer:
+            _die("--web lists every conversation; give it alone (no PEER or "
+                 "--group)")
+        return _show_web(args)
     if group_ref and args.show_peer:
         _die("give PEER or --group, not both")
     if not group_ref and not args.show_peer:
-        _die("show needs a conversation: a PEER, or --group NAME")
+        _die("show needs a conversation: a PEER, --group NAME, or --web")
     store_db = _resolve_store(args) / STORE_FILE
     _ensure_messages(store_db)
     peers = _effective_peers(store_db)
@@ -2319,16 +2383,27 @@ no log unless you opt in, so `show` displays exactly what was kept.
 With --follow the chat stays live: it polls the relay for PEER's new mail
 (saving each message like `receive --save` does) and renders new saved rows —
 including ones another terminal writes — until ctrl-c. A plain `show` never
-contacts the relay.""",
+contacts the relay.
+
+With --web it serves ALL saved conversations as a local web app instead — a
+sidebar of peers and a chat-bubble thread view at a 127.0.0.1 URL guarded by
+a per-run token (bodies are decrypted for display). The page live-updates
+from the saved store; like plain `show`, it never contacts the relay, so new
+mail appears when any saving reader writes it (e.g. `receive --follow` with
+RETALK_SAVE_MESSAGE=1).""",
         epilog="""\
 examples:
   retalk show alice bob
   retalk show alice bob --follow
-  retalk show alice --group team --follow""")
+  retalk show alice --group team --follow
+  retalk show alice --web
+  retalk show alice --web --port 8877""")
     sp.add_argument("show_user", metavar="USER",
                     help="the identity whose saved conversation to render")
     sp.add_argument("show_peer", metavar="PEER", nargs="?",
-                    help="the other party: a saved peer name or 32-hex id")
+                    help="the other party: a saved peer name or 32-hex id "
+                         "(optional with --web, which lists every "
+                         "conversation)")
     sp.add_argument("--group", metavar="NAME",
                     help="render this group's room instead of a two-party "
                          "chat: every sender gets their own color; --follow "
@@ -2336,6 +2411,14 @@ examples:
     sp.add_argument("--follow", action="store_true",
                     help="keep polling for new messages and render them as "
                          "they arrive (ctrl-c to stop)")
+    sp.add_argument("--web", action="store_true",
+                    help="serve every saved conversation as a local web app "
+                         "instead: sidebar + chat bubbles at a tokened "
+                         "127.0.0.1 URL, live-updating from the saved store; "
+                         "never contacts the relay (ctrl-c to stop)")
+    sp.add_argument("--port", type=int, default=8765, metavar="N",
+                    help="port for --web, bound to 127.0.0.1 only (default "
+                         "8765; 0 picks a free port)")
     sp.set_defaults(fn=cmd_show)
 
     sp = sub.add_parser(

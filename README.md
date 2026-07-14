@@ -292,7 +292,7 @@ One line per subcommand, matching `retalk --help`. Run
 | `send` | Encrypt and send one message (`--peer` for a person, `--group` for a room). |
 | `receive` | Decrypt pending messages (`--follow` to keep listening). |
 | `history` | Replay messages saved by `send`/`receive --save`. |
-| `show` | Render a saved conversation as a chat (`--group` for rooms, `--follow` keeps it live). |
+| `show` | Render a saved conversation as a chat (`--group` for rooms, `--follow` keeps it live, `--web` serves a local web app of all conversations). |
 | `config` | Show or set owner-wide defaults (e.g. the default relay). |
 
 Every command picks the identity it acts as from `--dir DIR`, then
