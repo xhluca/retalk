@@ -1590,8 +1590,18 @@ def cmd_show(args):
     Reads only what was saved (send/receive --save); --follow keeps it live by
     polling the relay (saving like `receive --save`) and rendering any new
     saved rows — including ones another terminal writes."""
-    args.user = args.show_user            # the positional selects the identity
-    args.dir = None
+    if getattr(args, "dir", None):
+        # --dir names the identity directly, like every other command, so
+        # the single allowed positional is the peer
+        if args.show_peer:
+            _die("with --dir, give just the PEER: retalk show PEER --dir DIR")
+        args.show_peer, args.show_user = args.show_user, None
+        args.user = None
+    else:
+        if not args.show_user:
+            _die("show needs an identity: a USER positional, or --dir DIR")
+        args.user = args.show_user        # the positional selects the identity
+        args.dir = None
     group_ref = getattr(args, "group", None)
     if getattr(args, "web", False):
         if group_ref or args.show_peer:
@@ -1625,7 +1635,7 @@ def cmd_show(args):
                              else fp[:12] + "…")
         where, key, sub = "peer_fp=?", fp, fp
         follow_fps = [fp]
-    me = _meta(store_db, "name") or args.show_user
+    me = _meta(store_db, "name") or args.show_user or "me"
     my_fp = None
     # --follow talks to the relay; a plain show never does
     u = _open_user(args, need_server=bool(args.follow), banner=False)
@@ -2380,6 +2390,10 @@ per message, both directions interleaved, dated. It reads only the messages
 that were SAVED (send/receive --save, or RETALK_SAVE_MESSAGE=1): retalk keeps
 no log unless you opt in, so `show` displays exactly what was kept.
 
+The identity can also be named with --dir, like every other command; then
+drop the USER positional and give just the conversation:
+`retalk show PEER --dir DIR` (or --group/--web with no positional at all).
+
 With --follow the chat stays live: it polls the relay for PEER's new mail
 (saving each message like `receive --save` does) and renders new saved rows —
 including ones another terminal writes — until ctrl-c. A plain `show` never
@@ -2397,9 +2411,11 @@ examples:
   retalk show alice bob --follow
   retalk show alice --group team --follow
   retalk show alice --web
-  retalk show alice --web --port 8877""")
-    sp.add_argument("show_user", metavar="USER",
-                    help="the identity whose saved conversation to render")
+  retalk show alice --web --port 8877
+  retalk show bob --dir ./alice-identity""")
+    sp.add_argument("show_user", metavar="USER", nargs="?",
+                    help="the identity whose saved conversation to render "
+                         "(with --dir, omit this and give just the PEER)")
     sp.add_argument("show_peer", metavar="PEER", nargs="?",
                     help="the other party: a saved peer name or 32-hex id "
                          "(optional with --web, which lists every "
