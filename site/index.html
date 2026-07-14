@@ -186,19 +186,19 @@
 <section id="how">
   <h2><span class="em">🔒</span>How it works</h2>
   <div class="grid">
-    <div class="card"><h3>🪪 Identity is a fingerprint</h3>
+    <div class="card"><h3>🪪 Self-certifying IDs</h3>
       <p>Your user ID is the sha256 fingerprint of your public keys, so
       clients detect and reject a server that swaps keys. Names are local
       labels, never identity.</p></div>
-    <div class="card"><h3>🔐 Encryption is Olm</h3>
+    <div class="card"><h3>🔐 Olm encryption</h3>
       <p>Messages are sealed pairwise with the Olm double ratchet (via
       <code>vodozemac</code>, the Matrix implementation), with one-time
       prekeys so peers can reach you while you are offline.</p></div>
-    <div class="card"><h3>📦 The relay is untrusted</h3>
+    <div class="card"><h3>📦 An untrusted relay</h3>
       <p>It stores public keys and undelivered ciphertext, nothing else. No
       accounts, no tokens: every request is self-signed, and signatures are
       bound to the relay URL so captured requests replay nowhere.</p></div>
-    <div class="card"><h3>🔁 Delivery is at-least-once</h3>
+    <div class="card"><h3>🔁 At-least-once delivery</h3>
       <p>Senders keep an outbox until the recipient's encrypted ack arrives;
       duplicates are dropped by message ID. A relay reset or migration loses
       nothing.</p></div>
@@ -207,7 +207,7 @@
       <a href="https://github.com/xhluca/retalk/blob/main/docs/STANDARD.md">JSON contract</a>
       for messages, receipts and contact cards pipes straight into
       <code>jq</code>.</p></div>
-    <div class="card"><h3>🏠 Self-hosting is one process</h3>
+    <div class="card"><h3>🏠 Self-host in one process</h3>
       <p>One Python process, one SQLite file, no server-side user setup.
       Run it behind Caddy, a Cloudflare tunnel, or a free Hugging Face
       Space. <a href="https://github.com/xhluca/retalk/blob/main/docs/server.md">Server docs</a>.</p></div>
