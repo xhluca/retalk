@@ -242,7 +242,7 @@ conventions.
 
 ## Command reference
 
-`retalk` has fifteen subcommands. This is the quick reference; run `retalk
+`retalk` has sixteen subcommands. This is the quick reference; run `retalk
 <command> --help` for the full text, and see [STANDARD.md](STANDARD.md) for the
 JSON each one emits. Most commands work entirely on your local store — only the
 ones that touch a mailbox reach the relay.
@@ -252,6 +252,7 @@ ones that touch a mailbox reach the relay.
 | `init` | Create a new identity (keypair + store) and publish its keys. The only command that creates one. | yes² |
 | `id` | Print this identity's user id (its public-key fingerprint). | no |
 | `add` | Save a peer's user id, optionally under a local name; `--verify` pins their keys now. | no¹ |
+| `group` | Manage local group rosters for fan-out group chat. | no |
 | `verify` | Record a saved peer's public keys (explicit first contact). | yes¹ |
 | `contacts` | List saved peers; `--show` one as a Contact card, `--remove` one. | no |
 | `share` | Send a contact to a peer (an introduction). | yes |
@@ -426,6 +427,71 @@ interleaved, with date separators. It displays exactly what was saved (`--save`
 / `RETALK_SAVE_MESSAGE=1`), decrypted from its at-rest seal.
 
 - `--follow` — keep the chat live: poll the relay for `PEER`'s new mail (saving each message like `receive --save`) and render new saved rows — including ones another terminal writes — until ctrl-c. A plain `show` never contacts the relay.
+- `--group NAME` — render a group's room instead of a two-party chat (in place of `PEER`): every sender gets their own color and marker; `--follow` polls every roster member.
+
+### Groups — `group`, `send --group`
+
+Group chat is **client-side fan-out**: a group is a *local* roster of
+fingerprints, and `retalk send --group NAME` encrypts one ordinary pairwise
+copy per member. The relay never learns the roster — it just sees N messages —
+and no new cryptography is involved. Inside each encrypted envelope travels
+`{group: {id, name, members}}` plus a shared thread id (`mid`), so receivers
+thread the copies, **materialize the group automatically** on first contact,
+and can reply to everyone with the same `send --group`.
+
+A group's identity is its **32-hex group id** (minted at create, like a
+fingerprint); the **name is only your local label**. Rename it freely, two
+members can call the same room different things, an incoming envelope never
+overwrites the name you chose, and a name clash errors at create/rename
+(foreign rooms arriving under a taken name get a numeric suffix instead).
+
+Membership is **cooperative**: each incoming group message's roster replaces
+the receiver's local copy (last sender wins). There are no admins and no
+enforcement — encryption still gates who can *read* (each copy is pairwise
+Olm), but anyone in the room can grow or shrink their own roster and it
+propagates with their next message.
+
+**Leaving is real, and local-first.** `group leave NAME` does two things:
+it sends every member an encrypted `group_leave` notice through the relay so
+their clients drop you from their rosters (no more wasted copies), and it
+writes a local tombstone so any straggler's copy is **refused** (a signed
+negative-ack, exactly like `block`) instead of delivered. The refusal also
+travels BACK: on the straggler's next sync their client verifies the
+leaver's signed refusal, drops the message, and removes the leaver from its
+own roster — so even a member who never reads the notice (or who re-adds
+the leaver later) self-corrects and stops producing copies. Because the
+tombstone is local state, the leave survives members who never got the
+notice and even a relay reset.
+Rejoining works too: `group join NAME` clears your tombstone, and the room
+reappears the moment a member adds you back and posts.
+
+**Size cap.** Rosters are capped at **100 users** by default. The limit is
+relay policy: `retalk-server --max-group-size N` (or
+`RETALK_SERVER_MAX_GROUP_SIZE`) advertises it at `GET /info`, and clients
+enforce it at `group create`/`group add` (and refuse to adopt oversized
+incoming rosters).
+
+**Failure semantics.** `send --group` contacts the relay once up front, then
+sends one copy per member; one dead member never blocks the rest. The JSON
+receipt counts `sent`/`failed` (one reason per failed member on stderr) and
+the command exits `2` on any failure. If the relay itself is unreachable the
+command fails before any copy is attempted, with no receipt — a partial
+receipt always means some copies went through.
+
+**`retalk group ACTION ...`** — manage rosters (offline, except `leave`'s
+best-effort notices):
+
+- `group create NAME --members bob,carol` — new group (members are saved contact names or raw 32-hex ids).
+- `group list` (`--json`) — your groups with sizes.
+- `group members NAME` — the roster with local names.
+- `group add NAME PEER[,PEER]` / `group remove NAME PEER` — edit the roster; changes reach everyone on your next group send.
+- `group rename OLD NEW` — change your local label; the group id and everyone else's labels are untouched.
+- `group leave NAME` / `group join NAME` — leave for real (notify + refuse stragglers) / clear the tombstone to be re-addable.
+- `group delete NAME` — forget the group locally without notifying anyone.
+
+Group messages appear in `receive` output with flat `group`/`group_id` fields,
+in `history --group NAME`, and as a multi-party room in
+`show USER --group NAME [--follow]`.
 
 ### Maintenance — `sync`, `register`, `config`
 

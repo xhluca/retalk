@@ -85,7 +85,8 @@ class User:
                  store: str = "user.db", identity_keys: dict | None = None,
                  names: dict | None = None, blocked: set | None = None,
                  receive_policy: str = "open", known: set | None = None,
-                 api_key: str | None = None):
+                 api_key: str | None = None,
+                 left_groups: set | None = None):
         self.server_url = server_url
         self.name = name
         # optional relay access key (admission only) sent as a Bearer header;
@@ -98,6 +99,10 @@ class User:
         self.names = names or {}
         # fingerprints whose mail is silently dropped before any crypto work
         self.blocked = set(blocked) if blocked else set()
+        # group ids this user LEFT: their mail is refused (signed nack, like a
+        # block) after decryption identifies the group -- the group id lives
+        # inside the envelope, so it cannot be filtered any earlier
+        self.left_groups = set(left_groups) if left_groups else set()
         # "open" accepts anyone; "peers-only" accepts only known peers
         self.receive_policy = receive_policy
         # known-peer fingerprints; defaults to the union of pins and names so
@@ -140,7 +145,11 @@ class User:
         # A row is deleted on an ack, or when a resend comes back refused (the
         # recipient negative-acked it on the relay).
         self._exec("CREATE TABLE IF NOT EXISTS outbox("
-                   "id TEXT PRIMARY KEY, peer TEXT, mtype INT, body TEXT, ts REAL)")
+                   "id TEXT PRIMARY KEY, peer TEXT, mtype INT, body TEXT, "
+                   "ts REAL, gid TEXT)")
+        ocols = [r[1] for r in self._fetchall("PRAGMA table_info(outbox)")]
+        if "gid" not in ocols:             # pre-group outbox: add the tag
+            self._exec("ALTER TABLE outbox ADD COLUMN gid TEXT")
         # hash of every processed ciphertext -> its message id, to re-ack duplicates
         self._exec("CREATE TABLE IF NOT EXISTS processed(hash TEXT PRIMARY KEY, msg_id TEXT)")
 
@@ -398,17 +407,42 @@ class User:
                          fallback_max_age=fallback_max_age,
                          resend_after=resend_after)
 
-    def send(self, to: str, text: str) -> str:
+    def send(self, to: str, text: str, group: dict | None = None,
+             mid: str | None = None) -> str:
         """Encrypt and send a message to a peer user ID. The ciphertext is
         kept in a local outbox until the peer acknowledges decrypting it.
+
+        `group` tags the message as group mail: a {"id", "name", "members"}
+        dict carried inside the encrypted payload (group chat is client-side
+        fan-out — the caller sends one pairwise-encrypted copy per member, and
+        this dict is how receivers thread the copies and learn the roster).
+        `mid` overrides the per-copy message id's shared thread id: every copy
+        gets its own wire id (acks and the outbox stay strictly pairwise) while
+        payload["mid"] is identical across copies.
 
         Returns the message id (see docs/STANDARD.md) -- the same id the
         recipient sees, so the two sides can be correlated."""
         with self._locked():
-            mid = uuid.uuid4().hex
-            payload = {"id": mid, "kind": "msg", "text": text,
+            wire_id = uuid.uuid4().hex
+            payload = {"id": wire_id, "kind": "msg", "text": text,
                        "name": self.name}
-            self._send_envelope(to, payload, record_outbox=True)
+            if group is not None:
+                payload["group"] = group
+                payload["mid"] = mid or wire_id
+            self._send_envelope(to, payload, record_outbox=True,
+                                gid=(group or {}).get("id"))
+            return wire_id
+
+    def leave_group(self, to: str, group_id: str) -> str:
+        """Tell one member, over the normal encrypted channel, that this user
+        left the group -- their client removes us from its roster so no more
+        copies are fanned out our way (bandwidth, not secrecy: stragglers who
+        still send get refused via the negative-ack path)."""
+        with self._locked():
+            mid = uuid.uuid4().hex
+            self._send_envelope(to, {"id": mid, "kind": "group_leave",
+                                     "group_id": group_id},
+                                record_outbox=True, gid=group_id)
             return mid
 
     def share(self, to: str, card: dict) -> str:
@@ -431,7 +465,8 @@ class User:
             self._send_envelope(to, payload, record_outbox=True)
             return mid
 
-    def _send_envelope(self, to: str, payload: dict, record_outbox: bool):
+    def _send_envelope(self, to: str, payload: dict, record_outbox: bool,
+                       gid: str | None = None):
         sessions = self._load_sessions(to)
         session = sessions[0] if sessions else None   # the freshest one
         if session is None:
@@ -446,8 +481,9 @@ class User:
         mtype, body = msg.to_parts()
         body_b64 = base64.b64encode(body).decode()
         if record_outbox:
-            self._exec("INSERT INTO outbox(id, peer, mtype, body, ts) VALUES(?,?,?,?,?)",
-                       payload["id"], to, mtype, body_b64, time.time())
+            self._exec("INSERT INTO outbox(id, peer, mtype, body, ts, gid) "
+                       "VALUES(?,?,?,?,?,?)",
+                       payload["id"], to, mtype, body_b64, time.time(), gid)
         result = self._call("send_message",
                                   {"to": to, "mtype": mtype, "body": body_b64})
         self._save_session(to, session)
@@ -462,10 +498,10 @@ class User:
 
     def _flush_outbox(self, older_than: float) -> int:
         rows = self._fetchall(
-            "SELECT id, peer, mtype, body FROM outbox WHERE ts<=?",
+            "SELECT id, peer, mtype, body, gid FROM outbox WHERE ts<=?",
             time.time() - older_than)
         sent = 0
-        for oid, peer, mtype, body in rows:
+        for oid, peer, mtype, body, gid in rows:
             res = self._call("send_message",
                              {"to": peer, "mtype": mtype, "body": body})
             if isinstance(res, dict) and res.get("refused"):
@@ -479,6 +515,23 @@ class User:
                     # sessions). Drop our sessions with them so the next send
                     # starts a fresh one instead of re-wedging.
                     self._exec("DELETE FROM sessions WHERE peer=?", peer)
+                    if gid:
+                        # a refused GROUP copy is the refuser saying "I am
+                        # not in that room" (signed by them): correct our
+                        # roster so we stop producing copies for them at all
+                        try:
+                            row = self._fetchone(
+                                "SELECT members FROM groups WHERE gid=?", gid)
+                            if row:
+                                kept = [fp for fp in json.loads(row)
+                                        if fp != peer]
+                                self._exec(
+                                    "UPDATE groups SET members=?, ts=? "
+                                    "WHERE gid=?",
+                                    json.dumps(sorted(set(kept))),
+                                    time.time(), gid)
+                        except sqlite3.OperationalError:
+                            pass      # library-only store: no groups table
                 continue
             sent += 1
         return sent
@@ -611,6 +664,13 @@ class User:
                     continue
                 self._save_session(sender, session)
                 data = json.loads(plaintext.decode())
+                g = data.get("group") if isinstance(data.get("group"), dict) \
+                    else None
+                if g and g.get("id") in self.left_groups:
+                    # a room this user LEFT: refuse instead of ack, so the
+                    # sender's outbox drops it and stops resending
+                    self._send_nack(body_hash)
+                    continue
                 if data["kind"] == "ack":
                     self._exec("DELETE FROM outbox WHERE id=?", data["id"])
                     continue
@@ -620,12 +680,24 @@ class User:
                     sender, {"id": data["id"], "kind": "ack"}, record_outbox=False)
                 name = self.names.get(sender) or (
                     f"~{data['name']}" if data.get("name") else "")
-                if data.get("kind") == "contact":
+                if data.get("kind") == "group_leave":
+                    # the sender left a group: a control record, not chat --
+                    # the caller removes them from its local roster
+                    out.append({"id": data["id"], "from": sender, "name": name,
+                                "kind": "group_leave",
+                                "group_id": data.get("group_id") or ""})
+                elif data.get("kind") == "contact":
                     # a shared contact card (`retalk share`): a distinct record
                     # so a consumer never mistakes a card for a chat message
                     out.append({"id": data["id"], "from": sender, "name": name,
                                 "kind": "contact", "card": data.get("card", {})})
                 else:
-                    out.append({"id": data["id"], "from": sender,
-                                "name": name, "text": data["text"]})
+                    rec = {"id": data["id"], "from": sender,
+                           "name": name, "text": data["text"]}
+                    if isinstance(data.get("group"), dict):
+                        # group mail: carry the envelope's roster through so
+                        # the caller can thread it and update its local view
+                        rec["group"] = data["group"]
+                        rec["mid"] = data.get("mid") or data["id"]
+                    out.append(rec)
         return out

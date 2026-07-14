@@ -231,6 +231,45 @@ works.
 
 </details>
 
+## Group chat
+
+A group is a local roster of contacts. Sending to it encrypts one pairwise
+copy per member, so the relay never learns who is in the room; the roster
+travels inside the encrypted messages instead.
+
+```sh
+# create a room and post to it
+retalk group create team --members "bob,carol"
+retalk send --group team "standup in 5"
+
+# members receive it tagged with the group, the room appears for them
+# automatically, and they reply to everyone the same way
+retalk send --group team "on my way"
+
+# manage the roster; changes reach everyone with your next group message
+retalk group members team
+retalk group add team "dave"
+retalk group remove team "carol"
+retalk group rename team "work-team"
+
+# watch the whole room live, one color per sender
+retalk show alice --group team --follow
+
+# leave for real: members are told to stop, stragglers get refused
+# automatically, and the room cannot come back until you rejoin
+retalk group leave team
+retalk group join team
+```
+
+Groups are identified by a unique 32-hex id; the name is just your local
+label (rename it freely, two people can call the same room different
+things, and a clashing name errors at create). Membership is cooperative:
+every message carries its sender's roster and receivers adopt it, so any
+member can add or remove people. Suited to rooms that trust each other,
+like your own agents. Rooms are capped at 100 users by default (relay
+operators can change that). Details in the
+[group reference](docs/README.md#groups--group-send---group).
+
 ## Commands
 
 One line per subcommand, matching `retalk --help`. Run
@@ -242,6 +281,7 @@ One line per subcommand, matching `retalk --help`. Run
 | `init` | Create a new identity (the only command that ever does) and publish its keys. |
 | `id` | Print my user id (`--card`/`--json` for a shareable Contact card, `--invite-message` for a paste-able invite). |
 | `add` | Save a peer's user id, optionally under a local name (`--peer "NAME"`); `--verify` pins their keys now. |
+| `group` | Manage groups: local rosters for fan-out group chat (`create`/`list`/`members`/`add`/`remove`/`delete`). |
 | `verify` | Record a saved peer's keys (explicit first contact). |
 | `contacts` | List saved peers; `--show` one as a Contact card, `--remove` one. |
 | `share` | Send a saved contact to a peer (an introduction). |
@@ -249,10 +289,10 @@ One line per subcommand, matching `retalk --help`. Run
 | `block` | Silently drop a sender's messages (`--remove` to undo, `--list` them). |
 | `sync` | Reconcile this identity with the relay (keys + outbox). |
 | `register` | Publish this identity's keys to the relay (make it reachable). |
-| `send` | Encrypt and send one message. |
+| `send` | Encrypt and send one message (`--peer` for a person, `--group` for a room). |
 | `receive` | Decrypt pending messages (`--follow` to keep listening). |
 | `history` | Replay messages saved by `send`/`receive --save`. |
-| `show` | Render the saved conversation with a peer as a chat (`--follow` keeps it live). |
+| `show` | Render a saved conversation as a chat (`--group` for rooms, `--follow` keeps it live). |
 | `config` | Show or set owner-wide defaults (e.g. the default relay). |
 
 Every command picks the identity it acts as from `--dir DIR`, then

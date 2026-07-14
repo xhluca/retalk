@@ -33,10 +33,24 @@ copies (kept by `receive --save`) in this same shape, oldest first.
 | `from` | string | the sender's user id (a key fingerprint, not the message id). |
 | `name` | string | display label: your saved peer name; else the sender's self-chosen name prefixed `~` (unverified); else `""`. |
 | `text` | string | the decrypted message body. |
+| `group` | string | *(group mail only)* the group's name, as the sender knows it. |
+| `group_id` | string | *(group mail only)* the group's stable 32-hex id — thread on this, names can drift. |
 
 ```json
 {"id":"7d1f...c0","from":"1041c25c...","name":"bob","text":"hello"}
+{"id":"9a2e...11","from":"1041c25c...","name":"bob","group":"team","group_id":"5f0c...9d","text":"standup in 5"}
 ```
+
+A group message is an ordinary pairwise message whose encrypted envelope also
+carries the sender's roster; each member receives their own copy (client-side
+fan-out — the relay sees nothing group-shaped). `retalk history` adds the same
+two fields on saved group rows.
+
+Leaving a group emits a **control record** to each member instead of a chat
+message — `receive` prints it as
+`{"id", "from", "name", "kind": "group_leave", "group_id"}` and the client
+removes the sender from that group's roster. Like contact records, a consumer
+must not mistake it for chat: there is no `text` field.
 
 There is no timestamp field: message timing is metadata the relay sees, not
 part of the authenticated message, so it is deliberately not surfaced here.
@@ -58,6 +72,26 @@ as the `id` string.
 ```json
 {"id":"7d1f...c0","to":"38b151a1..."}
 ```
+
+When sending to a group (`retalk send --group NAME`), the single receipt
+describes the whole fan-out instead:
+
+| field | type | description |
+|-------|------|-------------|
+| `id` | string | the shared thread id carried by every member's copy; matches the `id` each member receives. |
+| `group` | string | the group's name, as you know it. |
+| `group_id` | string | the group's stable 32-hex id. |
+| `sent` | number | members whose copy was handed to the relay. |
+| `failed` | number | members whose copy could not be sent; one reason per member goes to stderr, and the command exits with code `2`. |
+
+```json
+{"id":"9a2e...11","group":"team","group_id":"5f0c...9d","sent":2,"failed":1}
+```
+
+The fan-out only starts after one successful relay contact, so if the relay
+itself is unreachable the command fails with no JSON at all — a partial
+receipt (`failed > 0`) always means the relay was up and some members'
+copies went through.
 
 ### Contact
 
