@@ -263,7 +263,7 @@ ones that touch a mailbox reach the relay.
 | `send` | Encrypt and send one message. | yes |
 | `receive` | Fetch, decrypt, and print pending messages. | yes |
 | `history` | Replay saved messages (both sent and received) as a conversation. | no |
-| `show` | Render the saved conversation with a peer as a chat; `--follow` keeps it live. | no³ |
+| `show` | Render the saved conversation with a peer as a chat; `--follow` keeps it live, `--web` serves all conversations as a local web app. | no³ |
 | `config` | Show or set owner-wide defaults (e.g. the default relay). | no |
 
 ¹ `verify` (and `add --verify`) reaches the relay only when fetching keys; with `--identity-key`/`--signing-key` it stays offline.
@@ -428,6 +428,8 @@ interleaved, with date separators. It displays exactly what was saved (`--save`
 
 - `--follow` — keep the chat live: poll the relay for `PEER`'s new mail (saving each message like `receive --save`) and render new saved rows — including ones another terminal writes — until ctrl-c. A plain `show` never contacts the relay.
 - `--group NAME` — render a group's room instead of a two-party chat (in place of `PEER`): every sender gets their own color and marker; `--follow` polls every roster member.
+- `--web` — serve **all** saved conversations as a local web app instead of rendering one in the terminal: a sidebar of peers and a chat-bubble thread view, live-updating from the saved store. `PEER` is optional with `--web`. The server binds to **127.0.0.1 only** and every request needs the random per-run token embedded in the printed URL — message bodies are decrypted for display, and on a shared machine the token keeps other local users out. Like a plain `show` it never contacts the relay: new mail appears once a saving reader writes it (e.g. `receive --peer NAME --follow` with `RETALK_SAVE_MESSAGE=1`).
+- `--port N` — port for `--web` (default 8765; `0` picks a free port).
 
 ### Groups — `group`, `send --group`
 
