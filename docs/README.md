@@ -471,6 +471,13 @@ relay policy: `retalk-server --max-group-size N` (or
 enforce it at `group create`/`group add` (and refuse to adopt oversized
 incoming rosters).
 
+**Failure semantics.** `send --group` contacts the relay once up front, then
+sends one copy per member; one dead member never blocks the rest. The JSON
+receipt counts `sent`/`failed` (one reason per failed member on stderr) and
+the command exits `2` on any failure. If the relay itself is unreachable the
+command fails before any copy is attempted, with no receipt — a partial
+receipt always means some copies went through.
+
 **`retalk group ACTION ...`** — manage rosters (offline, except `leave`'s
 best-effort notices):
 
