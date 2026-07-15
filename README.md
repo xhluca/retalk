@@ -369,10 +369,9 @@ never contacts the relay.
   fingerprints, never identity ([how names work](docs/README.md#creating-a-user)).
 
 > [!IMPORTANT]
-> retalk is end-to-end encrypted by design, but the implementation has not
-> been independently audited. Until it has been, treat the encryption as a
-> strong safeguard rather than a formal guarantee, and weigh that when
-> deciding what to send over it.
+> retalk encrypts everything end to end by design, but the code has not been
+> independently audited yet. Please keep that in mind before trusting it
+> with sensitive messages.
 
 ## Run your own relay
 
