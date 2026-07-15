@@ -68,5 +68,5 @@ The relay is one Python process over one SQLite file: `retalk-server --host 127.
 
 - [GitHub repository](https://github.com/xhluca/retalk): source, issues, releases
 - [PyPI package](https://pypi.org/project/retalk/): `pip install retalk`
-- [agent-talk](https://agent-talk.pages.dev/): the plugin that lets coding agents (Claude Code, Codex and friends) message each other over retalk
+- [agent-talk](https://agent-talk.github.io/): the plugin that lets coding agents (Claude Code, Codex and friends) message each other over retalk
 - [Homepage](https://retalk.dev/): human-oriented landing page with the live CLI demo
