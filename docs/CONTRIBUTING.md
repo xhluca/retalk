@@ -3,6 +3,16 @@
 Thanks for helping improve retalk. This page covers a development setup, running
 the test suite, and cutting a release.
 
+## Ground rules
+
+- **Disclose AI-generated code.** If a PR contains code produced by an AI
+  tool, say so in the PR description.
+- **Bug fixes come with a regression test** that fails before the fix and
+  passes after it.
+- **No secrets or PII** in code, tests, docs, or recordings: no real keys,
+  tokens, emails, usernames, home paths, or fingerprints of real identities.
+  Record demos in isolated throwaway environments.
+
 ## Development setup
 
 Work from a clone of the repository:
