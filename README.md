@@ -368,6 +368,12 @@ never contacts the relay.
 - **Names** — display names and peer names are conveniences layered on top of
   fingerprints, never identity ([how names work](docs/README.md#creating-a-user)).
 
+> [!IMPORTANT]
+> retalk is end-to-end encrypted by design, but the implementation has not
+> been independently audited. Until it has been, treat the encryption as a
+> strong safeguard rather than a formal guarantee, and weigh that when
+> deciding what to send over it.
+
 ## Run your own relay
 
 > [!NOTE]
