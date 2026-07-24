@@ -1432,11 +1432,19 @@ def cmd_receive(args):
     if args.peer and args.all:
         _die("give --peer or --all, not both")
     if not args.peer and not args.all:
-        _die("receive needs a target: --peer PEER for one sender, or --all "
-             "for every sender")
-    u = _open_user(args)
+        _die("receive needs a target: --peer PEER for one sender (repeat "
+             "--peer for several), or --all for every sender")
+    if args.interval is not None and not args.follow:
+        _die("--interval only applies with --follow")
+    if args.interval is not None and args.interval <= 0:
+        _die("--interval must be a positive number of seconds")
+    interval = 2.0 if args.interval is None else args.interval
+    u = _open_user(args, banner=not args.quiet)
     store_db = _resolve_store(args) / STORE_FILE
-    to = None if args.all else _peer_to_id(args.peer, store_db)
+    # one scoped read per --peer (deduped, order kept); [None] = whole mailbox
+    targets = ([None] if args.all else
+               list(dict.fromkeys(_peer_to_id(p, store_db)
+                                  for p in args.peer)))
 
     if args.all and not getattr(args, "peers_only", False):
         print(_style(
@@ -1474,15 +1482,19 @@ def cmd_receive(args):
                 m.pop("mid", None)  # library-level thread id, not CLI shape
             print(json.dumps(m), flush=True)
 
+    def drain():
+        for to in targets:
+            handle(u.receive(to))
+
     try:
         u.sync(resend=False)          # reachable + fresh keys; reading never resends
-        handle(u.receive(to))
+        drain()
         if not args.follow:
             return
         last_sync = time.monotonic()
         while True:
-            time.sleep(2)
-            handle(u.receive(to))
+            time.sleep(interval)
+            drain()
             if time.monotonic() - last_sync > 60:
                 u.sync(resend=False)  # key upkeep only; resends belong to send / `retalk sync`
                 last_sync = time.monotonic()
@@ -2275,15 +2287,19 @@ sender (encrypted, like everything else).
 
 Say whose messages to read: pass --peer PEER (a saved name or 32-hex user id)
 to read just that sender -- this is the recommended default, and leaves
-everyone else's mail in the mailbox for a later receive. --all instead drains
-*every* sender at once, including strangers you never added (each spends a
-one-time key), so use it deliberately; add --peers-only to drop strangers.
+everyone else's mail in the mailbox for a later receive. Repeat --peer to
+read several senders in one call; each is still read separately, so scoping
+is unchanged. --all instead drains *every* sender at once, including
+strangers you never added (each spends a one-time key), so use it
+deliberately; add --peers-only to drop strangers.
 
 Without --follow: drain the mailbox once and exit (good for cron and
-scripts). With --follow: poll every 2 seconds until interrupted, and once
-a minute run key maintenance — replenish one-time keys on the server and
-rotate the fallback key daily. Reading never resends your outbox; `send`
-and `retalk sync` do that.
+scripts). With --follow: poll every 2 seconds (or every --interval SECONDS)
+until interrupted, and once a minute run key maintenance — replenish
+one-time keys on the server and rotate the fallback key daily. Reading never
+resends your outbox; `send` and `retalk sync` do that. For agent
+integrations add --quiet: stderr loses the identity banner, so combined
+output is just the NDJSON records and real errors.
 
 Messages the server already handed over are never served again, so pipe
 --json output somewhere durable if you need a log.
@@ -2295,6 +2311,9 @@ and with --peers-only only saved peers (`retalk add`) are accepted.""",
 examples:
   retalk receive --peer bob            read only messages from bob (recommended)
   retalk receive --peer bob --follow   live tail of bob + key upkeep
+  retalk receive --peer bob --peer carol --follow --interval 60 --quiet
+                                       one calm 60s checker for two peers,
+                                       NDJSON only (agent-friendly)
   retalk receive --all --peers-only    read all saved contacts at once, drop strangers
   retalk receive --peer bob | jq .text      pipe the JSON lines to jq
   retalk receive --peer bob ; retalk import --inbox --list   read, then see staged contacts
@@ -2303,9 +2322,11 @@ each line is a JSON message object (see docs/STANDARD.md): "id", "from",
 "name", "text" -- or a contact record with "kind":"contact" and "card".
 Contacts peers share are also saved to the contact-inbox (see
 `retalk import --inbox`); pass --no-save-contacts to skip that.""")
-    sp.add_argument("--peer", metavar="PEER",
+    sp.add_argument("--peer", metavar="PEER", action="append",
                     help="read only this peer's messages (a saved peer name "
-                         "or a 32-hex user id); the recommended default")
+                         "or a 32-hex user id); the recommended default. "
+                         "Repeat it to read several peers in one call, each "
+                         "still scoped separately")
     sp.add_argument("--all", action="store_true",
                     help="read messages from every sender (the whole mailbox) "
                          "instead of targeting one peer. This drains and acks "
@@ -2313,8 +2334,16 @@ Contacts peers share are also saved to the contact-inbox (see
                          "spends a one-time key), so prefer --peer; pair with "
                          "--peers-only to drop strangers")
     sp.add_argument("--follow", action="store_true",
-                    help="keep polling every 2s and maintain keys every "
-                         "60s until ctrl-c")
+                    help="keep polling every 2s (change with --interval) and "
+                         "maintain keys every 60s until ctrl-c")
+    sp.add_argument("--interval", metavar="SECONDS", type=float,
+                    help="with --follow, poll every SECONDS seconds instead "
+                         "of the default 2 -- e.g. 60 for a calm background "
+                         "checker. Key maintenance keeps its own 60s clock")
+    sp.add_argument("-q", "--quiet", action="store_true",
+                    help="suppress the identity banner on stderr, so combined "
+                         "output carries only the NDJSON records (and real "
+                         "errors); meant for scripts and agent integrations")
     sp.add_argument("--peers-only", action="store_true",
                     help="accept mail only from saved peers (`retalk add`); "
                          "messages from unknown senders are dropped before "
