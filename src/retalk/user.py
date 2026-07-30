@@ -40,6 +40,8 @@ from contextlib import contextmanager
 
 import vodozemac as v
 
+from . import store
+
 try:                     # POSIX: advisory whole-file lock
     import fcntl
 except ImportError:      # Windows has no fcntl -- use msvcrt region locks
@@ -728,9 +730,7 @@ class User:
     # {"name", "fingerprint", "identity_key", "signing_key", "verified"}.
 
     def _ensure_peers(self):
-        self._exec("CREATE TABLE IF NOT EXISTS peers("
-                   "fingerprint TEXT PRIMARY KEY, name TEXT, "
-                   "identity_key TEXT, signing_key TEXT)")
+        store.ensure_peers(self._store_path)
 
     @staticmethod
     def _card(fp, name, ik, sk) -> dict:
@@ -756,10 +756,7 @@ class User:
         if not _ID_RE.match(fp or ""):
             raise ValueError("a contact is added by its 32-hex user id")
         fp = fp.lower()
-        self._ensure_peers()
-        self._exec("INSERT INTO peers(fingerprint, name) VALUES(?,?) "
-                   "ON CONFLICT(fingerprint) DO UPDATE SET "
-                   "name=COALESCE(excluded.name, peers.name)", fp, name)
+        store.upsert_peer(self._store_path, fp, name)
         if name:
             self.names.setdefault(fp, name)
             self.known.add(fp)
@@ -784,12 +781,8 @@ class User:
         if got != fp:
             raise PinMismatchError(
                 f"keys hash to {got}, not {fp} -- refusing to record them")
-        self._ensure_peers()
-        self._exec("INSERT INTO peers(fingerprint, identity_key, signing_key) "
-                   "VALUES(?,?,?) ON CONFLICT(fingerprint) DO UPDATE SET "
-                   "identity_key=excluded.identity_key, "
-                   "signing_key=excluded.signing_key",
-                   fp, identity_key, signing_key)
+        store.record_peer_keys(self._store_path, fp, identity_key,
+                               signing_key)
         self.identity_keys.setdefault(fp, identity_key)
         self.known.add(fp)
         return self.contact(fp)
@@ -819,7 +812,7 @@ class User:
         except KeyError:
             return False
         had = bool(self.contact(fp))
-        self._exec("DELETE FROM peers WHERE fingerprint=?", fp)
+        store.delete_peer(self._store_path, fp)
         return had
 
     # ---------- groups (client-side fan-out) ----------
@@ -829,33 +822,15 @@ class User:
     # rosters travel inside encrypted group mail and the latest writer wins.
     # Returned shape: {"id", "name", "members"} (member fingerprints, sorted).
 
-    def _ensure_group_tables(self):
-        self._exec("CREATE TABLE IF NOT EXISTS groups("
-                   "gid TEXT PRIMARY KEY, name TEXT, members TEXT, ts REAL)")
-        self._exec("CREATE TABLE IF NOT EXISTS left_groups("
-                   "gid TEXT PRIMARY KEY, name TEXT, ts REAL)")
-
     def _group_row(self, ref: str):
-        self._ensure_group_tables()
-        for gid, name, members in self._fetchall(
-                "SELECT gid, name, members FROM groups"):
-            if ref == gid or ref == name:
-                try:
-                    return gid, name, json.loads(members or "[]")
-                except ValueError:
-                    return gid, name, []
-        return None
+        return store.group_by_ref(self._store_path, ref)
 
     @staticmethod
     def _group_dict(gid, name, members) -> dict:
         return {"id": gid, "name": name, "members": sorted(set(members))}
 
     def _group_save(self, gid: str, name: str, members: list):
-        self._ensure_group_tables()
-        self._exec("INSERT INTO groups(gid, name, members, ts) VALUES(?,?,?,?) "
-                   "ON CONFLICT(gid) DO UPDATE SET name=excluded.name, "
-                   "members=excluded.members, ts=excluded.ts",
-                   gid, name, json.dumps(sorted(set(members))), time.time())
+        store.save_group(self._store_path, gid, name, members)
 
     def _require_group(self, ref: str):
         row = self._group_row(ref)
@@ -897,15 +872,8 @@ class User:
 
     def groups(self) -> list[dict]:
         """Every group this identity keeps, sorted by name."""
-        self._ensure_group_tables()
-        out = []
-        for gid, name, members in self._fetchall(
-                "SELECT gid, name, members FROM groups"):
-            try:
-                out.append(self._group_dict(gid, name,
-                                            json.loads(members or "[]")))
-            except ValueError:
-                out.append(self._group_dict(gid, name, []))
+        out = [self._group_dict(gid, name, members) for gid, (name, members)
+               in store.load_groups(self._store_path).items()]
         return sorted(out, key=lambda g: (g["name"] or "~", g["id"]))
 
     def group(self, ref: str) -> dict | None:
@@ -946,15 +914,13 @@ class User:
     def join_group(self, ref: str) -> None:
         """Clear this user's leave tombstone so the group can re-materialize
         the next time a member adds them back and posts."""
-        self._ensure_group_tables()
         row = self._group_row(ref)
-        self._exec("DELETE FROM left_groups WHERE gid=? OR name=?", ref, ref)
+        store.clear_left(self._store_path, ref)
         self.left_groups.discard(row[0] if row else ref)
 
     def left_group_ids(self) -> set:
         """Group ids this user has left (their mail is refused)."""
-        self._ensure_group_tables()
-        return {r[0] for r in self._fetchall("SELECT gid FROM left_groups")}
+        return set(store.left_groups(self._store_path))
 
     def leave_group(self, to: str, group_id: str | None = None) -> str | dict:
         """Two modes. leave_group(peer_fp, group_id) is the wire primitive:
@@ -979,10 +945,8 @@ class User:
                 told.append(fp)
             except Exception as e:      # notify best-effort, tombstone anyway
                 failed[fp] = str(e)
-        self._ensure_group_tables()
-        self._exec("INSERT OR REPLACE INTO left_groups(gid, name, ts) "
-                   "VALUES(?,?,?)", gid, name, time.time())
-        self._exec("DELETE FROM groups WHERE gid=?", gid)
+        store.add_left(self._store_path, gid, name)
+        store.delete_group(self._store_path, gid)
         self.left_groups.add(gid)
         return {"id": gid, "name": name, "told": told, "failed": failed}
 
@@ -1016,31 +980,11 @@ class User:
     # The same sealed `messages` table `send/receive --save` keeps: bodies
     # are encrypted at rest with the identity's key and decrypted on replay.
 
-    def _ensure_messages_table(self):
-        self._exec("CREATE TABLE IF NOT EXISTS messages("
-                   "msg_id TEXT PRIMARY KEY, from_fp TEXT, from_name TEXT, "
-                   "peer_fp TEXT, direction TEXT, body TEXT, ts REAL, "
-                   "gid TEXT, gname TEXT)")
-        cols = [r[1] for r in self._fetchall("PRAGMA table_info(messages)")]
-        if "peer_fp" not in cols:      # migrate an older received-only table
-            self._exec("ALTER TABLE messages ADD COLUMN peer_fp TEXT")
-            self._exec("ALTER TABLE messages ADD COLUMN direction TEXT")
-            self._exec("UPDATE messages SET peer_fp=from_fp, direction='in' "
-                       "WHERE peer_fp IS NULL")
-        if "gid" not in cols:          # pre-group table: add the group tags
-            self._exec("ALTER TABLE messages ADD COLUMN gid TEXT")
-            self._exec("ALTER TABLE messages ADD COLUMN gname TEXT")
-
     def _save_row(self, msg_id, from_fp, from_name, peer_fp, direction,
                   text, group=None):
-        self._ensure_messages_table()
-        g = group if isinstance(group, dict) else {}
-        self._exec("INSERT OR IGNORE INTO messages(msg_id, from_fp, "
-                   "from_name, peer_fp, direction, body, ts, gid, gname) "
-                   "VALUES(?,?,?,?,?,?,?,?,?)",
-                   msg_id or "", from_fp, from_name, peer_fp, direction,
-                   self.encrypt_at_rest(text or ""), time.time(),
-                   g.get("id"), g.get("name"))
+        store.save_message_row(self._store_path, msg_id, from_fp, from_name,
+                               peer_fp, direction,
+                               self.encrypt_at_rest(text or ""), group)
 
     def history(self, peer: str | None = None,
                 group: str | None = None) -> list[dict]:
@@ -1052,16 +996,10 @@ class User:
         RETALK_SAVE_MESSAGE=1) are here; retalk keeps no log otherwise."""
         if peer and group:
             raise ValueError("filter by peer or group, not both")
-        self._ensure_messages_table()
-        where, params = "", []
-        if peer:
-            where, params = "WHERE peer_fp=?", [self.resolve_contact(peer)]
-        elif group:
-            gid = (self._group_row(group) or (group,))[0]
-            where, params = "WHERE gid=?", [gid]
-        rows = self._fetchall(
-            "SELECT msg_id, from_fp, from_name, direction, body, gid, gname "
-            f"FROM messages {where} ORDER BY ts, rowid", *params)
+        gid = (self._group_row(group) or (group,))[0] if group else None
+        rows = store.message_rows(
+            self._store_path,
+            peer_fp=self.resolve_contact(peer) if peer else None, gid=gid)
         out = []
         for msg_id, from_fp, from_name, direction, body, gid, gname in rows:
             if (direction or "in") == "out":

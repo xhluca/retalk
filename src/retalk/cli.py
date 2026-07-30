@@ -33,6 +33,7 @@ import urllib.request
 import uuid
 from pathlib import Path
 
+from . import store as _tables
 from .user import User, fingerprint
 
 STORE_FILE = "store.db"
@@ -228,12 +229,7 @@ def _resolve_passphrase(args, store_db: Path | None = None,
 
 
 def _store_sql(store_db: Path, query: str, *params) -> list:
-    conn = sqlite3.connect(store_db)
-    try:
-        with conn:
-            return conn.execute(query, params).fetchall()
-    finally:
-        conn.close()
+    return _tables.sql(store_db, query, *params)
 
 
 def _meta(store_db: Path, key: str) -> str | None:
@@ -242,43 +238,9 @@ def _meta(store_db: Path, key: str) -> str | None:
 
 
 def _saved_peers(store_db: Path) -> dict:
-    """Return {fingerprint: (name, identity_key, signing_key)} for saved peers.
-
-    A peer is keyed by its fingerprint; `name` is an optional local label (None
-    when added by fingerprint alone). identity_key and signing_key stay None
-    until `retalk verify` records them, so a peer is "verified" exactly when
-    both keys are present."""
-    info = _store_sql(store_db, "PRAGMA table_info(peers)")
-    if info:                                   # migrate an existing table
-        cols = [r[1] for r in info]
-        if "id" in cols and "fingerprint" not in cols:
-            _store_sql(store_db, "ALTER TABLE peers RENAME COLUMN id TO fingerprint")
-        if "pin" in cols and "identity_key" not in cols:
-            _store_sql(store_db,
-                       "ALTER TABLE peers RENAME COLUMN pin TO identity_key")
-        if "signing_key" not in cols:
-            try:
-                _store_sql(store_db, "ALTER TABLE peers ADD COLUMN signing_key TEXT")
-            except sqlite3.OperationalError:
-                pass
-        # re-key by fingerprint if the table is still keyed by name (old schema)
-        info = _store_sql(store_db, "PRAGMA table_info(peers)")
-        if [r[1] for r in info if r[5]] == ["name"]:
-            _store_sql(store_db, "ALTER TABLE peers RENAME TO _peers_old")
-            _store_sql(store_db, "CREATE TABLE peers(fingerprint TEXT PRIMARY "
-                                 "KEY, name TEXT, identity_key TEXT, "
-                                 "signing_key TEXT)")
-            _store_sql(store_db, "INSERT OR IGNORE INTO peers("
-                       "fingerprint, name, identity_key, signing_key) "
-                       "SELECT fingerprint, name, identity_key, signing_key "
-                       "FROM _peers_old")
-            _store_sql(store_db, "DROP TABLE _peers_old")
-    _store_sql(store_db, "CREATE TABLE IF NOT EXISTS peers("
-                         "fingerprint TEXT PRIMARY KEY, name TEXT, "
-                         "identity_key TEXT, signing_key TEXT)")
-    return {fp: (name, ik, sk) for fp, name, ik, sk in
-            _store_sql(store_db, "SELECT fingerprint, name, identity_key, "
-                                 "signing_key FROM peers")}
+    """Return {fingerprint: (name, identity_key, signing_key)} for saved
+    peers (shared implementation: retalk.store.saved_peers)."""
+    return _tables.saved_peers(store_db)
 
 
 def _global_contacts_db() -> Path:
@@ -382,35 +344,17 @@ def _warn_unsealed_save(store_db: Path):
               "guard", file=sys.stderr)
 
 
-def _ensure_messages(store_db: Path):
-    _store_sql(store_db, "CREATE TABLE IF NOT EXISTS messages("
-               "msg_id TEXT PRIMARY KEY, from_fp TEXT, from_name TEXT, "
-               "peer_fp TEXT, direction TEXT, body TEXT, ts REAL, "
-               "gid TEXT, gname TEXT)")
-    cols = [r[1] for r in _store_sql(store_db, "PRAGMA table_info(messages)")]
-    if "peer_fp" not in cols:        # migrate an older received-only table
-        _store_sql(store_db, "ALTER TABLE messages ADD COLUMN peer_fp TEXT")
-        _store_sql(store_db, "ALTER TABLE messages ADD COLUMN direction TEXT")
-        _store_sql(store_db, "UPDATE messages SET peer_fp=from_fp, direction='in' "
-                             "WHERE peer_fp IS NULL")   # old rows were all received
-    if "gid" not in cols:            # pre-group-chat table: add the group tags
-        _store_sql(store_db, "ALTER TABLE messages ADD COLUMN gid TEXT")
-        _store_sql(store_db, "ALTER TABLE messages ADD COLUMN gname TEXT")
+_ensure_messages = _tables.ensure_messages
 
 
 def _save_message(store_db: Path, u, rec: dict):
     """Persist one INCOMING chat message (`receive --save`) with its body
     sealed at rest by the identity's key (see User.encrypt_at_rest)."""
-    _ensure_messages(store_db)
     sender = rec.get("from") or ""
-    g = rec.get("group") if isinstance(rec.get("group"), dict) else {}
-    _store_sql(store_db,
-               "INSERT OR IGNORE INTO messages(msg_id, from_fp, from_name, "
-               "peer_fp, direction, body, ts, gid, gname) "
-               "VALUES(?,?,?,?,?,?,?,?,?)",
-               rec.get("id") or "", sender, rec.get("name") or "",
-               sender, "in", u.encrypt_at_rest(rec.get("text") or ""),
-               time.time(), g.get("id"), g.get("name"))
+    _tables.save_message_row(
+        store_db, rec.get("id") or "", sender, rec.get("name") or "",
+        sender, "in", u.encrypt_at_rest(rec.get("text") or ""),
+        rec.get("group") if isinstance(rec.get("group"), dict) else None)
 
 
 def _save_sent(store_db: Path, u, msg_id: str, to_fp: str, text: str,
@@ -418,69 +362,20 @@ def _save_sent(store_db: Path, u, msg_id: str, to_fp: str, text: str,
     """Persist one OUTGOING chat message (`send --save`), body sealed at
     rest, so `history` shows both sides of the conversation. A group send
     saves ONE row (keyed by the shared thread id), not one per copy."""
-    _ensure_messages(store_db)
-    g = group or {}
-    _store_sql(store_db,
-               "INSERT OR IGNORE INTO messages(msg_id, from_fp, from_name, "
-               "peer_fp, direction, body, ts, gid, gname) "
-               "VALUES(?,?,?,?,?,?,?,?,?)",
-               msg_id or "", u.fingerprint(), u.name or "", to_fp or "",
-               "out", u.encrypt_at_rest(text or ""), time.time(),
-               g.get("id"), g.get("name"))
+    _tables.save_message_row(
+        store_db, msg_id or "", u.fingerprint(), u.name or "", to_fp or "",
+        "out", u.encrypt_at_rest(text or ""), group)
 
 
 # ---------- groups (client-side fan-out) ----------
 
-def _ensure_groups(store_db: Path):
-    _store_sql(store_db, "CREATE TABLE IF NOT EXISTS groups("
-               "gid TEXT PRIMARY KEY, name TEXT, members TEXT, ts REAL)")
-
-
-def _groups(store_db: Path) -> dict:
-    """{gid: (name, [member fingerprints])} for this identity's groups."""
-    _ensure_groups(store_db)
-    out = {}
-    for gid, name, members in _store_sql(
-            store_db, "SELECT gid, name, members FROM groups"):
-        try:
-            out[gid] = (name, json.loads(members or "[]"))
-        except ValueError:
-            out[gid] = (name, [])
-    return out
-
-
-def _group_by_name(store_db: Path, ref: str):
-    """Resolve a group by local name or gid -> (gid, name, members) or None."""
-    for gid, (name, members) in _groups(store_db).items():
-        if ref == gid or ref == name:
-            return gid, name, members
-    return None
-
-
-def _group_upsert(store_db: Path, gid: str, name: str, members: list):
-    """Save a group roster. Cooperative membership: an incoming envelope's
-    roster replaces the local one (last writer wins) — group chat has no
-    admin protocol, only what peers tell each other."""
-    _ensure_groups(store_db)
-    _store_sql(store_db,
-               "INSERT INTO groups(gid, name, members, ts) VALUES(?,?,?,?) "
-               "ON CONFLICT(gid) DO UPDATE SET name=excluded.name, "
-               "members=excluded.members, ts=excluded.ts",
-               gid, name, json.dumps(sorted(set(members))), time.time())
-
-
-def _ensure_left(store_db: Path):
-    _store_sql(store_db, "CREATE TABLE IF NOT EXISTS left_groups("
-               "gid TEXT PRIMARY KEY, name TEXT, ts REAL)")
-
-
-def _left_groups(store_db: Path) -> dict:
-    """{gid: name} of groups this user LEFT. A left group's mail is refused
-    (signed nack, like a block) and it never re-materializes -- until
-    `retalk group join` clears the tombstone. Local state, so it survives
-    members forgetting and relay resets alike."""
-    _ensure_left(store_db)
-    return dict(_store_sql(store_db, "SELECT gid, name FROM left_groups"))
+# groups + leave tombstones: one shared implementation in retalk.store
+_ensure_groups = _tables.ensure_groups
+_groups = _tables.load_groups
+_group_by_name = _tables.group_by_ref
+_group_upsert = _tables.save_group
+_ensure_left = _tables.ensure_left
+_left_groups = _tables.left_groups
 
 
 def _apply_group_leave(store_db: Path, m: dict):
