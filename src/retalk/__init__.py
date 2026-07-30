@@ -3,4 +3,9 @@
 from .user import PinMismatchError, User, canonical_hash, fingerprint
 
 __all__ = ["User", "PinMismatchError", "fingerprint", "canonical_hash"]
-__version__ = "0.0.6"
+
+try:                        # single source of truth: the installed metadata
+    from importlib.metadata import version as _version
+    __version__ = _version("retalk")
+except Exception:           # uninstalled source tree
+    __version__ = "0.0.0+unknown"

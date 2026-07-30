@@ -548,6 +548,43 @@ sync` command). `send` resends too — it runs a full `sync` before handing
 over the new message — so the only thing that never resends is `receive`,
 which runs just the key-upkeep half.
 
+### Contacts, groups, and history from Python
+
+The CLI's address book, group rooms, and saved history are `User` methods
+too, reading and writing the **same store tables** the CLI uses — a contact
+added here shows up in `retalk contacts` and vice versa:
+
+```python
+# contacts: cards shaped like `retalk contacts --json` (STANDARD.md)
+alice.add_contact("<bob-user-id>", "bob", verify=True)   # add + pin keys
+alice.contacts()                  # [{"name","fingerprint",...,"verified"}]
+alice.contact("bob")              # one card, by name or fingerprint
+alice.verify_contact("bob")       # fetch + check keys (PinMismatchError on MITM)
+alice.remove_contact("bob")
+
+# groups: client-side fan-out, names are local labels, ids are identity
+team = alice.create_group("team", ["bob", "carol"])      # {"id","name","members"}
+alice.group_add("team", "dave")
+alice.group_remove("team", "carol")
+alice.rename_group("team", "work")
+receipt = alice.send_group("work", "standup in 5")
+# receipt: {"id","group","group_id","sent":[fp...],"failed":{fp: error}}
+alice.leave_group("work")         # notify members + tombstone (rejoinable)
+alice.join_group(team["id"])      # clear the tombstone
+
+# history: opt-in per call, sealed at rest, replayed oldest first
+alice.send("<bob-user-id>", "hi", save=True)
+alice.receive(save=True)
+alice.history(peer="bob")         # [{"id","from","name","direction","text"}]
+alice.history(group="work")       # one room's thread (adds group/group_id)
+```
+
+Errors are plain exceptions: `ValueError` for bad input (duplicate group
+name, roster over the relay's cap), `KeyError` for an unknown contact or
+group, and `PinMismatchError` when keys do not hash to a fingerprint.
+`leave_group(peer_fp, group_id)` — the two-argument form — remains the
+low-level wire notice to a single member, unchanged from earlier releases.
+
 ## Scripting the CLI
 
 `retalk receive` prints one JSON object per message on stdout, while banners

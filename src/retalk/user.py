@@ -28,6 +28,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import secrets
 import sqlite3
 import sys
@@ -60,6 +61,9 @@ def _lock_exclusive(f):
             return
         except OSError:
             time.sleep(0.05)
+
+
+_ID_RE = re.compile(r"^[0-9a-fA-F]{32}$")
 
 
 def fingerprint(identity_key_b64: str, signing_key_b64: str) -> str:
@@ -408,7 +412,7 @@ class User:
                          resend_after=resend_after)
 
     def send(self, to: str, text: str, group: dict | None = None,
-             mid: str | None = None) -> str:
+             mid: str | None = None, save: bool = False) -> str:
         """Encrypt and send a message to a peer user ID. The ciphertext is
         kept in a local outbox until the peer acknowledges decrypting it.
 
@@ -431,7 +435,14 @@ class User:
                 payload["mid"] = mid or wire_id
             self._send_envelope(to, payload, record_outbox=True,
                                 gid=(group or {}).get("id"))
-            return wire_id
+        if save:
+            # a group copy saves ONE row keyed by the shared thread id (the
+            # OR IGNORE dedupes across the fan-out's per-member calls)
+            g = group or {}
+            self._save_row(payload.get("mid") or wire_id, self.fingerprint(),
+                           self.name or "", g.get("id") or to, "out", text,
+                           group)
+        return wire_id
 
     def leave_group(self, to: str, group_id: str) -> str:
         """Tell one member, over the normal encrypted channel, that this user
@@ -570,7 +581,8 @@ class User:
         except Exception:
             return False
 
-    def receive(self, peer: str | None = None) -> list[dict]:
+    def receive(self, peer: str | None = None,
+                save: bool = False) -> list[dict]:
         """Fetch and decrypt pending messages, acknowledging each to its
         sender. Returns a list of dicts (see docs/STANDARD.md): a chat message
         is {"id", "from", "name", "text"}; a contact shared with `retalk share`
@@ -700,4 +712,367 @@ class User:
                         rec["group"] = data["group"]
                         rec["mid"] = data.get("mid") or data["id"]
                     out.append(rec)
+        if save:
+            for rec in out:
+                if "text" in rec:
+                    self._save_row(rec["id"], rec["from"],
+                                   rec.get("name") or "", rec["from"], "in",
+                                   rec["text"], rec.get("group"))
+        return out
+
+    # ---------- contacts (the local address book) ----------
+    #
+    # The same `peers` table the CLI keeps (`retalk add`/`verify`/`contacts`),
+    # in this identity's store, so contacts made here appear there and back.
+    # A contact is returned as its Contact card (see docs/STANDARD.md):
+    # {"name", "fingerprint", "identity_key", "signing_key", "verified"}.
+
+    def _ensure_peers(self):
+        self._exec("CREATE TABLE IF NOT EXISTS peers("
+                   "fingerprint TEXT PRIMARY KEY, name TEXT, "
+                   "identity_key TEXT, signing_key TEXT)")
+
+    @staticmethod
+    def _card(fp, name, ik, sk) -> dict:
+        return {"name": name or "", "fingerprint": fp,
+                "identity_key": ik or "", "signing_key": sk or "",
+                "verified": bool(ik and sk)}
+
+    def resolve_contact(self, ref: str) -> str:
+        """A saved contact name or raw 32-hex user id -> the fingerprint.
+        Raises KeyError for a name that is not saved."""
+        self._ensure_peers()
+        if _ID_RE.match(ref or ""):
+            return ref.lower()
+        row = self._fetchall("SELECT fingerprint FROM peers WHERE name=?", ref)
+        if not row:
+            raise KeyError(f"no saved contact {ref!r}")
+        return row[0][0]
+
+    def add_contact(self, fp: str, name: str | None = None, *,
+                    verify: bool = False) -> dict:
+        """Save a peer by fingerprint (optionally under a local name); with
+        verify=True also fetch and pin their keys now. Returns the card."""
+        if not _ID_RE.match(fp or ""):
+            raise ValueError("a contact is added by its 32-hex user id")
+        fp = fp.lower()
+        self._ensure_peers()
+        self._exec("INSERT INTO peers(fingerprint, name) VALUES(?,?) "
+                   "ON CONFLICT(fingerprint) DO UPDATE SET "
+                   "name=COALESCE(excluded.name, peers.name)", fp, name)
+        if name:
+            self.names.setdefault(fp, name)
+            self.known.add(fp)
+        if verify:
+            return self.verify_contact(fp)
+        return self.contact(fp)
+
+    def verify_contact(self, ref: str, identity_key: str | None = None,
+                       signing_key: str | None = None) -> dict:
+        """Record a contact's public keys after checking they hash to the
+        fingerprint. Keys come from the arguments if given, else the relay.
+        Raises PinMismatchError when they do not hash to the fingerprint."""
+        fp = self.resolve_contact(ref)
+        if bool(identity_key) != bool(signing_key):
+            raise ValueError("manual verify needs both identity_key and "
+                             "signing_key: the fingerprint hashes the pair")
+        if not identity_key:
+            keys = self._call("get_keys", {"peer": fp})
+            identity_key = keys["identity_key"]
+            signing_key = keys["signing_key"]
+        got = fingerprint(identity_key, signing_key)
+        if got != fp:
+            raise PinMismatchError(
+                f"keys hash to {got}, not {fp} -- refusing to record them")
+        self._ensure_peers()
+        self._exec("INSERT INTO peers(fingerprint, identity_key, signing_key) "
+                   "VALUES(?,?,?) ON CONFLICT(fingerprint) DO UPDATE SET "
+                   "identity_key=excluded.identity_key, "
+                   "signing_key=excluded.signing_key",
+                   fp, identity_key, signing_key)
+        self.identity_keys.setdefault(fp, identity_key)
+        self.known.add(fp)
+        return self.contact(fp)
+
+    def contacts(self) -> list[dict]:
+        """Every saved contact as a card, sorted by name."""
+        self._ensure_peers()
+        rows = self._fetchall("SELECT fingerprint, name, identity_key, "
+                              "signing_key FROM peers")
+        return sorted((self._card(*r) for r in rows),
+                      key=lambda c: (c["name"] or "~", c["fingerprint"]))
+
+    def contact(self, ref: str) -> dict | None:
+        """One saved contact's card, by name or fingerprint; None if unsaved."""
+        try:
+            fp = self.resolve_contact(ref)
+        except KeyError:
+            return None
+        rows = self._fetchall("SELECT fingerprint, name, identity_key, "
+                              "signing_key FROM peers WHERE fingerprint=?", fp)
+        return self._card(*rows[0]) if rows else None
+
+    def remove_contact(self, ref: str) -> bool:
+        """Forget a saved contact. Returns whether one was removed."""
+        try:
+            fp = self.resolve_contact(ref)
+        except KeyError:
+            return False
+        had = bool(self.contact(fp))
+        self._exec("DELETE FROM peers WHERE fingerprint=?", fp)
+        return had
+
+    # ---------- groups (client-side fan-out) ----------
+    #
+    # The same `groups`/`left_groups` tables the CLI keeps. A group's identity
+    # is its 32-hex id; the name is a local label. Membership is cooperative:
+    # rosters travel inside encrypted group mail and the latest writer wins.
+    # Returned shape: {"id", "name", "members"} (member fingerprints, sorted).
+
+    def _ensure_group_tables(self):
+        self._exec("CREATE TABLE IF NOT EXISTS groups("
+                   "gid TEXT PRIMARY KEY, name TEXT, members TEXT, ts REAL)")
+        self._exec("CREATE TABLE IF NOT EXISTS left_groups("
+                   "gid TEXT PRIMARY KEY, name TEXT, ts REAL)")
+
+    def _group_row(self, ref: str):
+        self._ensure_group_tables()
+        for gid, name, members in self._fetchall(
+                "SELECT gid, name, members FROM groups"):
+            if ref == gid or ref == name:
+                try:
+                    return gid, name, json.loads(members or "[]")
+                except ValueError:
+                    return gid, name, []
+        return None
+
+    @staticmethod
+    def _group_dict(gid, name, members) -> dict:
+        return {"id": gid, "name": name, "members": sorted(set(members))}
+
+    def _group_save(self, gid: str, name: str, members: list):
+        self._ensure_group_tables()
+        self._exec("INSERT INTO groups(gid, name, members, ts) VALUES(?,?,?,?) "
+                   "ON CONFLICT(gid) DO UPDATE SET name=excluded.name, "
+                   "members=excluded.members, ts=excluded.ts",
+                   gid, name, json.dumps(sorted(set(members))), time.time())
+
+    def _require_group(self, ref: str):
+        row = self._group_row(ref)
+        if row is None:
+            raise KeyError(f"no group {ref!r}")
+        return row
+
+    def group_cap(self) -> int:
+        """The relay's advisory max roster size (from GET /info), cached in
+        the store; 100 when no relay has ever answered."""
+        try:
+            req = urllib.request.Request(self.server_url.rstrip("/") + "/info")
+            with urllib.request.urlopen(req, timeout=5) as r:
+                cap = int(json.load(r).get("max_group_size") or 0)
+            if cap > 0:
+                self._meta_set("group_cap", str(cap))
+                return cap
+        except Exception:
+            pass
+        cached = self._meta_get("group_cap")
+        return int(cached) if cached else 100
+
+    def create_group(self, name: str, members=()) -> dict:
+        """Create a group under a local name. Members are saved contact names
+        or fingerprints. Raises ValueError on a duplicate name or a roster
+        over the relay's advertised cap."""
+        if not name:
+            raise ValueError("a group needs a name")
+        if self._group_row(name):
+            raise ValueError(f"a group named {name!r} already exists "
+                             "(names are local labels and must be unique)")
+        fps = [self.resolve_contact(m) for m in members]
+        cap = self.group_cap()
+        if len(set(fps) | {self.fingerprint()}) > cap:
+            raise ValueError(f"roster would exceed the relay's cap of {cap}")
+        gid = uuid.uuid4().hex
+        self._group_save(gid, name, fps)
+        return self._group_dict(gid, name, fps)
+
+    def groups(self) -> list[dict]:
+        """Every group this identity keeps, sorted by name."""
+        self._ensure_group_tables()
+        out = []
+        for gid, name, members in self._fetchall(
+                "SELECT gid, name, members FROM groups"):
+            try:
+                out.append(self._group_dict(gid, name,
+                                            json.loads(members or "[]")))
+            except ValueError:
+                out.append(self._group_dict(gid, name, []))
+        return sorted(out, key=lambda g: (g["name"] or "~", g["id"]))
+
+    def group(self, ref: str) -> dict | None:
+        """One group by local name or 32-hex id; None if unknown."""
+        row = self._group_row(ref)
+        return self._group_dict(*row) if row else None
+
+    def group_add(self, ref: str, *members: str) -> dict:
+        """Add members (contact names or fingerprints) to a group's roster.
+        The change reaches everyone with this user's next group send."""
+        gid, name, roster = self._require_group(ref)
+        fps = [self.resolve_contact(m) for m in members]
+        new = sorted(set(roster) | set(fps))
+        cap = self.group_cap()
+        if len(set(new) | {self.fingerprint()}) > cap:
+            raise ValueError(f"roster would exceed the relay's cap of {cap}")
+        self._group_save(gid, name, new)
+        return self._group_dict(gid, name, new)
+
+    def group_remove(self, ref: str, *members: str) -> dict:
+        """Drop members from a group's roster (this user's local view; it
+        propagates with their next group send)."""
+        gid, name, roster = self._require_group(ref)
+        gone = {self.resolve_contact(m) for m in members}
+        new = [fp for fp in roster if fp not in gone]
+        self._group_save(gid, name, new)
+        return self._group_dict(gid, name, new)
+
+    def rename_group(self, ref: str, new_name: str) -> dict:
+        """Change this user's local label for a group. The id and everyone
+        else's labels are untouched."""
+        if self._group_row(new_name):
+            raise ValueError(f"a group named {new_name!r} already exists")
+        gid, _name, roster = self._require_group(ref)
+        self._group_save(gid, new_name, roster)
+        return self._group_dict(gid, new_name, roster)
+
+    def join_group(self, ref: str) -> None:
+        """Clear this user's leave tombstone so the group can re-materialize
+        the next time a member adds them back and posts."""
+        self._ensure_group_tables()
+        row = self._group_row(ref)
+        self._exec("DELETE FROM left_groups WHERE gid=? OR name=?", ref, ref)
+        self.left_groups.discard(row[0] if row else ref)
+
+    def left_group_ids(self) -> set:
+        """Group ids this user has left (their mail is refused)."""
+        self._ensure_group_tables()
+        return {r[0] for r in self._fetchall("SELECT gid FROM left_groups")}
+
+    def leave_group(self, to: str, group_id: str | None = None) -> str | dict:
+        """Two modes. leave_group(peer_fp, group_id) is the wire primitive:
+        send ONE member the encrypted leave notice (returns the message id),
+        unchanged from earlier releases. leave_group(group_ref) is the full
+        protocol: notify every member, write the local tombstone (stragglers'
+        copies are refused with a signed nack that also corrects their
+        roster), and forget the room; returns {"id", "name", "told",
+        "failed"}. Rejoining later works via join_group."""
+        if group_id is not None:
+            return self._send_envelope(
+                to, {"id": uuid.uuid4().hex, "kind": "group_leave",
+                     "group_id": group_id, "name": self.name},
+                record_outbox=True, gid=group_id)
+        gid, name, roster = self._require_group(to)
+        me, told, failed = self.fingerprint(), [], {}
+        for fp in roster:
+            if fp == me:
+                continue
+            try:
+                self.leave_group(fp, gid)
+                told.append(fp)
+            except Exception as e:      # notify best-effort, tombstone anyway
+                failed[fp] = str(e)
+        self._ensure_group_tables()
+        self._exec("INSERT OR REPLACE INTO left_groups(gid, name, ts) "
+                   "VALUES(?,?,?)", gid, name, time.time())
+        self._exec("DELETE FROM groups WHERE gid=?", gid)
+        self.left_groups.add(gid)
+        return {"id": gid, "name": name, "told": told, "failed": failed}
+
+    def send_group(self, ref: str, text: str, save: bool = False) -> dict:
+        """Send to every member of a group: one pairwise-encrypted copy per
+        member, all sharing one thread id. One dead member never blocks the
+        rest. Returns {"id", "group", "group_id", "sent", "failed"} where
+        sent is a list of fingerprints and failed maps fingerprint->error."""
+        gid, name, roster = self._require_group(ref)
+        me = self.fingerprint()
+        full = sorted(set(roster) | {me})
+        envelope = {"id": gid, "name": name, "members": full}
+        mid = uuid.uuid4().hex
+        sent, failed = [], {}
+        for fp in full:
+            if fp == me:
+                continue
+            try:
+                self.send(fp, text, group=envelope, mid=mid)
+                sent.append(fp)
+            except Exception as e:      # one dead member never blocks the rest
+                failed[fp] = str(e)
+        if save:
+            self._save_row(mid, me, self.name or "", gid, "out", text,
+                           {"id": gid, "name": name})
+        return {"id": mid, "group": name, "group_id": gid,
+                "sent": sent, "failed": failed}
+
+    # ---------- saved history ----------
+    #
+    # The same sealed `messages` table `send/receive --save` keeps: bodies
+    # are encrypted at rest with the identity's key and decrypted on replay.
+
+    def _ensure_messages_table(self):
+        self._exec("CREATE TABLE IF NOT EXISTS messages("
+                   "msg_id TEXT PRIMARY KEY, from_fp TEXT, from_name TEXT, "
+                   "peer_fp TEXT, direction TEXT, body TEXT, ts REAL, "
+                   "gid TEXT, gname TEXT)")
+        cols = [r[1] for r in self._fetchall("PRAGMA table_info(messages)")]
+        if "peer_fp" not in cols:      # migrate an older received-only table
+            self._exec("ALTER TABLE messages ADD COLUMN peer_fp TEXT")
+            self._exec("ALTER TABLE messages ADD COLUMN direction TEXT")
+            self._exec("UPDATE messages SET peer_fp=from_fp, direction='in' "
+                       "WHERE peer_fp IS NULL")
+        if "gid" not in cols:          # pre-group table: add the group tags
+            self._exec("ALTER TABLE messages ADD COLUMN gid TEXT")
+            self._exec("ALTER TABLE messages ADD COLUMN gname TEXT")
+
+    def _save_row(self, msg_id, from_fp, from_name, peer_fp, direction,
+                  text, group=None):
+        self._ensure_messages_table()
+        g = group if isinstance(group, dict) else {}
+        self._exec("INSERT OR IGNORE INTO messages(msg_id, from_fp, "
+                   "from_name, peer_fp, direction, body, ts, gid, gname) "
+                   "VALUES(?,?,?,?,?,?,?,?,?)",
+                   msg_id or "", from_fp, from_name, peer_fp, direction,
+                   self.encrypt_at_rest(text or ""), time.time(),
+                   g.get("id"), g.get("name"))
+
+    def history(self, peer: str | None = None,
+                group: str | None = None) -> list[dict]:
+        """Replay saved messages oldest first, both directions interleaved,
+        as {"id", "from", "name", "direction", "text"} dicts (group rows add
+        "group" and "group_id"). peer filters one conversation (name or
+        fingerprint), group one room (name or id); not both. Only messages
+        saved at send/receive time (save=True, or the CLI's --save /
+        RETALK_SAVE_MESSAGE=1) are here; retalk keeps no log otherwise."""
+        if peer and group:
+            raise ValueError("filter by peer or group, not both")
+        self._ensure_messages_table()
+        where, params = "", []
+        if peer:
+            where, params = "WHERE peer_fp=?", [self.resolve_contact(peer)]
+        elif group:
+            gid = (self._group_row(group) or (group,))[0]
+            where, params = "WHERE gid=?", [gid]
+        rows = self._fetchall(
+            "SELECT msg_id, from_fp, from_name, direction, body, gid, gname "
+            f"FROM messages {where} ORDER BY ts, rowid", *params)
+        out = []
+        for msg_id, from_fp, from_name, direction, body, gid, gname in rows:
+            if (direction or "in") == "out":
+                name = self.name or ""
+            else:
+                saved = self.contact(from_fp) if from_fp else None
+                name = (saved and saved["name"]) or from_name or ""
+            rec = {"id": msg_id, "from": from_fp, "name": name,
+                   "direction": direction or "in",
+                   "text": self.decrypt_at_rest(body)}
+            if gid:
+                rec["group"], rec["group_id"] = gname or "", gid
+            out.append(rec)
         return out
