@@ -27,14 +27,6 @@ def sql(db, query: str, *params) -> list:
         conn.close()
 
 
-def meta_get(db, key: str):
-    try:
-        rows = sql(db, "SELECT v FROM meta WHERE k=?", key)
-    except sqlite3.OperationalError:      # store without a meta table yet
-        return None
-    return rows[0][0] if rows else None
-
-
 # ---------- peers (the address book) ----------
 
 def ensure_peers(db):

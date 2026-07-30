@@ -24,7 +24,6 @@ import json
 import os
 import re
 import shutil
-import sqlite3
 import sys
 import textwrap
 import time
@@ -370,7 +369,6 @@ def _save_sent(store_db: Path, u, msg_id: str, to_fp: str, text: str,
 # ---------- groups (client-side fan-out) ----------
 
 # groups + leave tombstones: one shared implementation in retalk.store
-_ensure_groups = _tables.ensure_groups
 _groups = _tables.load_groups
 _group_by_name = _tables.group_by_ref
 _group_upsert = _tables.save_group
