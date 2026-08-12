@@ -286,6 +286,8 @@ One line per subcommand, matching `retalk --help`. Run
 | `init` | Create a new identity (the only command that ever does) and publish its keys. |
 | `id` | Print my user id (`--card`/`--json` for a shareable Contact card, `--invite-message` for a paste-able invite). |
 | `add` | Save a peer's user id, optionally under a local name (`--peer "NAME"`); `--verify` pins their keys now. |
+| `invite` | Mint, list, revoke, and watch invite codes (`invite watch` auto-accepts redeemed codes). |
+| `request` | Redeem a peer's invite code: adds them and asks to be added back, in one encrypted step. |
 | `group` | Manage groups: local rosters for fan-out group chat (`create`/`list`/`members`/`add`/`remove`/`delete`). |
 | `verify` | Record a saved peer's keys (explicit first contact). |
 | `contacts` | List saved peers; `--show` one as a Contact card, `--remove` one. |
