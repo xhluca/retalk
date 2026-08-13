@@ -36,7 +36,7 @@ Message and read (each receive acknowledges and thereby deletes relay copies, so
 
 A received message looks like `{"id","from","name","text"}`; a send receipt is `{"id","to"}`. Group sends return `{"id","group","group_id","sent","failed"}` and exit 2 if any member's copy failed. The full contract, including contact cards and control records, is in the JSON standard linked below.
 
-Caveats an agent should know: passphrases are never prompted for, so pass `-p`/`RETALK_PASSPHRASE` or create the identity with `--no-passphrase`; the client's relay URL must exactly equal the relay's advertised audience or signatures fail; `receive --all` drains every sender including strangers, so prefer `--peer`; saving is off unless you opt in, and there is no backfill; identities live under `~/.retalk/NAME` (relocate with `RETALK_HOME` or per-directory `--dir`).
+Caveats an agent should know: passphrases are never prompted for, so pass `--passphrase-file PATH` (preferred - the secret is named by path, never embedded in the command line or environment, keeping each call one flat allowlistable command), `-p`/`RETALK_PASSPHRASE`, or create the identity with `--no-passphrase`; the client's relay URL must exactly equal the relay's advertised audience or signatures fail; `receive --all` drains every sender including strangers, so prefer `--peer`; saving is off unless you opt in, and there is no backfill; identities live under `~/.retalk/NAME` (relocate with `RETALK_HOME` or per-directory `--dir`).
 
 ## Demo and media
 

@@ -188,30 +188,81 @@ def _resolve_store(args, creating: bool = False) -> Path:
 NO_PASSPHRASE = "\0retalk:disabled-passphrase"
 
 
+def _read_passphrase_file(path: str) -> str:
+    """Read a passphrase from a FILE PATH, so the secret never appears in the
+    command line, the shell history, or the environment.
+
+    Trailing newlines are stripped, matching `$(cat file)` exactly, so a file
+    written by `echo`/`print` unlocks the same store as the equivalent
+    RETALK_PASSPHRASE value. Every failure is loud: a missing, unreadable, or
+    empty file is an error, never a silent fall-through to "no passphrase
+    given" (failing open there would be a nasty surprise). A file readable by
+    other users warns but proceeds -- the passphrase is only as private as the
+    store it unlocks, which usually sits beside it."""
+    p = Path(path).expanduser()
+    try:
+        raw = p.read_text()
+    except FileNotFoundError:
+        _die(f"no passphrase file at {p}: check the path, or pass the "
+             "passphrase with -p / RETALK_PASSPHRASE instead")
+    except IsADirectoryError:
+        _die(f"{p} is a directory, not a passphrase file")
+    except OSError as e:
+        _die(f"cannot read the passphrase file {p}: {e}")
+    secret = raw.rstrip("\r\n")          # like $(cat file): trailing EOLs only
+    if not secret:
+        _die(f"the passphrase file {p} is empty: it must contain the "
+             "passphrase on the first line")
+    try:                                  # POSIX-only hygiene check
+        mode = p.stat().st_mode
+        if mode & 0o077:
+            print(_style(
+                f"[retalk] warning: {p} is readable by other users "
+                f"(mode {oct(mode & 0o777)[2:]}); run: chmod 600 {p}",
+                "1;33"), file=sys.stderr)
+    except OSError:
+        pass
+    return secret
+
+
 def _resolve_passphrase(args, store_db: Path | None = None,
                         creating: bool = False) -> tuple[str, bool]:
     """Return (passphrase, disabled) without ever prompting.
 
     A store created with --no-passphrase records that choice, so later
     commands reopen it with no passphrase automatically. Otherwise the
-    passphrase must come from --passphrase or RETALK_PASSPHRASE; a missing one
-    is a loud error, never a prompt, so agents never block on human input."""
+    passphrase must come from (in order) --passphrase, --passphrase-file,
+    RETALK_PASSPHRASE_FILE, or RETALK_PASSPHRASE; a missing one is a loud
+    error, never a prompt, so agents never block on human input."""
     if (not creating and store_db is not None
             and _meta(store_db, "no_passphrase") == "1"):
         return NO_PASSPHRASE, True
     if getattr(args, "no_passphrase", False):
         if creating:
             return NO_PASSPHRASE, True
-        _die("this identity is passphrase-protected: pass --passphrase or set "
-             "RETALK_PASSPHRASE (it was not created with --no-passphrase)")
-    s = getattr(args, "passphrase", None) or os.environ.get("RETALK_PASSPHRASE")
+        _die("this identity is passphrase-protected: pass --passphrase, "
+             "--passphrase-file, or set RETALK_PASSPHRASE (it was not created "
+             "with --no-passphrase)")
+    # most explicit wins; a PATH never carries the secret itself, so the
+    # file forms are what scripts and agents should reach for
+    s = getattr(args, "passphrase", None)
+    if not s:
+        pf = (getattr(args, "passphrase_file", None)
+              or os.environ.get("RETALK_PASSPHRASE_FILE"))
+        if pf:
+            s = _read_passphrase_file(pf)
+    if not s:
+        s = os.environ.get("RETALK_PASSPHRASE")
     if s:
         return s, False
     # Show the user's ACTUAL command with the missing piece filled in (rendered
     # like the other colored bash blocks), not just the name of a flag.
     ran = "retalk " + " ".join(sys.argv[1:])
     lines = [
-        "# rerun with the passphrase inline:",
+        "# rerun naming a file that holds the passphrase -- the secret stays",
+        "# out of the command line, the shell history, and the environment:",
+        f"{ran} --passphrase-file /path/to/passphrase",
+        "# or pass it inline:",
         f'{ran} -p "<YOUR-PASSPHRASE>"',
         "# or set it once for this shell, then rerun:",
         'export RETALK_PASSPHRASE="<YOUR-PASSPHRASE>"',
@@ -1685,6 +1736,14 @@ def main():
                         "overrides RETALK_PASSPHRASE. NOTE: a value passed "
                         "here is visible in the process list and shell "
                         "history -- prefer RETALK_PASSPHRASE for real secrets")
+    g.add_argument("--passphrase-file", "--passphrase-path",
+                   dest="passphrase_file", metavar="PATH",
+                   help="read the passphrase from the file at PATH (trailing "
+                        "newline ignored). Preferred for scripts and agents: "
+                        "the secret never enters the command line, the shell "
+                        "history, or the environment, so the whole call stays "
+                        "one flat allowlistable command. Overrides "
+                        "RETALK_PASSPHRASE_FILE and RETALK_PASSPHRASE")
     g.add_argument("-np", "--no-passphrase", action="store_true",
                    help="use no passphrase. On `init` this stores keys "
                         "unencrypted at rest (protected only by file "

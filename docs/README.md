@@ -133,11 +133,12 @@ host that terminates TLS for you, or put your own TLS proxy in front:
 A retalk identity is a **user**, selected by name with `--user NAME` (short:
 `-u`) and stored under `~/.retalk/NAME/`. Run this once on each
 machine, supplying a passphrase that encrypts the private keys at rest — via
-`--passphrase` or the `RETALK_PASSPHRASE` env var (preferred, since a flag
-value is visible in the process list):
+`--passphrase-file PATH` (preferred for scripts and agents: the secret is
+named, never embedded), `--passphrase`, or the `RETALK_PASSPHRASE` env var
+(a flag value is visible in the process list):
 
 ```sh
-export RETALK_PASSPHRASE="correct horse battery staple"
+export RETALK_PASSPHRASE="correct horse battery staple"    # or: --passphrase-file ~/.retalk/pass
 retalk init --user alice --display-name alice-1 --relay https://server.example.com
 ```
 
@@ -278,7 +279,8 @@ Identity selection (first match wins — retalk never guesses which user you mea
 - `-u`, `--user NAME` — the user under `~/.retalk/NAME/` (or the `RETALK_USER` env var).
 - `--relay URL` — relay for this call (overrides `RETALK_RELAY` and the URL saved at init).
 - `--api-key KEY` — relay access key, sent as `Authorization: Bearer` (overrides `RETALK_API_KEY`).
-- `--passphrase SECRET` — unlocks the store; prefer the `RETALK_PASSPHRASE` env var, since a value passed here is visible in the process list. Omit it for a `--no-passphrase` identity.
+- `--passphrase SECRET` — unlocks the store; a value passed here is visible in the process list, so prefer `--passphrase-file` (below) or the `RETALK_PASSPHRASE` env var. Omit it for a `--no-passphrase` identity.
+- `--passphrase-file PATH` (alias `--passphrase-path`; env `RETALK_PASSPHRASE_FILE`) — read the passphrase from a file instead of passing its value. **The preferred form for scripts and agents:** the secret stays out of the command line, the shell history, and the environment, and the call stays a single flat command rather than `SECRET="$(cat ...)" retalk ...` — which is both harder to allowlist and indistinguishable from credential exfiltration to anything reviewing commands. A trailing newline is ignored (identical to `$(cat file)`), so existing passphrase files work unchanged. A missing, empty, or unreadable file is a loud error, never a silent fall-through to "no passphrase"; a file other users can read warns with a `chmod 600` hint and proceeds.
 
 Results go to stdout; banners and errors go to stderr, so pipes stay clean.
 There is no interactive prompt — commands never block waiting on a human.
