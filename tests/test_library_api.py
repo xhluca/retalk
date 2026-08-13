@@ -17,7 +17,7 @@ Three users on a live local relay, each with an isolated store. Asserts:
      CLI commands reading the same store, and vice versa - one schema, no
      drift (the regression jaredbarranco's issue worried about).
 
-Uses port 8790 (see tests/README.md for the port registry).
+Uses port 8788 (see tests/README.md for the port registry).
 Run from the repo root: uv run python -m unittest discover -s tests
 """
 
@@ -33,7 +33,7 @@ from pathlib import Path
 
 from retalk import PinMismatchError, User
 
-PORT = 8790
+PORT = 8788
 URL = f"http://127.0.0.1:{PORT}"
 
 

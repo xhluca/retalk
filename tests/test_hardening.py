@@ -29,8 +29,8 @@ import unittest
 import urllib.error
 import urllib.request
 
-PORT_BODY = 8771
-PORT_RATE = 8772
+PORT_BODY = 8778
+PORT_RATE = 8779
 
 
 def wait_for_port(port: int, timeout: float = 15.0):

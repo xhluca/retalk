@@ -12,7 +12,7 @@ asserting:
      mailbox, while a second sender can still deposit up to the same sub-cap
      (so one sender can't crowd out others).
 
-Uses port 8770 (see tests/README.md for the port registry).
+Uses port 8780 (see tests/README.md for the port registry).
 Run from the repo root: uv run python -m unittest discover -s tests
 """
 
@@ -27,7 +27,7 @@ import tempfile
 import time
 import unittest
 
-PORT = 8770
+PORT = 8780
 
 
 def wait_for_port(port: int, timeout: float = 15.0):

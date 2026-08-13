@@ -18,7 +18,7 @@ Three identities on a live local relay. Asserts, via the real CLI:
   6. Duplicate delivery of an accepted request re-acks silently: no second
      record, no second use.
 
-Uses port 8791 (see tests/README.md for the port registry).
+Uses port 8799 (see tests/README.md for the port registry).
 Run from the repo root: uv run python -m unittest discover -s tests
 """
 
@@ -33,7 +33,7 @@ import time
 import unittest
 from pathlib import Path
 
-PORT = 8791
+PORT = 8799
 URL = f"http://127.0.0.1:{PORT}"
 
 
