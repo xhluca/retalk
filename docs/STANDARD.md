@@ -145,6 +145,30 @@ another (`import --as NAME`). `retalk receive` also stages these records in a
 local contact-inbox, from which `retalk import --inbox` promotes them into the
 saved peers (and removes them) -- see the CLI help for that workflow.
 
+### Contact request (invite codes)
+
+Sent by `retalk request` — the encrypted body a requester sends when
+redeeming an invite code; consumed by the inviter's `retalk invite watch`,
+never printed raw:
+
+    {"id": "<32-hex>", "kind": "contact_request", "code": "<invite code>",
+     "card": {<the requester's own Contact card, verified: true>}}
+
+`retalk invite watch` emits one NDJSON record per handled request:
+
+| record | shape |
+|--------|-------|
+| acceptance | `{"kind": "contact_accepted", "code", "from", "name", "card"}` |
+| rejection | `{"kind": "contact_request_rejected", "from", "reason"}` |
+
+`reason` is one of `unknown-code`, `revoked`, `expired`, `consumed`,
+`card-mismatch`. The code value is never echoed in rejections. A valid code
+proves the sender was authorised by whoever issued it, not that the keys
+belong to a particular human — see the invite-code section of the README.
+
+`retalk request` prints an ordinary send receipt (`{"id", "to"}`);
+acceptance is deliberately not observable from the requester's side.
+
 ### Share receipt
 
 Emitted by `retalk share` -- exactly one object -- and returned by

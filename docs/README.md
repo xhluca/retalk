@@ -252,6 +252,8 @@ ones that touch a mailbox reach the relay.
 | `init` | Create a new identity (keypair + store) and publish its keys. The only command that creates one. | yes² |
 | `id` | Print this identity's user id (its public-key fingerprint). | no |
 | `add` | Save a peer's user id, optionally under a local name; `--verify` pins their keys now. | no¹ |
+| `invite` | Mint, list, revoke, and watch invite codes. | watch: yes |
+| `request` | Redeem an invite code (add the inviter + send the encrypted contact request). | yes |
 | `group` | Manage local group rosters for fan-out group chat. | no |
 | `verify` | Record a saved peer's public keys (explicit first contact). | yes¹ |
 | `contacts` | List saved peers; `--show` one as a Contact card, `--remove` one. | no |
@@ -331,6 +333,42 @@ is recorded.
 - `--show CONTACT` — print just this contact (a saved peer name or a raw 32-hex user id, even one you haven't saved) rather than the whole list.
 - `--remove CONTACT` — delete a saved peer (a name or user id) — the inverse of `add`; a fingerprint drops every name pinned to it.
 - `--as NAME` — with `--show`: recommended nickname to put in the card (default: the saved peer name).
+
+### Invite codes — `invite`, `request`
+
+Invite codes close the onboarding loop: no more manual add-back. The inviter
+mints a code and includes it in the invite; the peer redeems it; the
+inviter's watcher accepts automatically.
+
+```sh
+retalk invite new --peer "dana"          # mint (single-use, 7-day expiry)
+retalk id --invite-message --code CODE   # invite text with the redeem step
+retalk invite watch --follow             # accept redemptions as they arrive
+```
+
+The peer runs one command from the invite:
+
+```sh
+retalk request "<your-user-id>" --code CODE
+```
+
+which verifies and saves you on their side, then sends you one end-to-end
+encrypted contact request carrying the code and their keys. Your watcher
+validates the code, pins their keys, saves the contact (under the minted
+`--peer` name, else their self-chosen name), consumes a single-use code, and
+emits an acceptance record. Requests with dead codes are refused with the
+same signed negative-ack as `block`; ordinary stranger mail is never
+surfaced, acked, or stored by the watcher — it re-delivers from the sender's
+outbox for a normal `receive` (see the JSON standard for record shapes).
+
+- `invite new` — `--permanent` for a multi-use code that lives until revoked; `--expires DAYS` to override the 7-day default (`0` = never).
+- `invite list` (`--json`) / `invite revoke CODE` — inspect and kill codes; both work offline.
+- `invite watch` — one scan by default; `--follow` with `--interval SECONDS` and `-q` for a calm background acceptor.
+
+A valid code proves the sender was **authorised** by whoever issued it, not
+that the keys belong to a particular human: anyone holding the code can
+register. It replaces the manual add-back, never out-of-band fingerprint
+verification.
 
 ### Sharing contacts — `share`, `import`
 

@@ -206,3 +206,92 @@ def message_rows(db, peer_fp: str | None = None,
     return sql(db, "SELECT msg_id, from_fp, from_name, direction, body, "
                    f"gid, gname FROM messages {where} ORDER BY ts, rowid",
                *params)
+
+
+# ---------- invite codes ----------
+
+def ensure_invites(db):
+    sql(db, "CREATE TABLE IF NOT EXISTS invite_codes("
+            "code TEXT PRIMARY KEY, kind TEXT, peer TEXT, created REAL, "
+            "expires REAL, uses INT DEFAULT 0, used_by TEXT, "
+            "revoked INT DEFAULT 0)")
+
+
+def mint_invite(db, peer: str | None = None, permanent: bool = False,
+                expires_days: float | None = None) -> dict:
+    """Mint a code. Single-use by default, expiring in 7 days; permanent
+    codes are multi-use and live until revoked. expires_days overrides the
+    default (0 or negative = never expires)."""
+    import secrets
+    if expires_days is None:
+        expires = None if permanent else time.time() + 7 * 86400
+    elif expires_days <= 0:
+        expires = None
+    else:
+        expires = time.time() + expires_days * 86400
+    code = secrets.token_urlsafe(16)
+    kind = "permanent" if permanent else "single"
+    ensure_invites(db)
+    sql(db, "INSERT INTO invite_codes(code, kind, peer, created, expires, "
+            "uses, used_by, revoked) VALUES(?,?,?,?,?,0,'[]',0)",
+        code, kind, peer, time.time(), expires)
+    return {"code": code, "kind": kind, "expires": expires, "peer": peer}
+
+
+def load_invites(db) -> list:
+    """Every minted code, oldest first, as the spec's dicts."""
+    ensure_invites(db)
+    out = []
+    for (code, kind, peer, created, expires, uses, used_by,
+         revoked) in sql(db, "SELECT code, kind, peer, created, expires, "
+                             "uses, used_by, revoked FROM invite_codes "
+                             "ORDER BY created"):
+        active = (not revoked
+                  and (expires is None or time.time() <= expires)
+                  and (kind == "permanent" or uses == 0))
+        out.append({"code": code, "kind": kind, "peer": peer,
+                    "created": created, "expires": expires, "uses": uses,
+                    "used_by": json.loads(used_by or "[]"),
+                    "revoked": bool(revoked), "active": active})
+    return out
+
+
+def get_invite(db, code: str):
+    ensure_invites(db)
+    rows = sql(db, "SELECT code, kind, peer, created, expires, uses, "
+                   "used_by, revoked FROM invite_codes WHERE code=?", code)
+    return rows[0] if rows else None
+
+
+def revoke_invite(db, code: str) -> bool:
+    ensure_invites(db)
+    before = get_invite(db, code)
+    if before is None:
+        return False
+    sql(db, "UPDATE invite_codes SET revoked=1 WHERE code=?", code)
+    return True
+
+
+def use_invite(db, code: str, by_fp: str) -> str:
+    """Consume/record one use of a live code by `by_fp`. Returns "ok",
+    "duplicate" (this fp already used it - idempotent re-delivery), or a
+    rejection reason: "unknown-code", "revoked", "expired", "consumed".
+    The compare-and-swap on single-use codes is guarded by the caller
+    holding the identity's file lock."""
+    row = get_invite(db, code)
+    if row is None:
+        return "unknown-code"
+    _code, kind, _peer, _created, expires, uses, used_by, revoked = row
+    used = json.loads(used_by or "[]")
+    if by_fp in used:
+        return "duplicate"
+    if revoked:
+        return "revoked"
+    if expires is not None and time.time() > expires:
+        return "expired"
+    if kind == "single" and uses > 0:
+        return "consumed"
+    used.append(by_fp)
+    sql(db, "UPDATE invite_codes SET uses=uses+1, used_by=? WHERE code=?",
+        json.dumps(used), code)
+    return "ok"

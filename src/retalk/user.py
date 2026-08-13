@@ -1014,3 +1014,153 @@ class User:
                 rec["group"], rec["group_id"] = gname or "", gid
             out.append(rec)
         return out
+
+    # ---------- invite codes (see docs and the cross-repo spec) ----------
+    #
+    # A code closes the onboarding loop: the inviter mints it, the peer
+    # sends an encrypted contact_request carrying the code plus their card,
+    # and invite_watch validates, pins, and saves the contact. A valid code
+    # proves the sender was AUTHORISED by whoever issued it - not that the
+    # keys belong to a particular human; it replaces the manual add, never
+    # out-of-band fingerprint verification.
+
+    def new_invite(self, peer: str | None = None, permanent: bool = False,
+                   expires_days: float | None = None) -> dict:
+        """Mint an invite code. Single-use by default (expires in 7 days);
+        permanent codes are multi-use and live until revoked. expires_days
+        overrides (0 = never expires)."""
+        return store.mint_invite(self._store_path, peer, permanent,
+                                 expires_days)
+
+    def invites(self) -> list[dict]:
+        """Every minted code, oldest first, as spec-shaped dicts."""
+        return store.load_invites(self._store_path)
+
+    def revoke_invite(self, code: str) -> bool:
+        """Deactivate a code. Returns whether it existed."""
+        return store.revoke_invite(self._store_path, code)
+
+    def request_contact(self, inviter_fp: str, code: str,
+                        peer_name: str | None = None) -> str:
+        """Redeem an invite code: save + verify the inviter as a contact,
+        then send them the encrypted contact_request carrying this
+        identity's full card. Returns the message id. Acceptance is
+        asynchronous and unobservable by design - the requester learns it
+        when the inviter first messages them; there is no code-status
+        oracle on the wire."""
+        if not _ID_RE.match(inviter_fp or ""):
+            raise ValueError("an inviter is addressed by their 32-hex user id")
+        self.add_contact(inviter_fp, peer_name, verify=True)
+        card = {"name": self.name or "", "fingerprint": self.fingerprint(),
+                "identity_key": self.identity_key(),
+                "signing_key": self.signing_key(), "verified": True}
+        with self._locked():
+            wire_id = uuid.uuid4().hex
+            payload = {"id": wire_id, "kind": "contact_request",
+                       "code": code, "card": card}
+            self._send_envelope(inviter_fp.lower(), payload,
+                                record_outbox=True)
+        return wire_id
+
+    def invite_watch(self) -> list[dict]:
+        """One scan of pending mail from UNKNOWN senders (saved contacts are
+        never touched). A valid contact_request with a live code is accepted:
+        keys pinned, contact saved, single-use code consumed, session and
+        ack persisted. A contact_request with a dead code or an inconsistent
+        card is refused with a signed nack (so the sender stops resending)
+        and persists nothing. Anything else is dropped from this fetch
+        WITHOUT acknowledgment and without persisting any state: since only
+        an ack releases the sender's outbox, their client re-delivers it
+        automatically (the same at-least-once path that survives a crashed
+        receive), and a later scoped receive picks it up. watch never
+        surfaces, stores, or acks stranger content, so it cannot become a
+        general read-strangers path. Returns the spec's acceptance and
+        rejection records."""
+        out = []
+        known = set(store.saved_peers(self._store_path))
+        with self._locked():
+            inbox = self._call("read_messages")
+            for m in inbox:
+                sender = m["from"]
+                if sender in known or sender in self.blocked:
+                    continue                     # normal receive's business
+                if m["mtype"] != 0:
+                    continue    # first contact is always a pre-key message
+                body_hash = hashlib.sha256(m["body"].encode()).hexdigest()
+                anymsg = v.AnyOlmMessage.from_parts(
+                    m["mtype"], base64.b64decode(m["body"]))
+                # decrypt WITHOUT persisting: nothing below writes account
+                # or session state until a request is accepted
+                try:
+                    prekey = anymsg.to_pre_key()
+                    session = next(
+                        (s for s in self._load_sessions(sender)
+                         if s.session_matches(prekey)), None)
+                    if session is not None:
+                        acct = None
+                        plaintext = session.decrypt(anymsg)
+                    else:
+                        keys = self._call("get_keys", {"peer": sender})
+                        self._verify_identity(sender, keys["identity_key"],
+                                              keys["signing_key"])
+                        acct = self._load_account()
+                        session, plaintext = acct.create_inbound_session(
+                            v.Curve25519PublicKey.from_base64(
+                                keys["identity_key"]), prekey)
+                except Exception:
+                    continue        # undecryptable stranger mail: left alone
+                try:
+                    data = json.loads(plaintext.decode())
+                except ValueError:
+                    continue
+                if data.get("kind") != "contact_request":
+                    continue        # ordinary stranger mail: left alone
+                card = data.get("card") or {}
+                reason = None
+                if (fingerprint(card.get("identity_key") or "",
+                                card.get("signing_key") or "")
+                        != card.get("fingerprint")
+                        or card.get("fingerprint") != sender):
+                    reason = "card-mismatch"
+                else:
+                    reason = store.use_invite(self._store_path,
+                                              data.get("code") or "", sender)
+                if reason == "duplicate":
+                    # accepted earlier; the sender's outbox resent it because
+                    # an ack was lost. Re-ack quietly, emit nothing.
+                    if acct is not None:
+                        self._save_account(acct)
+                    self._save_session(sender, session)
+                    self._send_envelope(sender,
+                                        {"id": data["id"], "kind": "ack"},
+                                        record_outbox=False)
+                    continue
+                if reason != "ok":
+                    self._send_nack(body_hash)   # stop the resends; keep nothing
+                    out.append({"kind": "contact_request_rejected",
+                                "from": sender, "reason": reason})
+                    continue
+                # accept: NOW persist everything the dry run computed
+                if acct is not None:
+                    self._save_account(acct)
+                self._save_session(sender, session)
+                self._exec("INSERT OR IGNORE INTO processed(hash, msg_id) "
+                           "VALUES(?,?)", body_hash, data["id"])
+                self._send_envelope(sender, {"id": data["id"], "kind": "ack"},
+                                    record_outbox=False)
+                invite = store.get_invite(self._store_path,
+                                          data.get("code") or "")
+                name = (invite[2] if invite and invite[2]
+                        else card.get("name") or None)
+                store.upsert_peer(self._store_path, sender, name)
+                store.record_peer_keys(self._store_path, sender,
+                                       card["identity_key"],
+                                       card["signing_key"])
+                self.identity_keys.setdefault(sender, card["identity_key"])
+                if name:
+                    self.names.setdefault(sender, name)
+                self.known.add(sender)
+                out.append({"kind": "contact_accepted",
+                            "code": data.get("code") or "", "from": sender,
+                            "name": name or "", "card": self.contact(sender)})
+        return out

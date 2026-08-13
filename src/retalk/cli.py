@@ -646,27 +646,40 @@ def _bash_block(lines):
     return "\n".join(out)
 
 
-def _invite_message(u, as_name):
+def _invite_message(u, as_name, code=None):
     """Render this user's card as a copy-paste shell snippet that onboards a
     peer: install retalk, point at the relay, create their identity, and add
-    you. `#` comments + commands, colored like bash in a terminal."""
+    you. With an invite code, step 3 becomes `retalk request`, which adds you
+    AND asks you to add them back in one encrypted step -- no manual reply.
+    `#` comments + commands, colored like bash in a terminal."""
     c = _self_card(u, as_name)
     name = c["name"] or "me"
     relay = c.get("relay") or '"<relay-url>"'   # quoted: <> would redirect in a shell
     # NOTE: keep every command line comment-free and every comment on its own
     # line with no ' ( ) ; -- stock macOS zsh has interactive comments OFF, so
     # a trailing # becomes real arguments and an apostrophe swallows the paste.
-    return _bash_block([
+    lines = [
         "# Message me over retalk, an end-to-end-encrypted messaging CLI.",
         "# 1. Install retalk if not installed yet -- or: uv tool install retalk",
         "pip install -U retalk",
         "# 2. Create your identity. init also prints a reply block to send me.",
         "#    To name the identity, add: -u <your-username>",
         f"retalk init --relay {relay} --passphrase \"<PRIVATE-PASSPHRASE>\"",
-        "# 3. Add me as a contact. For a user-specific contact, add: -u <your-username>",
-        f"retalk add {c['fingerprint']} --peer {name} --verify",
-        "# 4. Send me the reply block that step 2 printed, so I can add you back",
-    ])
+    ]
+    if code:
+        lines += [
+            "# 3. Redeem my invite code. This adds me as your verified contact",
+            "#    AND sends me an encrypted request so I add you back. Done.",
+            f"retalk request {c['fingerprint']} --code {code} --peer {name}",
+            f"# Invite code: {code}",
+        ]
+    else:
+        lines += [
+            "# 3. Add me as a contact. For a user-specific contact, add: -u <your-username>",
+            f"retalk add {c['fingerprint']} --peer {name} --verify",
+            "# 4. Send me the reply block that step 2 printed, so I can add you back",
+        ]
+    return _bash_block(lines)
 
 
 def _invite_reply(u, as_name):
@@ -718,7 +731,8 @@ def cmd_id(args):
     if getattr(args, "invite_reply", False):
         print(_invite_reply(u, getattr(args, "as_name", None)))
     elif getattr(args, "invite_message", False):
-        print(_invite_message(u, getattr(args, "as_name", None)))
+        print(_invite_message(u, getattr(args, "as_name", None),
+                              code=getattr(args, "code", None)))
     elif getattr(args, "card", False):                 # human-readable card
         c = _self_card(u, getattr(args, "as_name", None))
         print(f"Name:         {c['name'] or '(unnamed)'}")
@@ -1661,6 +1675,84 @@ def cmd_register(args):
           file=sys.stderr)
 
 
+
+def cmd_invite(args):
+    """Invite codes: mint, list, revoke, and watch for redemptions. A valid
+    code proves the sender was authorised by whoever issued it, not that the
+    keys belong to a particular human -- it replaces the manual add-back,
+    never out-of-band fingerprint verification."""
+    store_db = _resolve_store(args) / STORE_FILE
+    if args.action == "new":
+        rec = _tables.mint_invite(store_db, peer=args.peer,
+                                  permanent=args.permanent,
+                                  expires_days=args.expires)
+        print(json.dumps(rec))
+        fp = _meta(store_db, "fingerprint") or "<your-user-id>"
+        err = sys.stderr
+        print(_style(f"\n\u2709 Invite code minted ({rec['kind']})", "1;32"),
+              file=err)
+        print("\nSend your peer the invite plus this redeem command:",
+              file=err)
+        print("\n" + _bash_block([
+            "# redeem the invite code -- adds me and asks me to add you back:",
+            f"retalk request {fp} --code {rec['code']}",
+        ]), file=err)
+        return
+    if args.action == "list":
+        rows = _tables.load_invites(store_db)
+        if args.json:
+            for r in rows:
+                print(json.dumps(r))
+            return
+        if not rows:
+            print("no invite codes -- mint one with `retalk invite new`",
+                  file=sys.stderr)
+            return
+        for r in rows:
+            state = ("revoked" if r["revoked"] else
+                     "active" if r["active"] else "spent/expired")
+            peer = r["peer"] or "-"
+            print(f"{r['code']}\t{r['kind']}\t{state}\tuses={r['uses']}"
+                  f"\tpeer={peer}")
+        return
+    if args.action == "revoke":
+        if not args.code:
+            _die("revoke needs the CODE to revoke")
+        if not _tables.revoke_invite(store_db, args.code):
+            _die("no such invite code")
+        print(f"revoked {args.code}", file=sys.stderr)
+        return
+    if args.action == "watch":
+        u = _open_user(args, banner=not args.quiet)
+        last_sync = time.monotonic()
+        while True:
+            for rec in u.invite_watch():
+                print(json.dumps(rec))
+                sys.stdout.flush()
+            if not args.follow:
+                return
+            time.sleep(args.interval or 2.0)
+            if time.monotonic() - last_sync > 60:
+                u.sync(resend=False)
+                last_sync = time.monotonic()
+    _die("invite needs an action: new, list, revoke, or watch")
+
+
+def cmd_request(args):
+    """Redeem an invite code from a peer's invite: verify + save the inviter
+    and send them the encrypted contact request carrying your card."""
+    if not args.code:
+        _die("request needs --code CODE")
+    if not ID_RE.match(args.inviter or ""):
+        _die("an inviter is addressed by their 32-hex user id")
+    u = _open_user(args)
+    mid = u.request_contact(args.inviter, args.code, peer_name=args.peer)
+    print(json.dumps({"id": mid, "to": args.inviter.lower()}))
+    print("request sent -- the inviter's watch accepts it and they can then "
+          "message you.\nAcceptance is not observable from this side; ask "
+          "them out-of-band if unsure.", file=sys.stderr)
+
+
 def main():
     common = argparse.ArgumentParser(add_help=False)
     raw = argparse.RawDescriptionHelpFormatter
@@ -1745,7 +1837,7 @@ quickstart (your peer runs the same steps on their machine):
 
 run `retalk <command> --help` for the full story of each command.""")
     sub = p.add_subparsers(dest="command", required=True,
-                           metavar="{init,register,id,add,group,contacts,share,import,verify,block,sync,send,receive,history,show,config}")
+                           metavar="{init,register,id,add,invite,request,group,contacts,share,import,verify,block,sync,send,receive,history,show,config}")
 
     sp = sub.add_parser(
         "init", parents=[common], formatter_class=raw,
@@ -1828,6 +1920,11 @@ examples:
                     action="store_true",
                     help="render your card as a copy-paste invite (install + "
                          "relay + add-me steps) to onboard a peer out-of-band")
+    sp.add_argument("--code", metavar="CODE",
+                    help="with --invite-message: include this invite code "
+                         "(minted with `retalk invite new`) so the peer can "
+                         "register with `retalk request` instead of a manual "
+                         "reply")
     sp.add_argument("--invite-reply", dest="invite_reply", action="store_true",
                     help="render a copy-paste REPLY to an invite: hand the "
                          "inviter your fingerprint so they can add you back")
@@ -2397,6 +2494,77 @@ examples:
     sp.add_argument("--json", action="store_true",
                     help="with list: one JSON object per group")
     sp.set_defaults(fn=cmd_group)
+
+    sp = sub.add_parser(
+        "invite", parents=[common], formatter_class=raw,
+        help="mint, list, revoke, and watch invite codes",
+        description="""\
+Invite codes close the onboarding loop. Mint one, include it in your invite
+(`retalk id --invite-message --code CODE`); the peer redeems it with
+`retalk request`, which sends you an end-to-end-encrypted contact request
+carrying the code and their keys. `invite watch` validates the code, pins
+their keys, saves the contact, and consumes a single-use code -- no manual
+add-back. The code never travels in cleartext (it rides inside the encrypted
+request), and watch acts ONLY on unknown-sender mail that decrypts to a
+valid request. Everything else goes unacknowledged and unstored, so the
+sender's outbox re-delivers it and a later scoped receive still gets it.
+
+A valid code proves the sender was AUTHORISED by whoever issued the code --
+not that the keys belong to a particular human. Anyone holding the code can
+register. It replaces the manual add-back, not out-of-band fingerprint
+verification.""",
+        epilog="""\
+examples:
+  retalk invite new
+  retalk invite new --peer dana --expires 2
+  retalk invite new --permanent
+  retalk invite list --json
+  retalk invite revoke CODE
+  retalk invite watch --follow --interval 30 --quiet""")
+    sp.add_argument("action", metavar="ACTION",
+                    choices=["new", "list", "revoke", "watch"],
+                    help="one of: new, list, revoke, watch")
+    sp.add_argument("code", metavar="CODE", nargs="?",
+                    help="the code (for revoke)")
+    sp.add_argument("--peer", metavar="NAME",
+                    help="with new: save the redeeming contact under this "
+                         "name (default: their self-chosen name)")
+    sp.add_argument("--permanent", action="store_true",
+                    help="with new: multi-use, never expires, lives until "
+                         "revoked (default: single-use, 7-day expiry)")
+    sp.add_argument("--expires", metavar="DAYS", type=float,
+                    help="with new: expiry in days (0 = never)")
+    sp.add_argument("--json", action="store_true",
+                    help="with list: one JSON object per code")
+    sp.add_argument("--follow", action="store_true",
+                    help="with watch: keep polling until ctrl-c")
+    sp.add_argument("--interval", metavar="SECONDS", type=float,
+                    help="with watch --follow: poll cadence (default 2)")
+    sp.add_argument("-q", "--quiet", action="store_true",
+                    help="with watch: suppress the identity banner on stderr")
+    sp.set_defaults(fn=cmd_invite)
+
+    sp = sub.add_parser(
+        "request", parents=[common], formatter_class=raw,
+        help="redeem a peer's invite code (adds them + asks to be added back)",
+        description="""\
+Redeem an invite code from someone's invite: verifies and saves the inviter
+as a contact, then sends them one end-to-end-encrypted contact request
+carrying the code and your card. Their `retalk invite watch` accepts it and
+adds you back automatically. Acceptance is NOT observable from this side (a
+bad code looks identical to a slow inviter, on purpose); the inviter's first
+message to you is the confirmation.""",
+        epilog="""\
+examples:
+  retalk request 0f9a3d2c8b7e65410f9a3d2c8b7e6541 --code CODE
+  retalk request 0f9a3d2c8b7e65410f9a3d2c8b7e6541 --code CODE --peer marzia""")
+    sp.add_argument("inviter", metavar="INVITER",
+                    help="the inviter's 32-hex user id (from their invite)")
+    sp.add_argument("--code", metavar="CODE",
+                    help="the invite code they sent you")
+    sp.add_argument("--peer", metavar="NAME",
+                    help="your local name for the inviter")
+    sp.set_defaults(fn=cmd_request)
 
     args = p.parse_args()
     try:
