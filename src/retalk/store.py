@@ -229,7 +229,14 @@ def mint_invite(db, peer: str | None = None, permanent: bool = False,
         expires = None
     else:
         expires = time.time() + expires_days * 86400
-    code = secrets.token_urlsafe(16)
+    # token_urlsafe draws from base64url, whose alphabet includes '-'. A code
+    # that starts with one is unusable on the command line: argparse reads
+    # `invite revoke -Xy...` and `--code -Xy...` as option flags and exits 2.
+    # Redrawing costs about one call in 64 and leaves the entropy intact.
+    while True:
+        code = secrets.token_urlsafe(16)
+        if not code.startswith("-"):
+            break
     kind = "permanent" if permanent else "single"
     ensure_invites(db)
     sql(db, "INSERT INTO invite_codes(code, kind, peer, created, expires, "

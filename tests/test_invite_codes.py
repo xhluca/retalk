@@ -24,6 +24,7 @@ Run from the repo root: uv run python -m unittest discover -s tests
 
 import json
 import os
+import secrets
 import socket
 import subprocess
 import sys
@@ -210,6 +211,43 @@ class TestInviteCodes(unittest.TestCase):
         row = json.loads(self.cli("ana", "invite", "list", "--json",
                                   "-u", "ana").stdout)
         self.assertEqual(row["uses"], 1, "duplicate must not count a use")
+
+
+class TestInviteCodeShape(unittest.TestCase):
+    """A minted code has to survive being typed as a CLI argument. No relay
+    and no identity here: this is about the code itself."""
+
+    def test_minted_code_never_starts_with_a_dash(self):
+        # Regression: token_urlsafe draws from base64url, so about one code in
+        # 64 began with '-'. argparse then read `invite revoke -Xy...` and
+        # `--code -Xy...` as option flags and exited 2 with "unrecognized
+        # arguments", which made the feature fail at random.
+        from retalk import store
+
+        real = secrets.token_urlsafe
+        drawn = ["-leading-dash-is-unusable", "safe-code-with-no-lead-dash"]
+
+        def fake(n):
+            return drawn.pop(0) if drawn else real(n)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "store.db")
+            secrets.token_urlsafe = fake
+            try:
+                rec = store.mint_invite(db)
+            finally:
+                secrets.token_urlsafe = real
+            self.assertEqual(rec["code"], "safe-code-with-no-lead-dash",
+                             "a leading '-' must be redrawn, not minted")
+            self.assertEqual([r["code"] for r in store.load_invites(db)],
+                             ["safe-code-with-no-lead-dash"],
+                             "only the usable code may reach the table")
+
+        # and the real generator agrees, over enough draws to have caught it
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "store.db")
+            codes = [store.mint_invite(db)["code"] for _ in range(300)]
+        self.assertFalse([c for c in codes if c.startswith("-")])
 
 
 if __name__ == "__main__":
