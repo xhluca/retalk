@@ -200,8 +200,11 @@ What the steps rely on:
   automatically, so peers can message you right away. Skip that with
   `--no-register` and publish later with `retalk register`.
 - **Passphrase.** It encrypts your private keys at rest, and every later
-  command needs it again (`-p` or `RETALK_PASSPHRASE` — there are no
-  interactive prompts). For agents or throwaway identities,
+  command needs it again (`--passphrase-file PATH`, `-p`, or
+  `RETALK_PASSPHRASE` — there are no interactive prompts). For scripts and
+  agents prefer `--passphrase-file`: it names the secret by path, so the
+  passphrase never lands in the command line, the shell history, or the
+  environment, and the whole call stays one flat command. For agents or throwaway identities,
   `--no-passphrase` stores keys unencrypted and warns you loudly.
 - **Lost your ID?** `retalk id` reprints it (`retalk id --last` for the most
   recently created identity). `init` also prints a ready-to-paste invite for
