@@ -2565,8 +2565,11 @@ carrying the code and their keys. `invite watch` validates the code, pins
 their keys, saves the contact, and consumes a single-use code -- no manual
 add-back. The code never travels in cleartext (it rides inside the encrypted
 request), and watch acts ONLY on unknown-sender mail that decrypts to a
-valid request. Everything else goes unacknowledged and unstored, so the
-sender's outbox re-delivers it and a later scoped receive still gets it.
+valid request: it looks without consuming, so a saved contact's mail -- and
+any other message it does not handle -- is left untouched on the relay for
+`receive`. That non-destructive read needs a relay running retalk 0.3.0rc2
+or newer; against an older relay `invite watch` refuses rather than
+swallowing mail meant for another reader.
 
 A valid code proves the sender was AUTHORISED by whoever issued the code --
 not that the keys belong to a particular human. Anyone holding the code can

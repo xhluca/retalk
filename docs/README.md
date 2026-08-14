@@ -359,9 +359,16 @@ encrypted contact request carrying the code and their keys. Your watcher
 validates the code, pins their keys, saves the contact (under the minted
 `--peer` name, else their self-chosen name), consumes a single-use code, and
 emits an acceptance record. Requests with dead codes are refused with the
-same signed negative-ack as `block`; ordinary stranger mail is never
-surfaced, acked, or stored by the watcher — it re-delivers from the sender's
-outbox for a normal `receive` (see the JSON standard for record shapes).
+same signed negative-ack as `block`.
+
+The watcher **looks without consuming**: it reads the mailbox
+non-destructively and takes only the senders whose mail is a contact
+request, so a saved contact's messages — and any other stranger mail — stay
+on the relay for `receive`. It is therefore safe to run `invite watch
+--follow` beside a `receive --follow` reader. This needs a relay running
+retalk **0.3.0rc2 or newer**; against an older relay `invite watch` refuses
+with a clear error rather than swallowing mail meant for another reader
+(see the JSON standard for record shapes).
 
 - `invite new` — `--permanent` for a multi-use code that lives until revoked; `--expires DAYS` to override the 7-day default (`0` = never).
 - `invite list` (`--json`) / `invite revoke CODE` — inspect and kill codes; both work offline.

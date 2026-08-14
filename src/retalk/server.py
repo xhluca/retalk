@@ -389,18 +389,39 @@ def send_message(to: str, mtype: int, body: str, auth: dict) -> str:
         conn.close()
 
 
-def read_messages(auth: dict, peer: str | None = None) -> str:
+def read_messages(auth: dict, peer: str | None = None,
+                  peek: bool = False) -> str:
     """Hand over and delete pending messages for the caller. Delivered mail
     leaves the server entirely (content and metadata).
 
     With `peer` set, only messages from that sender are returned and deleted;
     everyone else's mail stays in the mailbox. Without it, the whole mailbox
-    is drained."""
-    user_id = _caller("read_messages", {"peer": peer} if peer else {}, auth)
+    is drained.
+
+    With `peek` set, messages are returned but NOT deleted, so a caller can
+    look before it commits to handling. This exists for readers that only
+    want *some* of the mailbox (`retalk invite watch` handles contact
+    requests and must leave every other sender's mail exactly where it is):
+    without it, any full read is destructive, so a selective reader would
+    swallow mail meant for another reader. A peek reveals nothing the caller
+    could not obtain by draining, so it grants no new access."""
+    signed = {}
+    if peer:
+        signed["peer"] = peer
+    if peek:
+        signed["peek"] = peek
+    user_id = _caller("read_messages", signed, auth)
     conn = _db()
     try:
         conn.execute("BEGIN IMMEDIATE")
-        if peer:
+        if peek:                       # look without consuming
+            rows = conn.execute(
+                "SELECT id, ts, sender, mtype, body FROM messages "
+                "WHERE recipient=?" + (" AND sender=?" if peer else "")
+                + " ORDER BY id",
+                (user_id, peer) if peer else (user_id,),
+            ).fetchall()
+        elif peer:
             rows = conn.execute(
                 "SELECT id, ts, sender, mtype, body FROM messages "
                 "WHERE recipient=? AND sender=? ORDER BY id",

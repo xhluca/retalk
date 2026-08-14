@@ -1063,34 +1063,48 @@ class User:
         return wire_id
 
     def invite_watch(self) -> list[dict]:
-        """One scan of pending mail from UNKNOWN senders (saved contacts are
-        never touched). A valid contact_request with a live code is accepted:
-        keys pinned, contact saved, single-use code consumed, session and
-        ack persisted. A contact_request with a dead code or an inconsistent
-        card is refused with a signed nack (so the sender stops resending)
-        and persists nothing. Anything else is dropped from this fetch
-        WITHOUT acknowledgment and without persisting any state: since only
-        an ack releases the sender's outbox, their client re-delivers it
-        automatically (the same at-least-once path that survives a crashed
-        receive), and a later scoped receive picks it up. watch never
-        surfaces, stores, or acks stranger content, so it cannot become a
-        general read-strangers path. Returns the spec's acceptance and
-        rejection records."""
+        """One scan for contact requests. Mail from saved contacts, and any
+        other message this watcher does not handle, is left EXACTLY where it
+        is -- untouched on the relay, for the normal reader.
+
+        That promise needs the relay's non-destructive read: `read_messages`
+        DELETES what it returns, so a full read would swallow whatever the
+        watcher chose not to handle. Under `--follow` it would swallow it
+        again on every resend, stalling an established contact's mail for as
+        long as the watcher ran. So this peeks first and consumes ONLY the
+        senders whose mail turns out to be a contact request.
+
+        A valid request with a live code is accepted: keys pinned, contact
+        saved, single-use code consumed, session and ack persisted. A request
+        with a dead code or an inconsistent card is refused with a signed
+        nack, so the sender stops resending. Everything else is never
+        fetched, so this cannot become a general read-strangers path.
+        Returns the spec's acceptance and rejection records."""
         out = []
         known = set(store.saved_peers(self._store_path))
         with self._locked():
-            inbox = self._call("read_messages")
-            for m in inbox:
+            try:
+                pending = self._call("read_messages", {"peek": True})
+            except Exception as e:
+                if "peek" in str(e):
+                    raise RuntimeError(
+                        "this relay is too old for `invite watch`: it cannot "
+                        "read the mailbox without consuming it, so watching "
+                        "would swallow mail meant for `receive`. Upgrade the "
+                        "relay to retalk 0.3.0rc2 or newer (this client is "
+                        "fine).") from e
+                raise
+            for m in pending:
                 sender = m["from"]
                 if sender in known or sender in self.blocked:
-                    continue                     # normal receive's business
+                    continue        # not ours: left on the relay, untouched
                 if m["mtype"] != 0:
-                    continue    # first contact is always a pre-key message
+                    continue        # first contact is always a pre-key message
                 body_hash = hashlib.sha256(m["body"].encode()).hexdigest()
                 anymsg = v.AnyOlmMessage.from_parts(
                     m["mtype"], base64.b64decode(m["body"]))
-                # decrypt WITHOUT persisting: nothing below writes account
-                # or session state until a request is accepted
+                # decrypt to CLASSIFY only: nothing is persisted, and nothing
+                # is consumed from the relay, until this proves to be a request
                 try:
                     prekey = anymsg.to_pre_key()
                     session = next(
@@ -1115,8 +1129,12 @@ class User:
                     continue
                 if data.get("kind") != "contact_request":
                     continue        # ordinary stranger mail: left alone
+                # It IS a request, so this watcher owns it: consume that
+                # sender's mail (the relay has no per-message delete). Any
+                # other message of theirs swept up here is simply not acked,
+                # so their outbox re-delivers it for `receive`.
+                self._call("read_messages", {"peer": sender})
                 card = data.get("card") or {}
-                reason = None
                 if (fingerprint(card.get("identity_key") or "",
                                 card.get("signing_key") or "")
                         != card.get("fingerprint")
@@ -1136,11 +1154,11 @@ class User:
                                         record_outbox=False)
                     continue
                 if reason != "ok":
-                    self._send_nack(body_hash)   # stop the resends; keep nothing
+                    self._send_nack(body_hash)   # stop the resends
                     out.append({"kind": "contact_request_rejected",
                                 "from": sender, "reason": reason})
                     continue
-                # accept: NOW persist everything the dry run computed
+                # accept: NOW persist everything the classification computed
                 if acct is not None:
                     self._save_account(acct)
                 self._save_session(sender, session)
