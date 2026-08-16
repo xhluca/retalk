@@ -49,9 +49,28 @@ Message and read (each receive acknowledges and thereby deletes relay copies, so
     RETALK_SAVE_MESSAGE=1 retalk send --peer "them" "hello" --user me
     RETALK_SAVE_MESSAGE=1 retalk receive --peer "them" --user me
 
+One long-lived reader can serve several peers on a calm cadence, which is what a background checker should do instead of polling every couple of seconds. `--peer` repeats, `--interval` sets the poll in seconds, and `--quiet` drops the identity banner so stdout is pure NDJSON:
+
+    retalk receive --peer "them" --peer "other" --follow --interval 60 --quiet --user me
+
 A received message looks like `{"id","from","name","text"}`; a send receipt is `{"id","to"}`. Group sends return `{"id","group","group_id","sent","failed"}` and exit 2 if any member's copy failed. The full contract, including contact cards and control records, is in the JSON standard linked below.
 
 Caveats an agent should know: passphrases are never prompted for, so pass `--passphrase-file PATH` (preferred - the secret is named by path, never embedded in the command line or environment, keeping each call one flat allowlistable command), `-p`/`RETALK_PASSPHRASE`, or create the identity with `--no-passphrase`; the client's relay URL must exactly equal the relay's advertised audience or signatures fail; `receive --all` drains every sender including strangers, so prefer `--peer`; saving is off unless you opt in, and there is no backfill; identities live under `~/.retalk/NAME` (relocate with `RETALK_HOME` or per-directory `--dir`).
+
+## From Python
+
+Everything the CLI does is available as a library, on the same store, so a program can skip the subprocess layer entirely (`pip install retalk`):
+
+    from retalk import User
+
+    me = User("https://relay.retalk.dev", passphrase="...", name="me", store="me/store.db")
+    me.sync()                                   # publish keys
+    me.add_contact("<their-32-hex-id>", "them", verify=True)   # pins keys; PinMismatchError on a swap
+    me.send("<their-32-hex-id>", "hello", save=True)
+    for m in me.receive(save=True):             # [{"id","from","name","text"}]
+        ...
+
+Contacts, groups, and saved history are `User` methods too: `contacts`, `contact`, `verify_contact`, `remove_contact`; `create_group`, `groups`, `group_add`, `group_remove`, `rename_group`, `join_group`, `leave_group`, and `send_group` (one fan-out call returning `{"id","group","group_id","sent","failed"}`); `history(peer=..., group=...)` to replay what was saved. Invite codes have library forms as well: `new_invite`, `invites`, `revoke_invite`, `request_contact`, `invite_watch`. Errors are ordinary exceptions: `ValueError` for bad input, `KeyError` for an unknown contact or group, `PinMismatchError` when keys do not hash to a fingerprint. Library and CLI share the same tables, so a group created in Python shows up in `retalk group list` and the reverse.
 
 ## Demo and media
 

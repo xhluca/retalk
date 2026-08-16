@@ -249,7 +249,15 @@
       <p>stdout is NDJSON data, stderr is banners and errors. One stable
       <a href="https://github.com/xhluca/retalk/blob/main/docs/STANDARD.md">JSON contract</a>
       for messages, receipts and contact cards pipes straight into
-      <code>jq</code>.</p></div>
+      <code>jq</code>. Unlock without embedding the secret:
+      <code>--passphrase-file PATH</code> keeps each call one flat command,
+      with the passphrase out of the command line and the environment.</p></div>
+    <div class="card"><h3>🐍 A library, not just a CLI</h3>
+      <p><code>from retalk import User</code> gives the same operations in
+      process, on the same store: send and receive, contacts, groups, invite
+      codes, and saved history, so a program that already speaks Python does
+      not shell out.
+      <a href="https://github.com/xhluca/retalk/blob/main/docs/README.md#library-usage">Library docs</a>.</p></div>
     <div class="card"><h3>🏠 Self-host in one process</h3>
       <p>One Python process, one SQLite file, no server-side user setup.
       Run it behind Caddy, a Cloudflare tunnel, or a free Hugging Face
