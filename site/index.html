@@ -115,6 +115,7 @@
     <span class="spacer"></span>
     <a class="item" href="#demo">Demo</a>
     <a class="item" href="#quickstart">Quickstart</a>
+    <a class="item" href="#invites">Invites</a>
     <a class="item" href="#how">How it works</a>
     <a class="item" href="#groups">Groups</a>
     <a class="item" href="https://github.com/xhluca/retalk/tree/main/docs">Docs</a>
@@ -181,6 +182,48 @@
   use the public test relay at <code>https://relay.retalk.dev</code> (best
   effort, no uptime guarantee). Point at your own with
   <code>retalk init --relay URL</code>.</p>
+</section>
+
+<section id="invites">
+  <h2><span class="em">🎟️</span>Invite codes</h2>
+  <p class="lead">Those three steps run in both directions: your peer has to
+  send their ID back, and you have to <code>add</code> it. An invite code
+  removes your half. Mint one, put it in the invite, and the peer's own
+  <code>retalk</code> registers them with you.</p>
+  <div class="steps">
+    <div class="step"><div class="n"></div><div class="body">
+      <p>Mint a code and render an invite carrying it. Single-use, expiring in
+      seven days, unless you ask for <code>--permanent</code>.</p>
+<pre><code><span class="g">retalk</span> invite new --user alice
+<span class="g">retalk</span> id --invite-message --code "&lt;CODE&gt;" --as "alice" --user alice</code></pre>
+    </div></div>
+    <div class="step"><div class="n"></div><div class="body">
+      <p>Leave the watcher running while the code is outstanding. It validates
+      the code, pins their keys, saves the contact, and spends a single-use
+      code.</p>
+<pre><code><span class="g">retalk</span> invite watch --follow --user alice</code></pre>
+    </div></div>
+    <div class="step"><div class="n"></div><div class="body">
+      <p>Your peer, having received the invite, redeems it once. Then they wait
+      to be messaged: acceptance is deliberately not observable from their
+      side, so a bad code and a slow inviter look the same.</p>
+<pre><code><span class="g">retalk</span> request "&lt;alices-user-id&gt;" --code "&lt;CODE&gt;" --peer "alice" --user bob</code></pre>
+    </div></div>
+  </div>
+  <p class="lead" style="margin-top:6px"><strong>What a code proves.</strong> A
+  valid code shows the sender was authorised by whoever issued it. It says
+  nothing about which human holds those keys, and anyone who obtains the code
+  can redeem it. So it replaces the manual <code>add</code>, not out-of-band
+  verification. Treat a live code as a secret, hand it over the same channel as
+  the invite, and <code>retalk invite revoke</code> one that leaks.</p>
+  <p class="lead">The code never travels in cleartext; it rides inside the
+  encrypted request, so the relay never sees it. The watcher acts only on
+  unknown-sender mail that decrypts to a valid request, and it looks without
+  consuming, so a saved contact's mail is left untouched for
+  <code>receive</code> and it is safe to run beside a follower. That
+  non-destructive read is a relay capability: against a relay older than
+  0.3.0 the watcher refuses rather than swallowing someone else's mail, and
+  says which side to upgrade.</p>
 </section>
 
 <section id="how">

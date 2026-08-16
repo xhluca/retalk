@@ -29,6 +29,21 @@ Bootstrap an identity and exchange addresses:
 
     retalk add <their-32-hex-id> --peer "them" --verify --user me
 
+Onboarding a peer this way runs in both directions: they send their fingerprint back and you `add` it. An invite code removes your half of that. Mint one, put it in the invite you hand over, and leave the watcher running while the code is outstanding:
+
+    retalk invite new --user me                       # {"code","kind","expires","peer"}; single-use, 7 days
+    retalk invite new --permanent --user me           # multi-use until revoked
+    retalk id --invite-message --code <code> --as "me" --user me
+    retalk invite watch --follow --user me            # validates, pins keys, saves the contact
+
+The peer redeems it exactly once, then waits to be messaged:
+
+    retalk request <inviter-32-hex-id> --code <code> --peer "them" --user me   # {"id","to"}
+
+`invite list` and `invite revoke <code>` manage outstanding codes; a listed code carries `{"code","kind","peer","created","expires","uses","used_by","revoked","active"}`. The watcher emits `{"kind":"contact_accepted","code","from","name","card"}` on success and `{"kind":"contact_request_rejected","from","reason"}` on refusal, where `reason` is one of `unknown-code`, `revoked`, `expired`, `consumed`, `card-mismatch`.
+
+Four things an agent must get right about codes. The code never travels in cleartext, since it rides inside the encrypted request, so the relay never learns it. A valid code proves only that the sender was authorised by whoever issued it, not which human holds the keys, so it replaces the manual `add` and not out-of-band verification; describe such a peer as registered with your code, never as verified. Acceptance is deliberately not observable from the requester's side, so exit 0 means sent and not accepted, a refused code and a silent inviter look identical, and you must never build a retry or status-check loop: the inviter's first message is the confirmation. And `invite watch` looks without consuming, acting only on unknown-sender mail that decrypts to a valid request, so a saved contact's mail is left untouched for `receive` and the watcher is safe to run beside a follower; that non-destructive read is a relay capability, and against a relay older than 0.3.0 the watcher refuses rather than swallowing mail meant for another reader.
+
 Message and read (each receive acknowledges and thereby deletes relay copies, so drain deliberately; `--follow` keeps listening):
 
     RETALK_SAVE_MESSAGE=1 retalk send --peer "them" "hello" --user me
