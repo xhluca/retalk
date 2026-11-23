@@ -216,8 +216,10 @@ you mean; every command resolves it in order:
 
 1. `--dir DIR` — an explicit identity directory (wins if given)
 2. `--user NAME` / `-u NAME` — the user named NAME (`~/.retalk/NAME/`)
-3. `RETALK_USER` env var — the same, set once for the shell
-4. otherwise: an error — nothing is created or guessed.
+3. `--identity-from SOURCE` / `RETALK_IDENTITY_FROM` — the identity of the
+   coding-agent session the command runs in (see below)
+4. `RETALK_USER` env var — the same as `--user`, set once for the shell
+5. otherwise: an error — nothing is created or guessed.
 
 Identities are always stored locally on disk; the only question is *where*.
 `--user NAME` keeps them in the shared home location (`~/.retalk/NAME/`;
@@ -226,9 +228,34 @@ relocate it with `RETALK_HOME`), good when one person has a few named users.
 one inside a project directory, on a removable disk, or anywhere you want it
 self-contained and easy to back up or delete as a unit.
 
-Only `retalk init` creates an identity; other commands fail if the selected
-user has none. Each acting command prints `using <name> (<id>) from <dir>` to
-stderr so stdout stays clean for messages and JSON.
+Only `retalk init` creates a named identity; other commands fail if the
+selected user has none. Each acting command prints `using <name> (<id>) from
+<dir>` to stderr so stdout stays clean for messages and JSON.
+
+### Session identities (`--identity-from`)
+
+Coding agents often run several sessions in parallel as one OS user. With one
+shared identity, every reply lands with whichever session happens to read
+first. `--identity-from` gives each session its own identity instead:
+
+| Source | Session id from | Session name from |
+| --- | --- | --- |
+| `claude` | `CLAUDE_CODE_SESSION_ID` (set by Claude Code) | `claude agents --json` |
+| `env:VAR` | `$VAR` | none (unnamed) |
+| `env:VAR:NAME_VAR` | `$VAR` | `$NAME_VAR` |
+
+`RETALK_SESSION_NAME` overrides the name for any source. The identity lives in
+`~/.retalk/sessions/<source>-<session id>/` and is created on the session's
+first command, so agents never need a separate `init`. It is keyed by the
+session id, so it survives restarts and renames. Its display name follows the
+session's current name and is refreshed on every command, so a renamed session
+signs its next message with the new name (`session renamed: old -> new` on
+stderr). The fingerprint, the real address, never changes. A session has no
+human to type a passphrase, so its identity is created like `--no-passphrase`
+(owner-only `0700`/`0600` files) unless a passphrase is supplied through
+`--passphrase-file`, `RETALK_PASSPHRASE_FILE` or `RETALK_PASSPHRASE`.
+`retalk init --identity-from claude` creates it explicitly, with init's usual
+passphrase rules. An explicit `--dir` or `--user` always wins.
 
 Machines need a roughly correct clock: server request signatures expire after
 about 2.5 minutes.

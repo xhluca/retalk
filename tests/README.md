@@ -63,6 +63,7 @@ no server: `test_add_fingerprint.py`, `test_global_contacts.py`,
 | 8778-8779 | `test_hardening.py` |
 | 8780 | `test_mailbox_cap.py` |
 | 8781-8782 | `test_multi_audience.py` |
+| 8783 | `test_identity_from.py` |
 | 8786-8787 | `test_show_web.py` |
 | 8788 | `test_library_api.py` |
 | 8790-8795 | `test_admin_api_keys.py` |
@@ -70,7 +71,7 @@ no server: `test_add_fingerprint.py`, `test_global_contacts.py`,
 | 8798 | `test_receive_multi.py` |
 | 8799 | `test_invite_codes.py` |
 
-Free inside the range: 8783-8785 and 8789.
+Free inside the range: 8784-8785 and 8789.
 
 Note that `test_e2ee.py` wraps its 14 criteria in a *single* test method on
 purpose: they're one ordered, stateful scenario, not 14 independent tests.
