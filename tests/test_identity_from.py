@@ -1,4 +1,4 @@
-"""--identity-from: one identity per coding-agent session.
+"""Session identities: --identity-from, --session-id, --session-name.
 
 Asserts:
   1. `--identity-from claude` creates the session's identity on first use,
@@ -10,7 +10,10 @@ Asserts:
   4. `env:VAR:NAME_VAR` works for any agent that exports a session id.
   5. A missing session id or an unknown source fails loudly; nothing is created.
   6. Precedence: --user beats --identity-from; RETALK_IDENTITY_FROM beats
-     RETALK_USER.
+     RETALK_USER; an assigned --session-id beats --identity-from, and an
+     assigned --session-name beats the detected name.
+  8. --session-id ID / RETALK_SESSION_ID: an assigned, permanent id; the
+     last assigned --session-name sticks until a new one is assigned.
   7. End to end through a live relay: a message from a session identity
      arrives labelled ~<session name>, and after a rename ~<new name>.
 
@@ -76,6 +79,7 @@ class TestIdentityFrom(unittest.TestCase):
                    PATH=self.bin + os.pathsep + os.environ.get("PATH", ""))
         for k in ("RETALK_USER", "RETALK_PASSPHRASE", "RETALK_PASSPHRASE_FILE",
                   "RETALK_IDENTITY_FROM", "RETALK_SESSION_NAME",
+                  "RETALK_SESSION_ID",
                   "CLAUDE_CODE_SESSION_ID", "FAKE_CLAUDE_NAME"):
             env.pop(k, None)
         for k, val in env_over.items():
@@ -155,6 +159,41 @@ class TestIdentityFrom(unittest.TestCase):
                        CLAUDE_CODE_SESSION_ID="p1",
                        FAKE_CLAUDE_NAME="sess").stdout.strip()
         self.assertNotEqual(got, bob)
+
+    def test_assigned_id_and_name(self):
+        r = self.cli("id", "--json", "--session-id", "job/7",
+                     "--session-name", "worker")
+        c1 = json.loads(r.stdout)
+        self.assertEqual(c1["name"], "worker")
+        self.assertTrue(os.path.isdir(self.session_dir("id-job_7")))
+        # no name given: the last assigned name is kept
+        c2 = json.loads(self.cli("id", "--json", "--session-id", "job/7").stdout)
+        self.assertEqual((c2["fingerprint"], c2["name"]),
+                         (c1["fingerprint"], "worker"))
+        # reassign the name: same identity, new name
+        r = self.cli("id", "--json", "--session-id", "job/7",
+                     "--session-name", "worker-2")
+        c3 = json.loads(r.stdout)
+        self.assertEqual((c3["fingerprint"], c3["name"]),
+                         (c1["fingerprint"], "worker-2"))
+        self.assertIn("session renamed: worker -> worker-2", r.stderr)
+        # the env form selects the same identity
+        c4 = json.loads(self.cli("id", "--json", RETALK_SESSION_ID="job/7").stdout)
+        self.assertEqual(c4["fingerprint"], c1["fingerprint"])
+
+    def test_assigned_beats_detected(self):
+        # an assigned name wins over the detected one
+        r = self.cli("id", "--json", "--identity-from", "claude",
+                     "--session-name", "mine",
+                     CLAUDE_CODE_SESSION_ID="d1", FAKE_CLAUDE_NAME="detected")
+        self.assertEqual(json.loads(r.stdout)["name"], "mine")
+        # an assigned id wins over --identity-from
+        a = json.loads(self.cli("id", "--json", "--session-id", "fixed",
+                                "--identity-from", "claude",
+                                CLAUDE_CODE_SESSION_ID="d1").stdout)
+        b = json.loads(self.cli("id", "--json", "--session-id", "fixed").stdout)
+        self.assertEqual(a["fingerprint"], b["fingerprint"])
+        self.assertTrue(os.path.isdir(self.session_dir("id-fixed")))
 
     def test_messages_carry_the_session_name(self):
         server = subprocess.Popen(

@@ -216,10 +216,12 @@ you mean; every command resolves it in order:
 
 1. `--dir DIR` — an explicit identity directory (wins if given)
 2. `--user NAME` / `-u NAME` — the user named NAME (`~/.retalk/NAME/`)
-3. `--identity-from SOURCE` / `RETALK_IDENTITY_FROM` — the identity of the
-   coding-agent session the command runs in (see below)
-4. `RETALK_USER` env var — the same as `--user`, set once for the shell
-5. otherwise: an error — nothing is created or guessed.
+3. `--session-id ID` / `RETALK_SESSION_ID` — a session identity with an id
+   you assign (see below)
+4. `--identity-from SOURCE` / `RETALK_IDENTITY_FROM` — the identity of the
+   coding-agent session the command runs in, detected (see below)
+5. `RETALK_USER` env var — the same as `--user`, set once for the shell
+6. otherwise: an error — nothing is created or guessed.
 
 Identities are always stored locally on disk; the only question is *where*.
 `--user NAME` keeps them in the shared home location (`~/.retalk/NAME/`;
@@ -244,9 +246,20 @@ first. `--identity-from` gives each session its own identity instead:
 | `env:VAR` | `$VAR` | none (unnamed) |
 | `env:VAR:NAME_VAR` | `$VAR` | `$NAME_VAR` |
 
-`RETALK_SESSION_NAME` overrides the name for any source. The identity lives in
-`~/.retalk/sessions/<source>-<session id>/` and is created on the session's
-first command, so agents never need a separate `init`. It is keyed by the
+You can also assign both parts yourself, which works for any agent, script or
+person, with nothing to detect:
+
+| Option | Env var | Meaning |
+| --- | --- | --- |
+| `--session-id ID` | `RETALK_SESSION_ID` | permanent key of the identity (wins over `--identity-from`) |
+| `--session-name NAME` | `RETALK_SESSION_NAME` | display name; change it any time |
+
+The name shown is, in order: an assigned `--session-name`, then the name
+detected from the source, then the last name stored (so an assigned name
+sticks until you assign another, unless a detected name replaces it). The
+identity lives in `~/.retalk/sessions/<source>-<session id>/` (`id-<ID>` for
+an assigned id) and is created on the session's first command, so agents
+never need a separate `init`. It is keyed by the
 session id, so it survives restarts and renames. Its display name follows the
 session's current name and is refreshed on every command, so a renamed session
 signs its next message with the new name (`session renamed: old -> new` on
