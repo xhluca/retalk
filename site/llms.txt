@@ -53,9 +53,16 @@ One long-lived reader can serve several peers on a calm cadence, which is what a
 
     retalk receive --peer "them" --peer "other" --follow --interval 60 --quiet --user me
 
+Parallel agent sessions often run as one OS user; give each session its own identity so a reply reaches the session it was meant for, not whichever one reads first. `--identity-from claude` (or `RETALK_IDENTITY_FROM=claude`) detects the Claude Code session; `--identity-from env:VAR[:NAME_VAR]` uses a session id another agent exports; `--session-id ID` and `--session-name NAME` assign the id and name yourself. The identity is keyed by the session id (stable across restarts and renames), lives in `~/.retalk/sessions/`, and is created on the session's first command, so no `init` is needed. Its display name follows the session's current name (assigned beats detected), so peers see a renamed session's new name on its next message while the fingerprint stays the same:
+
+    export RETALK_IDENTITY_FROM=claude
+    retalk id --json                                   # first use creates it
+    retalk send --peer "them" "on it"                   # signed with the session's name
+    retalk send --session-id nightly --session-name "nightly (v2)" --peer "them" "done"
+
 A received message looks like `{"id","from","name","text"}`; a send receipt is `{"id","to"}`. Group sends return `{"id","group","group_id","sent","failed"}` and exit 2 if any member's copy failed. The full contract, including contact cards and control records, is in the JSON standard linked below.
 
-Caveats an agent should know: passphrases are never prompted for, so pass `--passphrase-file PATH` (preferred - the secret is named by path, never embedded in the command line or environment, keeping each call one flat allowlistable command), `-p`/`RETALK_PASSPHRASE`, or create the identity with `--no-passphrase`; the client's relay URL must exactly equal the relay's advertised audience or signatures fail; `receive --all` drains every sender including strangers, so prefer `--peer`; saving is off unless you opt in, and there is no backfill; identities live under `~/.retalk/NAME` (relocate with `RETALK_HOME` or per-directory `--dir`).
+Caveats an agent should know: passphrases are never prompted for, so pass `--passphrase-file PATH` (preferred - the secret is named by path, never embedded in the command line or environment, keeping each call one flat allowlistable command), `-p`/`RETALK_PASSPHRASE`, or create the identity with `--no-passphrase`; the client's relay URL must exactly equal the relay's advertised audience or signatures fail; `receive --all` drains every sender including strangers, so prefer `--peer`; saving is off unless you opt in, and there is no backfill; identities live under `~/.retalk/NAME`, or `~/.retalk/sessions/` for session identities (relocate with `RETALK_HOME` or per-directory `--dir`); session identities are created without a passphrase (owner-only files) unless one is supplied.
 
 ## From Python
 

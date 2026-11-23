@@ -251,7 +251,10 @@
       for messages, receipts and contact cards pipes straight into
       <code>jq</code>. Unlock without embedding the secret:
       <code>--passphrase-file PATH</code> keeps each call one flat command,
-      with the passphrase out of the command line and the environment.</p></div>
+      with the passphrase out of the command line and the environment.
+      Parallel agent sessions each get their own identity with
+      <code>--identity-from claude</code> (or an assigned
+      <code>--session-id</code>), named after the session.</p></div>
     <div class="card"><h3>🐍 A library, not just a CLI</h3>
       <p><code>from retalk import User</code> gives the same operations in
       process, on the same store: send and receive, contacts, groups, invite

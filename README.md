@@ -306,10 +306,38 @@ One line per subcommand, matching `retalk --help`. Run
 | `config` | Show or set owner-wide defaults (e.g. the default relay). |
 
 Every command picks the identity it acts as from `--dir DIR`, then
-`--user`/`-u NAME`, then the `RETALK_USER` env var — retalk never guesses
+`--user`/`-u NAME`, then a session identity (`--session-id` or
+`--identity-from`, below), then the `RETALK_USER` env var — retalk never guesses
 ([details](docs/README.md#selecting-the-user)). Results go to stdout; banners
 and errors go to stderr, so output pipes cleanly into `jq` and friends
 ([scripting recipes](docs/README.md#scripting-the-cli)).
+
+**One identity per coding-agent session.** Parallel agent sessions often run
+as the same OS user, so a shared identity makes every reply land with
+whichever session reads first. `--identity-from claude` (or
+`RETALK_IDENTITY_FROM=claude`) gives each Claude Code session its own identity:
+
+```bash
+export RETALK_IDENTITY_FROM=claude    # e.g. in the session's environment
+retalk id --json                      # first use creates the identity
+retalk send --peer bob "on it"        # peers see the session's name
+```
+
+The identity is keyed by the session's id, so it survives restarts and
+renames, and lives in `~/.retalk/sessions/`. Its display name is the
+session's current name, refreshed on every command, so a renamed session
+signs its next message with the new name; the fingerprint never changes.
+Other agents can use `--identity-from env:VAR[:NAME_VAR]` with a session id
+they export. To assign the id and name yourself, use `--session-id ID` (a
+permanent key you choose) and `--session-name NAME` (change it whenever you
+like; it sticks until you assign another):
+
+```bash
+retalk send --session-id nightly-job --session-name "nightly (v2)" --peer bob "done"
+```
+
+Session identities are created without a passphrase (keys protected by
+owner-only file permissions) unless one is supplied.
 
 ## Message history
 

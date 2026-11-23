@@ -4,9 +4,12 @@ An identity lives in a folder (created by `retalk init`) containing
 store.db: keys encrypted at rest, sessions, saved peers, outbox.
 
 Which user every command acts as, in order:
-  --dir DIR  >  --user/-u NAME  >  RETALK_USER env  >  error (never guessed).
-Only `init` ever creates an identity; every other command refuses loudly
-when the selected user has none.
+  --dir DIR  >  --user/-u NAME  >  --session-id ID (or RETALK_SESSION_ID)
+  >  --identity-from SOURCE (or RETALK_IDENTITY_FROM)  >  RETALK_USER env
+  >  error (never guessed).
+Only `init` creates a named identity; every other command refuses loudly
+when the selected user has none. The one exception is a session identity
+(--session-id / --identity-from), created on the session's first command.
 
 The passphrase comes from --passphrase or RETALK_PASSPHRASE; there is no
 interactive prompt. --no-passphrase creates or opens an identity with
@@ -18,12 +21,14 @@ init. Identity banners go to stderr so stdout stays clean for --json.
 from __future__ import annotations
 
 import argparse
+import functools
 import getpass
 import importlib.resources
 import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import textwrap
 import time
@@ -166,18 +171,163 @@ def _style(text: str, code: str) -> str:
     return f"\033[{code}m{text}\033[0m" if sys.stderr.isatty() else text
 
 
+# --- identities bound to a coding-agent session (--identity-from) -------------
+#
+# Several agent sessions on one machine often share an OS user, so one
+# identity per OS user makes every reply land with whichever session happens
+# to read first. --identity-from gives each session its own identity, keyed by
+# the session's stable id (it survives restarts and renames), and labels it
+# with the session's current name, refreshed on every command.
+
+def _identity_source(args) -> str | None:
+    """The session source for this command, or None. An assigned session id
+    (--session-id / RETALK_SESSION_ID) wins over a detected one
+    (--identity-from / RETALK_IDENTITY_FROM)."""
+    sid = (getattr(args, "session_id", None)
+           or os.environ.get("RETALK_SESSION_ID"))
+    if sid:
+        return "id:" + sid
+    return (getattr(args, "identity_from", None)
+            or os.environ.get("RETALK_IDENTITY_FROM") or None)
+
+
+def _session_name(args, source: str) -> str:
+    """The name to show for a session identity: an assigned name
+    (--session-name / RETALK_SESSION_NAME) first, then the name detected from
+    the source; "" when neither is known (the stored name is then kept)."""
+    return (getattr(args, "session_name", None)
+            or os.environ.get("RETALK_SESSION_NAME")
+            or _agent_session(source)[1])
+
+
+def _claude_session_name(session_id: str) -> str:
+    """The current name of a Claude Code session, from `claude agents --json`
+    (best effort: "" when the CLI is missing, slow, or does not list it)."""
+    try:
+        res = subprocess.run(["claude", "agents", "--json", "--all"],
+                             capture_output=True, text=True, timeout=15)
+        rows = json.loads(res.stdout or "[]")
+    except Exception:
+        return ""
+    for row in rows if isinstance(rows, list) else []:
+        if isinstance(row, dict) and row.get("sessionId") == session_id:
+            return str(row.get("name") or "")
+    return ""
+
+
+@functools.lru_cache(maxsize=None)
+def _agent_session(source: str) -> tuple[str, str]:
+    """Return (key, detected name) for a session source.
+
+    key is stable and filesystem-safe ("claude-<session id>"); it names the
+    identity folder. The detected name is the session's current
+    human-readable name, or "" when the source has none (see _session_name
+    for assigned names).
+
+    Sources:
+      id:ID              an assigned, permanent session id (--session-id)
+      claude             Claude Code: CLAUDE_CODE_SESSION_ID, name from
+                         `claude agents --json`
+      env:VAR[:NAMEVAR]  any agent that exports its session id in VAR (and,
+                         optionally, its name in NAMEVAR)
+    """
+    if source.startswith("id:") and source[3:]:
+        sid, prefix, name = source[3:], "id", ""
+    elif source == "claude":
+        sid = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+        if not sid:
+            _die("--identity-from claude: CLAUDE_CODE_SESSION_ID is not set; "
+                 "run this from inside a Claude Code session")
+        prefix = "claude"
+        name = _claude_session_name(sid)
+    elif source.startswith("env:") and source[4:].split(":")[0]:
+        var, _, name_var = source[4:].partition(":")
+        sid = os.environ.get(var, "")
+        if not sid:
+            _die(f"--identity-from {source}: ${var} is not set")
+        prefix = re.sub(r"[^a-z0-9]+", "-", var.lower()).strip("-")
+        name = os.environ.get(name_var, "") if name_var else ""
+    else:
+        _die(f"unknown --identity-from source {source!r}: use 'claude' or "
+             "'env:VAR[:NAME_VAR]'")
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", sid)[:128]
+    return f"{prefix}-{safe}", name
+
+
+def _new_identity(d: Path, secret: str, disabled: bool, display: str,
+                  server: str | None, api_key: str | None,
+                  identity_from: str | None = None) -> User:
+    """Create a new identity store in folder d (shared by `init` and the
+    automatic creation of session identities)."""
+    d.mkdir(parents=True, exist_ok=True)
+    u = User(server, secret, name=display, store=str(d / STORE_FILE))
+    u._meta_set("created_at", repr(time.time()))   # lets `retalk id --last` find it
+    if disabled:
+        u._meta_set("no_passphrase", "1")
+    if display:
+        u._meta_set("name", display)
+    if server:
+        u._meta_set("server_url", server)
+    if api_key:
+        u._meta_set("api_key", api_key)
+    if identity_from:
+        u._meta_set("identity_from", identity_from)
+    # private keys live here; keep them owner-only whether or not encrypted
+    try:
+        (d / STORE_FILE).chmod(0o600)
+        d.chmod(0o700)
+        if identity_from:          # don't let others list which sessions exist
+            d.parent.chmod(0o700)
+    except OSError:
+        pass
+    return u
+
+
+def _create_session_identity(args, d: Path, src: str):
+    """First use of a session identity: create it without asking. It is
+    passphrase-protected only if a passphrase was supplied; otherwise, like
+    --no-passphrase, its keys rely on the folder's owner-only permissions
+    (a session has no human to type one)."""
+    supplied = (getattr(args, "passphrase", None)
+                or getattr(args, "passphrase_file", None)
+                or os.environ.get("RETALK_PASSPHRASE_FILE")
+                or os.environ.get("RETALK_PASSPHRASE"))
+    if supplied:
+        secret, disabled = _resolve_passphrase(args, creating=True)
+    else:
+        secret, disabled = NO_PASSPHRASE, True
+    _ensure_config()
+    server = (getattr(args, "relay", None) or os.environ.get("RETALK_RELAY")
+              or _default_relay())
+    api_key = (getattr(args, "api_key", None)
+               or os.environ.get("RETALK_API_KEY"))
+    name = _session_name(args, src)
+    u = _new_identity(d, secret, disabled, name, server, api_key,
+                      identity_from=src)
+    print(f"created session identity {name or d.name} ({u.fingerprint()}) "
+          f"at {d}", file=sys.stderr)
+
+
 def _resolve_store(args, creating: bool = False) -> Path:
+    src = None
     if getattr(args, "dir", None):                 # --dir DIR (explicit path)
         d = Path(args.dir)
     elif getattr(args, "user", None):              # --user / -u NAME
         d = _data_home() / args.user
+    elif _identity_source(args):                   # --session-id / --identity-from
+        src = _identity_source(args)
+        d = _data_home() / "sessions" / _agent_session(src)[0]
     elif os.environ.get("RETALK_USER"):            # RETALK_USER env
         d = _data_home() / os.environ["RETALK_USER"]
     else:
         _die("no user selected: pass --user NAME (-u NAME), set RETALK_USER, "
-             "or pass --dir DIR")
+             "pass --session-id ID or --identity-from SOURCE, or pass "
+             "--dir DIR")
     if not creating and not (d / STORE_FILE).exists():
-        _die(f"no identity at {d} — create one with `retalk init`")
+        if src:                                    # a session's first command
+            _create_session_identity(args, d, src)
+        else:
+            _die(f"no identity at {d} — create one with `retalk init`")
     return d
 
 
@@ -514,6 +664,18 @@ def _open_user(args, need_server: bool = True, banner: bool = True) -> User:
                  api_key=api_key, left_groups=left)
     except Exception:
         _die(f"could not unlock the identity at {d} (wrong passphrase?)")
+    # A session identity follows its session's name: a renamed session signs
+    # its next message with the new name. (The fingerprint, the real address,
+    # never changes.) An explicit --dir/--user selection is left alone.
+    src = _meta(store_db, "identity_from")
+    if (src and not getattr(args, "dir", None) and not getattr(args, "user", None)
+            and _identity_source(args)):
+        current = _session_name(args, src)
+        if current and current != (u.name or ""):
+            if u.name:
+                print(f"session renamed: {u.name} -> {current}", file=sys.stderr)
+            u._meta_set("name", current)
+            u.name = current
     if banner:
         print(f"using {u.name or 'user'} ({u.fingerprint()}) from {d}",
               file=sys.stderr)
@@ -571,36 +733,27 @@ def cmd_init(args):
     secret, disabled = _resolve_passphrase(args, creating=True)
     _ensure_config()   # seed ~/.retalk/config.json from the packaged default
     # No selector? Auto-name the new identity <login>-<n> (init only).
-    if not args.dir and not args.user and not os.environ.get("RETALK_USER"):
+    if (not args.dir and not args.user and not _identity_source(args)
+            and not os.environ.get("RETALK_USER")):
         args.user = _next_default_user()
         print('No user specified, defaulting to automatically generated '
               f'"{args.user}".', file=sys.stderr)
     d = _resolve_store(args, creating=True)
     if (d / STORE_FILE).exists():
         _die(f"an identity already exists at {d}")
-    d.mkdir(parents=True, exist_ok=True)
     server = args.relay or os.environ.get("RETALK_RELAY") or _default_relay()
     # default the display name to the chosen user name (--user / RETALK_USER),
     # so `init --user alice` labels messages 'alice' without repeating it;
-    # an identity selected only by --dir has no user name, so stays unnamed.
-    display = (args.display_name or args.user
-               or os.environ.get("RETALK_USER") or "")
-    u = User(server, secret, name=display, store=str(d / STORE_FILE))
-    u._meta_set("created_at", repr(time.time()))   # lets `retalk id --last` find it
-    if disabled:
-        u._meta_set("no_passphrase", "1")
-    if display:
-        u._meta_set("name", display)
-    if server:
-        u._meta_set("server_url", server)
-    if args.api_key:
-        u._meta_set("api_key", args.api_key)
-    # private keys live here; keep them owner-only whether or not encrypted
-    try:
-        (d / STORE_FILE).chmod(0o600)
-        d.chmod(0o700)
-    except OSError:
-        pass
+    # a session identity defaults to the session's current name; an identity
+    # selected only by --dir has no user name, so stays unnamed.
+    src = None if (args.dir or args.user) else _identity_source(args)
+    if src:
+        display = args.display_name or _session_name(args, src)
+    else:
+        display = (args.display_name or args.user
+                   or os.environ.get("RETALK_USER") or "")
+    u = _new_identity(d, secret, disabled, display, server, args.api_key,
+                      identity_from=src)
 
     # Publish keys to the relay so peers can reach you (unless --no-register).
     # Best-effort: a failure never blocks init, but it warns LOUDLY — an
@@ -1816,6 +1969,25 @@ def main():
     g.add_argument("-u", "--user", metavar="NAME",
                    help="act as the user named NAME, stored under "
                         "~/.retalk/NAME/. Overrides RETALK_USER")
+    g.add_argument("--identity-from", metavar="SOURCE", dest="identity_from",
+                   help="act as the identity of the coding-agent session this "
+                        "command runs in: 'claude' (Claude Code) or "
+                        "'env:VAR[:NAME_VAR]' (session id in $VAR). One "
+                        "identity per session, under ~/.retalk/sessions/, "
+                        "created on first use and named after the session "
+                        "(renames follow). Also RETALK_IDENTITY_FROM; "
+                        "overrides RETALK_USER")
+    g.add_argument("--session-id", metavar="ID", dest="session_id",
+                   help="act as the session identity with this assigned, "
+                        "permanent id (any agent, script or person; no "
+                        "detection needed). Kept under ~/.retalk/sessions/, "
+                        "created on first use. Also RETALK_SESSION_ID; wins "
+                        "over --identity-from")
+    g.add_argument("--session-name", metavar="NAME", dest="session_name",
+                   help="assign the display name of a session identity "
+                        "(--session-id or --identity-from); change it any "
+                        "time, the fingerprint stays. Also RETALK_SESSION_NAME; "
+                        "wins over a detected name")
     g.add_argument("-r", "--relay", metavar="URL",
                    help="relay URL for this invocation; overrides the "
                         "RETALK_RELAY env var and the URL saved at init")
@@ -1858,10 +2030,18 @@ server does not control (chat, email, in person).""",
 which user every command acts as (first match wins):
   1. --dir DIR           an explicit identity directory
   2. --user / -u NAME    the user named NAME (~/.retalk/NAME/)
-  3. RETALK_USER env     same as --user, as an environment variable
-  4. otherwise: error — retalk never guesses which user you mean.
-Only `retalk init` ever creates an identity; other commands fail loudly when
-the selected user has none.
+  3. --session-id ID (or RETALK_SESSION_ID env)
+                         a session identity with an assigned, permanent id
+  4. --identity-from SOURCE (or RETALK_IDENTITY_FROM env)
+                         one identity per coding-agent session, detected:
+                         'claude' (Claude Code) or 'env:VAR[:NAME_VAR]'
+                         Session identities live in ~/.retalk/sessions/, are
+                         created on first use, and show the session's name:
+                         --session-name (assigned) > detected > last stored
+  5. RETALK_USER env     same as --user, as an environment variable
+  6. otherwise: error — retalk never guesses which user you mean.
+Only `retalk init` creates a named identity; other commands fail loudly when
+the selected user has none (a session identity is created on first use).
 
 passphrase (required unless the identity was made with --no-passphrase):
   pass --passphrase SECRET, or set RETALK_PASSPHRASE (preferred -- it is not
@@ -1870,6 +2050,9 @@ passphrase (required unless the identity was made with --no-passphrase):
 
 environment variables:
   RETALK_USER        which user to act as (alternative to --user / -u)
+  RETALK_SESSION_ID     act as the session identity with this id (= --session-id)
+  RETALK_IDENTITY_FROM  act as this agent session's identity (= --identity-from)
+  RETALK_SESSION_NAME   assign the session identity's name (= --session-name)
   RETALK_PASSPHRASE  unlocks your keys (alternative to --passphrase)
   RETALK_RELAY       relay to talk to (init can save one per identity instead)
   RETALK_API_KEY     relay access key, if the relay requires one (init can save it)
