@@ -117,8 +117,10 @@ class TestGroups(unittest.TestCase):
         self.assertEqual([m["text"] for m in self.recv("bob", "carol")],
                          ["hi all, carol here"])
 
-        # drift: alice adds dave; her next send teaches bob the new roster
-        self.cli("group", "add", "team", "dave", "-u", "alice")
+        # drift: alice adds dave without announcing it (--no-notify); her
+        # next send teaches bob the new roster (announcements: see
+        # test_group_membership.py)
+        self.cli("group", "add", "team", "dave", "--no-notify", "-u", "alice")
         self.cli("send", "--group", "team", "welcome dave", "-u", "alice")
         self.recv("bob", "alice")
         bob_groups = [json.loads(l) for l in
@@ -190,8 +192,10 @@ class TestGroups(unittest.TestCase):
         r = self.cli("group", "create", "team", "--members", "bob",
                      "-u", "alice", expect=2)
         self.assertIn("already exists", r.stderr)
-        # remove carol: she stops getting alice's copies, bob still does
-        self.cli("group", "remove", "team", "carol", "-u", "alice")
+        # remove carol (unannounced): she stops getting alice's copies, bob
+        # still does
+        self.cli("group", "remove", "team", "carol", "--no-notify",
+                 "-u", "alice")
         self.cli("send", "--group", "team", "post-removal", "-u", "alice")
         self.assertEqual(self.recv("carol", "alice"), [])
         self.assertEqual([m["text"] for m in self.recv("bob", "alice")],
@@ -377,7 +381,7 @@ class TestGroups(unittest.TestCase):
 
         # re-adding WITHOUT bob rejoining stays refused — and the refusal
         # teaches alice all over again
-        self.cli("group", "add", "team", "bob", "-u", "alice")
+        self.cli("group", "add", "team", "bob", "--no-notify", "-u", "alice")
         self.cli("send", "--group", "team", "too soon", "-u", "alice")
         self.assertEqual(
             self.cli("receive", "--peer", "alice", "-u", "bob").stdout, "")
@@ -386,7 +390,7 @@ class TestGroups(unittest.TestCase):
 
         # rejoining: clear the tombstone, get re-added, mail flows again
         self.cli("group", "join", "team", "-u", "bob")
-        self.cli("group", "add", "team", "bob", "-u", "alice")
+        self.cli("group", "add", "team", "bob", "--no-notify", "-u", "alice")
         self.cli("send", "--group", "team", "welcome back", "-u", "alice")
         got = [m["text"] for m in self.recv("bob", "alice")]
         self.assertEqual(got, ["welcome back"])

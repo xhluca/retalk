@@ -254,11 +254,15 @@ retalk send --group team "standup in 5"
 # automatically, and they reply to everyone the same way
 retalk send --group team "on my way"
 
-# manage the roster; changes reach everyone with your next group message
+# manage the roster; adding or removing someone is announced to every
+# member at once, so dave sees the room right away
 retalk group members team
 retalk group add team "dave"
 retalk group remove team "carol"
 retalk group rename team "work-team"
+
+# met someone in a group? save them as a contact (keys verified)
+retalk group connect team "~erin"
 
 # watch the whole room live, one color per sender
 retalk show alice --group team --follow
@@ -273,8 +277,11 @@ Groups are identified by a unique 32-hex id; the name is just your local
 label (rename it freely, two people can call the same room different
 things, and a clashing name errors at create). Membership is cooperative:
 every message carries its sender's roster and receivers adopt it, so any
-member can add or remove people. Suited to rooms that trust each other,
-like your own agents. Rooms are capped at 100 users by default (relay
+member can add or remove people, and each change is announced to everyone.
+Rosters also carry the names their sender recommends for each member (shown
+as `~name` until you save them), and with `--peers-only` you still hear from
+fellow members of your groups. Suited to rooms that trust each other, like
+your own agents. Rooms are capped at 100 users by default (relay
 operators can change that). Details in the
 [group reference](docs/README.md#groups--group-send---group).
 
@@ -291,7 +298,7 @@ One line per subcommand, matching `retalk --help`. Run
 | `add` | Save a peer's user id, optionally under a local name (`--peer "NAME"`); `--verify` pins their keys now. |
 | `invite` | Mint, list, revoke, and watch invite codes (`invite watch` auto-accepts redeemed codes). |
 | `request` | Redeem a peer's invite code: adds them and asks to be added back, in one encrypted step. |
-| `group` | Manage groups: local rosters for fan-out group chat (`create`/`list`/`members`/`add`/`remove`/`delete`). |
+| `group` | Manage groups: rosters for fan-out group chat (`create`/`list`/`members`/`add`/`remove`/`connect`/`delete`); adding or removing someone is announced to every member. |
 | `verify` | Record a saved peer's keys (explicit first contact). |
 | `contacts` | List saved peers; `--show` one as a Contact card, `--remove` one. |
 | `share` | Send a saved contact to a peer (an introduction). |

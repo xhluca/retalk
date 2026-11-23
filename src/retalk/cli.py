@@ -632,7 +632,32 @@ def _group_materialize(store_db: Path, g: dict):
         while name in taken:
             n += 1
             name = f"{base}-{n}"
-    _group_upsert(store_db, gid, name, members)
+    names = g.get("names") if isinstance(g.get("names"), dict) else None
+    _group_upsert(store_db, gid, name, members, names)
+
+
+def _apply_group_update(store_db: Path, me: str, m: dict):
+    """Process a group_update control record (`group add` / `group remove`
+    announced by a member): adopt the roster, or drop the group locally when
+    this user was removed (not a tombstone: being added back works)."""
+    g = m.get("group") if isinstance(m.get("group"), dict) else None
+    if not g or not g.get("id"):
+        return
+    if me not in [str(fp) for fp in g.get("members", [])]:
+        if g["id"] not in _left_groups(store_db):
+            _tables.delete_group(store_db, g["id"])
+        return
+    _group_materialize(store_db, g)
+
+
+def _flat_group(m: dict) -> dict:
+    """The CLI's printed shape for group records: flat group/group_id tags."""
+    g = m.get("group") if isinstance(m.get("group"), dict) else None
+    if not g:
+        return m
+    out = dict(m, group=g.get("name") or "", group_id=g.get("id") or "")
+    out.pop("mid", None)                # library-level thread id
+    return out
 
 
 def _open_user(args, need_server: bool = True, banner: bool = True) -> User:
@@ -1342,6 +1367,41 @@ def cmd_block(args):
         print(f"blocked {args.peer} ({fp})", file=sys.stderr)
 
 
+def _announce(args, store_db: Path, gid: str, gname: str,
+              added=(), removed=()):
+    """Announce a roster change to every member now (`group add`/`remove`),
+    unless --no-notify. Best effort: without a relay or a usable passphrase
+    the local change stands and spreads with the next group send."""
+    later = ("everyone gets the new roster with your next group send "
+             f"(retalk send --group {gname} ...)")
+    if getattr(args, "no_notify", False) or not (added or removed):
+        print(f"not announced: {later}", file=sys.stderr)
+        return
+    server = (getattr(args, "relay", None) or os.environ.get("RETALK_RELAY")
+              or _meta(store_db, "server_url") or _default_relay())
+    unlockable = (_meta(store_db, "no_passphrase") == "1"
+                  or getattr(args, "passphrase", None)
+                  or getattr(args, "passphrase_file", None)
+                  or os.environ.get("RETALK_PASSPHRASE_FILE")
+                  or os.environ.get("RETALK_PASSPHRASE"))
+    if not server or not unlockable:
+        why = "no relay configured" if not server else "no passphrase given"
+        print(f"not announced ({why}): {later}", file=sys.stderr)
+        return
+    u = _open_user(args, banner=False)
+    try:
+        r = u.announce_group(gid, added=added, removed=removed)
+    except Exception as e:
+        print(f"not announced ({e}): {later}", file=sys.stderr)
+        return
+    print(json.dumps({"id": r["id"], "group": gname, "group_id": gid,
+                      "added": list(added), "removed": list(removed),
+                      "sent": r["sent"], "failed": r["failed"]}))
+    print(f"announced to {len(r['sent'])} member(s)"
+          + (f", {len(r['failed'])} failed (they catch up on the next group "
+             "send)" if r["failed"] else ""), file=sys.stderr)
+
+
 def cmd_group(args):
     store_db = _resolve_store(args) / STORE_FILE
     act = args.action
@@ -1415,8 +1475,27 @@ def cmd_group(args):
     if act == "members":
         names = {fp: nm for fp, (nm, _i, _s) in
                  _effective_peers(store_db).items()}
+        recommended = _tables.group_names(store_db, gid)
         for fp in members:
-            print(f"{names.get(fp) or '(unnamed)'}\t{fp}")
+            shown = (names.get(fp)
+                     or (f"~{recommended[fp]}" if recommended.get(fp) else "")
+                     or "(unnamed)")
+            print(f"{shown}\t{fp}")
+    elif act == "connect":
+        if not mstr:
+            _die("group connect needs a member: retalk group connect NAME "
+                 "MEMBER (a fingerprint or the name shown by `group members`)")
+        u = _open_user(args, banner=False)
+        try:
+            card = u.connect_member(gid, mstr, getattr(args, "as_name", None))
+        except (KeyError, ValueError) as e:
+            _die(str(e).strip("'\""))
+        except Exception as e:
+            _die(f"could not connect: {e}")
+        print(json.dumps(card))
+        print(f"connected with {card.get('name') or card['fingerprint']} "
+              f"from '{gname}' (saved as a contact, keys verified)",
+              file=sys.stderr)
     elif act == "add":
         added = resolve_members(mstr.split(",") if mstr else [])
         if not added:
@@ -1427,9 +1506,9 @@ def cmd_group(args):
                  f"users, and this relay allows {cap} (its GET /info "
                  "max_group_size)")
         _group_upsert(store_db, gid, gname, members + added)
-        print(f"added {len(set(added) - set(members))} member(s) to '{gname}' "
-              "— the new roster reaches everyone on your next group send",
-              file=sys.stderr)
+        new = sorted(set(added) - set(members))
+        print(f"added {len(new)} member(s) to '{gname}'", file=sys.stderr)
+        _announce(args, store_db, gid, gname, added=new)
     elif act == "remove":
         dropped = set(resolve_members(mstr.split(",") if mstr else []))
         kept = [fp for fp in members if fp not in dropped]
@@ -1437,10 +1516,10 @@ def cmd_group(args):
             _die("none of those are members — see `retalk group members "
                  f"{gname}`")
         _group_upsert(store_db, gid, gname, kept)
-        print(f"removed {len(members) - len(kept)} member(s) from '{gname}' "
-              "— cooperative membership: they stop getting YOUR copies now, "
-              "and everyone else's after your roster reaches them",
+        print(f"removed {len(members) - len(kept)} member(s) from '{gname}'",
               file=sys.stderr)
+        _announce(args, store_db, gid, gname,
+                  removed=sorted(dropped & set(members)))
     elif act == "rename":
         new = mstr
         if not new:
@@ -1579,6 +1658,12 @@ def cmd_receive(args):
                 # more copies are fanned out their way
                 _apply_group_leave(store_db, m)
                 print(json.dumps(m), flush=True)
+                continue
+            if m.get("kind") == "group_update":
+                # a member added/removed people: adopt the roster now (or
+                # drop the group if we were removed)
+                _apply_group_update(store_db, u.fingerprint(), m)
+                print(json.dumps(_flat_group(m)), flush=True)
                 continue
             g = m.get("group") if isinstance(m.get("group"), dict) else None
             if g:
@@ -1840,6 +1925,9 @@ def cmd_show(args):
                 for m in u.receive(sender):
                     if m.get("kind") == "group_leave":
                         _apply_group_leave(store_db, m)
+                        continue
+                    if m.get("kind") == "group_update":
+                        _apply_group_update(store_db, u.fingerprint(), m)
                         continue
                     if "text" in m:
                         g = (m.get("group")
@@ -2707,14 +2795,22 @@ Group chat, retalk style: a group is a LOCAL roster of fingerprints, and
 never learns the roster (it just sees N ordinary messages). Each copy carries
 the roster inside the encrypted envelope, so receivers materialize the group
 automatically, can reply to everyone, and adopt roster changes (cooperative
-membership: the last sender's roster wins; there are no admins).""",
+membership: the last sender's roster wins; there are no admins).
+
+`group add` and `group remove` announce the change to every member at once
+(a group_update record naming who was added or removed, and by whom), so a
+new member learns about the group right away. Rosters carry the names their
+sender recommends for each member (shown as ~name until you save them);
+`group connect` saves a fellow member as a contact, keys verified. In
+--peers-only mode, fellow members of your groups may write to you too.""",
         epilog="""\
 examples:
   retalk group create team --members bob,carol
   retalk group list
   retalk group members team
-  retalk group add team dave
+  retalk group add team dave          # announced to every member at once
   retalk group remove team carol
+  retalk group connect team ~erin     # save a fellow member as a contact
   retalk group rename team work-team
   retalk group leave team
   retalk group join team
@@ -2723,18 +2819,27 @@ examples:
   retalk show alice --group team --follow""")
     sp.add_argument("action", metavar="ACTION",
                     choices=["create", "list", "members", "add", "remove",
-                             "rename", "leave", "join", "delete"],
+                             "connect", "rename", "leave", "join", "delete"],
                     help="one of: create, list, members, add, remove, "
-                         "rename, leave, join, delete")
+                         "connect, rename, leave, join, delete")
     sp.add_argument("name", metavar="NAME", nargs="?",
                     help="the group's local name (every action except list)")
     sp.add_argument("members", metavar="MEMBERS", nargs="?",
                     help="comma-separated saved contact names or 32-hex ids "
-                         "(for add/remove; create also accepts --members)")
+                         "(for add/remove; create also accepts --members); "
+                         "for connect, ONE member: a fingerprint or the name "
+                         "`group members` shows")
     sp.add_argument("--members", dest="members_flag", metavar="LIST",
                     help="comma-separated members, e.g. --members bob,carol")
     sp.add_argument("--json", action="store_true",
                     help="with list: one JSON object per group")
+    sp.add_argument("--no-notify", action="store_true",
+                    help="with add/remove: change the roster locally only; "
+                         "members learn it from your next group send "
+                         "(default: announce to every member at once)")
+    sp.add_argument("--as", dest="as_name", metavar="NAME",
+                    help="with connect: save the member under NAME instead of "
+                         "the roster's recommended name")
     sp.set_defaults(fn=cmd_group)
 
     sp = sub.add_parser(
