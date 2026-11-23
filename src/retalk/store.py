@@ -97,6 +97,10 @@ def delete_peer(db, fp: str):
 def ensure_groups(db):
     sql(db, "CREATE TABLE IF NOT EXISTS groups("
             "gid TEXT PRIMARY KEY, name TEXT, members TEXT, ts REAL)")
+    # member names recommended by the roster's sender ({fp: name}, JSON):
+    # display only, never identity (migrates older stores)
+    if "names" not in [r[1] for r in sql(db, "PRAGMA table_info(groups)")]:
+        sql(db, "ALTER TABLE groups ADD COLUMN names TEXT")
 
 
 def load_groups(db) -> dict:
@@ -119,15 +123,43 @@ def group_by_ref(db, ref: str):
     return None
 
 
-def save_group(db, gid: str, name: str, members: list):
+def save_group(db, gid: str, name: str, members: list,
+               names: dict | None = None):
     """Save a roster. Cooperative membership: an incoming envelope's roster
     replaces the local one (last writer wins) - group chat has no admin
-    protocol, only what peers tell each other."""
+    protocol, only what peers tell each other. `names` ({fp: name}) are the
+    members' recommended names; None keeps the names already stored."""
     ensure_groups(db)
-    sql(db, "INSERT INTO groups(gid, name, members, ts) VALUES(?,?,?,?) "
+    members = sorted(set(members))
+    names_json = None
+    if names is not None:
+        names_json = json.dumps({fp: str(n) for fp, n in names.items()
+                                 if fp in members and n})
+    sql(db, "INSERT INTO groups(gid, name, members, ts, names) "
+            "VALUES(?,?,?,?,?) "
             "ON CONFLICT(gid) DO UPDATE SET name=excluded.name, "
-            "members=excluded.members, ts=excluded.ts",
-        gid, name, json.dumps(sorted(set(members))), time.time())
+            "members=excluded.members, ts=excluded.ts, "
+            "names=COALESCE(excluded.names, groups.names)",
+        gid, name, json.dumps(members), time.time(), names_json)
+
+
+def group_names(db, gid: str) -> dict:
+    """{fp: recommended name} stored with a group's roster ({} if none)."""
+    ensure_groups(db)
+    rows = sql(db, "SELECT names FROM groups WHERE gid=?", gid)
+    try:
+        return json.loads(rows[0][0]) if rows and rows[0][0] else {}
+    except ValueError:
+        return {}
+
+
+def co_members(db) -> set:
+    """Every fingerprint that shares at least one group with this identity
+    (left groups are deleted from the roster table, so they don't count)."""
+    out = set()
+    for _name, members in load_groups(db).values():
+        out.update(members)
+    return out
 
 
 def delete_group(db, gid: str):

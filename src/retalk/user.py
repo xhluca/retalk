@@ -414,7 +414,8 @@ class User:
                          resend_after=resend_after)
 
     def send(self, to: str, text: str, group: dict | None = None,
-             mid: str | None = None, save: bool = False) -> str:
+             mid: str | None = None, save: bool = False,
+             kind: str = "msg", extra: dict | None = None) -> str:
         """Encrypt and send a message to a peer user ID. The ciphertext is
         kept in a local outbox until the peer acknowledges decrypting it.
 
@@ -430,8 +431,10 @@ class User:
         recipient sees, so the two sides can be correlated."""
         with self._locked():
             wire_id = uuid.uuid4().hex
-            payload = {"id": wire_id, "kind": "msg", "text": text,
+            payload = {"id": wire_id, "kind": kind, "text": text,
                        "name": self.name}
+            if extra:
+                payload.update(extra)
             if group is not None:
                 payload["group"] = group
                 payload["mid"] = mid or wire_id
@@ -596,6 +599,10 @@ class User:
         with self._locked():
             inbox = (self._call("read_messages", {"peer": peer}) if peer
                      else self._call("read_messages"))
+            # fellow members of this user's groups may write even in
+            # peers-only mode (like a group chat app); blocks still win
+            co_members = (store.co_members(self._store_path)
+                          if self.receive_policy == "peers-only" else set())
             for m in inbox:
                 sender = m["from"]
                 body_hash = hashlib.sha256(m["body"].encode()).hexdigest()
@@ -607,7 +614,8 @@ class User:
                 # are refused at the relay even if it never calls receive.
                 if sender in self.blocked or (
                         self.receive_policy == "peers-only"
-                        and sender not in self.known):
+                        and sender not in self.known
+                        and sender not in co_members):
                     self._send_nack(body_hash)
                     continue
                 if m["mtype"] not in (0, 1):
@@ -700,6 +708,15 @@ class User:
                     out.append({"id": data["id"], "from": sender, "name": name,
                                 "kind": "group_leave",
                                 "group_id": data.get("group_id") or ""})
+                elif data.get("kind") == "group_update" and isinstance(
+                        data.get("group"), dict):
+                    # a roster change announced by a member (`group add` /
+                    # `group remove`): a control record, applied by the caller
+                    # like any group envelope (see apply_group_update)
+                    out.append({"id": data["id"], "from": sender, "name": name,
+                                "kind": "group_update", "group": data["group"],
+                                "added": list(data.get("added") or []),
+                                "removed": list(data.get("removed") or [])})
                 elif data.get("kind") == "contact":
                     # a shared contact card (`retalk share`): a distinct record
                     # so a consumer never mistakes a card for a chat message
@@ -881,9 +898,11 @@ class User:
         row = self._group_row(ref)
         return self._group_dict(*row) if row else None
 
-    def group_add(self, ref: str, *members: str) -> dict:
+    def group_add(self, ref: str, *members: str, notify: bool = False) -> dict:
         """Add members (contact names or fingerprints) to a group's roster.
-        The change reaches everyone with this user's next group send."""
+        With notify=True the new roster is announced to every member at once
+        (see announce_group); otherwise it reaches everyone with this user's
+        next group send."""
         gid, name, roster = self._require_group(ref)
         fps = [self.resolve_contact(m) for m in members]
         new = sorted(set(roster) | set(fps))
@@ -891,16 +910,152 @@ class User:
         if len(set(new) | {self.fingerprint()}) > cap:
             raise ValueError(f"roster would exceed the relay's cap of {cap}")
         self._group_save(gid, name, new)
+        if notify:
+            self.announce_group(gid, added=sorted(set(fps) - set(roster)))
         return self._group_dict(gid, name, new)
 
-    def group_remove(self, ref: str, *members: str) -> dict:
-        """Drop members from a group's roster (this user's local view; it
-        propagates with their next group send)."""
+    def group_remove(self, ref: str, *members: str,
+                     notify: bool = False) -> dict:
+        """Drop members from a group's roster (this user's local view). With
+        notify=True the change is announced at once, to the removed members
+        too; otherwise it propagates with this user's next group send."""
         gid, name, roster = self._require_group(ref)
         gone = {self.resolve_contact(m) for m in members}
         new = [fp for fp in roster if fp not in gone]
         self._group_save(gid, name, new)
+        if notify:
+            self.announce_group(gid, removed=sorted(gone & set(roster)))
         return self._group_dict(gid, name, new)
+
+    def _roster_names(self, members) -> dict:
+        """{fp: name} this user recommends for a roster: its saved contact
+        names (like `share`'s recommended nickname) and its own name."""
+        me = self.fingerprint()
+        out = {fp: self.names[fp] for fp in members if self.names.get(fp)}
+        if self.name and me in members:
+            out[me] = self.name
+        return out
+
+    def group_envelope(self, ref: str) -> dict:
+        """The {"id", "name", "members", "names"} envelope this user sends
+        for a group: the full roster (including itself) and the names it
+        recommends for the members."""
+        gid, name, roster = self._require_group(ref)
+        full = sorted(set(roster) | {self.fingerprint()})
+        return {"id": gid, "name": name, "members": full,
+                "names": self._roster_names(full)}
+
+    def announce_group(self, ref: str, added=(), removed=()) -> dict:
+        """Send the group's current roster to every member now, as a
+        `group_update` record naming who was added or removed. Removed
+        members get it too, so their client drops the group. Returns
+        {"id", "group", "group_id", "sent", "failed"} like send_group.
+
+        The record also carries a plain `text` and the usual group envelope,
+        so an older client shows it as a group message and still adopts the
+        roster."""
+        envelope = self.group_envelope(ref)
+        gid, me = envelope["id"], self.fingerprint()
+        names = dict(envelope["names"])
+        for fp in removed:              # removed members: name them if known
+            if self.names.get(fp):
+                names[fp] = self.names[fp]
+
+        def label(fp):
+            return names.get(fp) or fp[:8]
+        who = self.name or me[:8]
+        parts = []
+        if added:
+            parts.append(f"{who} added " + ", ".join(label(f) for f in added))
+        if removed:
+            parts.append(f"{who} removed " + ", ".join(label(f) for f in removed))
+        text = "; ".join(parts) or f"{who} updated the group"
+        mid = uuid.uuid4().hex
+        sent, failed = [], {}
+        targets = sorted((set(envelope["members"]) | set(removed)) - {me})
+        for fp in targets:
+            try:
+                self.send(fp, text, group=envelope, mid=mid,
+                          kind="group_update",
+                          extra={"added": list(added),
+                                 "removed": list(removed)})
+                sent.append(fp)
+            except Exception as e:      # one dead member never blocks the rest
+                failed[fp] = str(e)
+        return {"id": mid, "group": envelope["name"], "group_id": gid,
+                "sent": sent, "failed": failed}
+
+    def apply_group_update(self, rec: dict) -> dict | None:
+        """Apply a received `group_update` record (or any group envelope) to
+        this user's local rosters: adopt the roster and its names, or drop the
+        group if this user is no longer in it. Left groups stay left. Returns
+        the resulting group dict, or None if the group was dropped/ignored."""
+        g = rec.get("group") if isinstance(rec.get("group"), dict) else None
+        if not g or not g.get("id"):
+            return None
+        gid = g["id"]
+        if gid in self.left_group_ids():
+            return None
+        members = [fp for fp in g.get("members", []) if _ID_RE.match(str(fp))]
+        if self.fingerprint() not in members:
+            store.delete_group(self._store_path, gid)
+            return None
+        row = self._group_row(gid)
+        if row:
+            name = row[1]               # the local label is the user's own
+        else:                           # a new room: keep local names unique
+            taken = {nm for other, (nm, _m)
+                     in store.load_groups(self._store_path).items()
+                     if other != gid}
+            base = name = g.get("name") or gid[:8]
+            n = 1
+            while name in taken:
+                n += 1
+                name = f"{base}-{n}"
+        store.save_group(self._store_path, gid, name, members,
+                         g.get("names") if isinstance(g.get("names"), dict)
+                         else None)
+        return self._group_dict(gid, name, members)
+
+    def group_member_names(self, ref: str) -> dict:
+        """{fp: name} for a group's members: this user's saved contact name
+        when there is one, else the roster's recommended name marked "~"."""
+        gid, _name, roster = self._require_group(ref)
+        recommended = store.group_names(self._store_path, gid)
+        out = {}
+        for fp in roster:
+            if self.names.get(fp):
+                out[fp] = self.names[fp]
+            elif recommended.get(fp):
+                out[fp] = "~" + recommended[fp]
+        return out
+
+    def connect_member(self, ref: str, member: str,
+                       name: str | None = None) -> dict:
+        """Save a fellow member of a group as a contact, under `name` or the
+        name the roster recommends, and pin their keys from the relay (they
+        must hash to the fingerprint). `member` is a fingerprint, a saved
+        name, or a roster name (with or without the "~"). Returns the card."""
+        gid, _name, roster = self._require_group(ref)
+        recommended = store.group_names(self._store_path, gid)
+        ref_name = member[1:] if member.startswith("~") else member
+        fp = None
+        if _ID_RE.match(member.lower()) and member.lower() in roster:
+            fp = member.lower()
+        else:
+            hits = [f for f in roster
+                    if self.names.get(f) == member
+                    or recommended.get(f) == ref_name]
+            if len(hits) > 1:
+                raise ValueError(f"{member!r} matches several members; "
+                                 "use the fingerprint")
+            fp = hits[0] if hits else None
+        if fp is None:
+            raise KeyError(f"no member {member!r} in group {ref!r}")
+        if fp == self.fingerprint():
+            raise ValueError("that is you")
+        return self.add_contact(fp, name or self.names.get(fp)
+                                or recommended.get(fp) or None, verify=True)
 
     def rename_group(self, ref: str, new_name: str) -> dict:
         """Change this user's local label for a group. The id and everyone
@@ -955,10 +1110,9 @@ class User:
         member, all sharing one thread id. One dead member never blocks the
         rest. Returns {"id", "group", "group_id", "sent", "failed"} where
         sent is a list of fingerprints and failed maps fingerprint->error."""
-        gid, name, roster = self._require_group(ref)
+        envelope = self.group_envelope(ref)
+        gid, name, full = envelope["id"], envelope["name"], envelope["members"]
         me = self.fingerprint()
-        full = sorted(set(roster) | {me})
-        envelope = {"id": gid, "name": name, "members": full}
         mid = uuid.uuid4().hex
         sent, failed = [], {}
         for fp in full:

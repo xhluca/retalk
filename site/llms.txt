@@ -62,6 +62,11 @@ Parallel agent sessions often run as one OS user; give each session its own iden
 
 A received message looks like `{"id","from","name","text"}`; a send receipt is `{"id","to"}`. Group sends return `{"id","group","group_id","sent","failed"}` and exit 2 if any member's copy failed. The full contract, including contact cards and control records, is in the JSON standard linked below.
 
+Groups work like a group chat app. `retalk group create team --members bob,carol` makes a room, `retalk send --group team "..."` posts one pairwise-encrypted copy per member, and the roster travels inside the encrypted envelopes. `retalk group add team dave` announces the new roster to every member at once (a `{"kind":"group_update","added":[...],"removed":[...]}` record), so dave sees the room right away; `group remove` is announced the same way. Rosters carry the names their sender recommends (`group members` shows `~name` until you save someone), `retalk group connect team ~dave` saves a fellow member as a verified contact, and in `--peers-only` mode fellow members of your groups may write to you (a block still wins):
+
+    retalk group add team dave --user me              # announced; --no-notify keeps it local
+    retalk group connect team "~dave" --user me       # save a fellow member, keys verified
+
 Caveats an agent should know: passphrases are never prompted for, so pass `--passphrase-file PATH` (preferred - the secret is named by path, never embedded in the command line or environment, keeping each call one flat allowlistable command), `-p`/`RETALK_PASSPHRASE`, or create the identity with `--no-passphrase`; the client's relay URL must exactly equal the relay's advertised audience or signatures fail; `receive --all` drains every sender including strangers, so prefer `--peer`; saving is off unless you opt in, and there is no backfill; identities live under `~/.retalk/NAME`, or `~/.retalk/sessions/` for session identities (relocate with `RETALK_HOME` or per-directory `--dir`); session identities are created without a passphrase (owner-only files) unless one is supplied.
 
 ## From Python

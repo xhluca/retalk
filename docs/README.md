@@ -295,7 +295,7 @@ ones that touch a mailbox reach the relay.
 | `add` | Save a peer's user id, optionally under a local name; `--verify` pins their keys now. | no¹ |
 | `invite` | Mint, list, revoke, and watch invite codes. | watch: yes |
 | `request` | Redeem an invite code (add the inviter + send the encrypted contact request). | yes |
-| `group` | Manage local group rosters for fan-out group chat. | no |
+| `group` | Manage group rosters for fan-out group chat; `add`/`remove` announce changes, `connect` saves a fellow member. | add/remove/connect/leave |
 | `verify` | Record a saved peer's public keys (explicit first contact). | yes¹ |
 | `contacts` | List saved peers; `--show` one as a Contact card, `--remove` one. | no |
 | `share` | Send a contact to a peer (an introduction). | yes |
@@ -538,8 +538,33 @@ overwrites the name you chose, and a name clash errors at create/rename
 Membership is **cooperative**: each incoming group message's roster replaces
 the receiver's local copy (last sender wins). There are no admins and no
 enforcement — encryption still gates who can *read* (each copy is pairwise
-Olm), but anyone in the room can grow or shrink their own roster and it
-propagates with their next message.
+Olm), but anyone in the room can grow or shrink their own roster.
+
+**Adding and removing people is announced.** `group add` and `group remove`
+send the new roster to every member at once as a
+[`group_update`](STANDARD.md#group-update) record naming who was added or
+removed, and by whom. A new member's client materializes the room right away
+(no group message needed); a removed member is told too, and their client
+drops the room (no tombstone, so being added back works). `--no-notify` keeps
+the change local; it then spreads with your next group message, as it always
+did. Announcing needs the relay and the identity's passphrase; without them
+the change stays local, with a warning. The record also carries a plain
+`text` ("alice added dave") and the usual group envelope, so an older client
+shows it as a group message and still adopts the roster.
+
+**Names in the roster.** Every envelope carries the names its sender
+recommends for the members (their saved contact names, and their own display
+name), like the recommended nickname on a shared contact card.
+`group members` shows your own saved name for a member, else the recommended
+one marked `~` (never trusted as identity: the fingerprint is the member).
+
+**Connecting with a fellow member.** `group connect NAME MEMBER` saves a
+member as a contact, under the recommended name or `--as NAME`, and pins
+their keys from the relay (they must hash to the fingerprint). MEMBER is a
+fingerprint or the name `group members` shows. And in `--peers-only` mode,
+fellow members of your groups may write to you even before you save them —
+the group is the introduction. A `block` still wins, and once you leave a
+room (or are removed) its members are strangers again.
 
 **Leaving is real, and local-first.** `group leave NAME` does two things:
 it sends every member an encrypted `group_leave` notice through the relay so
@@ -568,13 +593,14 @@ the command exits `2` on any failure. If the relay itself is unreachable the
 command fails before any copy is attempted, with no receipt — a partial
 receipt always means some copies went through.
 
-**`retalk group ACTION ...`** — manage rosters (offline, except `leave`'s
-best-effort notices):
+**`retalk group ACTION ...`** — manage rosters (best-effort notices for
+`add`, `remove` and `leave`; everything else is offline):
 
 - `group create NAME --members bob,carol` — new group (members are saved contact names or raw 32-hex ids).
 - `group list` (`--json`) — your groups with sizes.
-- `group members NAME` — the roster with local names.
-- `group add NAME PEER[,PEER]` / `group remove NAME PEER` — edit the roster; changes reach everyone on your next group send.
+- `group members NAME` — the roster with your names, or the recommended `~name`.
+- `group add NAME PEER[,PEER]` / `group remove NAME PEER` — edit the roster and announce it to every member at once (`--no-notify`: local only, spreads with your next group send).
+- `group connect NAME MEMBER` (`--as NEWNAME`) — save a fellow member as a verified contact.
 - `group rename OLD NEW` — change your local label; the group id and everyone else's labels are untouched.
 - `group leave NAME` / `group join NAME` — leave for real (notify + refuse stragglers) / clear the tombstone to be re-addable.
 - `group delete NAME` — forget the group locally without notifying anyone.

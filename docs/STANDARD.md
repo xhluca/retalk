@@ -52,6 +52,9 @@ message — `receive` prints it as
 removes the sender from that group's roster. Like contact records, a consumer
 must not mistake it for chat: there is no `text` field.
 
+Adding or removing members (`group add` / `group remove`) emits a
+[group update](#group-update) record to every member the same way.
+
 There is no timestamp field: message timing is metadata the relay sees, not
 part of the authenticated message, so it is deliberately not surfaced here.
 
@@ -168,6 +171,35 @@ belong to a particular human — see the invite-code section of the README.
 
 `retalk request` prints an ordinary send receipt (`{"id", "to"}`);
 acceptance is deliberately not observable from the requester's side.
+
+### Group update
+
+Emitted by `retalk receive` -- and returned by `User.receive()` -- when a
+member announces a roster change with `group add` / `group remove`. The
+client applies it at once: it adopts the roster (materializing the room for a
+new member), or drops the room if this user was removed.
+
+| field  | type   | description |
+|--------|--------|-------------|
+| `id`, `from`, `name` | string | as in a [Message](#message); `from` is the member who made the change. |
+| `kind` | string | `"group_update"` |
+| `group`, `group_id` | string | the group's name and stable id (the library returns the full envelope under `group`: `{"id", "name", "members", "names"}`). |
+| `added` | array | fingerprints added by this change (may be empty). |
+| `removed` | array | fingerprints removed by this change (may be empty). |
+
+```json
+{"id":"c41e...07","from":"38b151a1...","name":"alice","kind":"group_update","group":"team","group_id":"5f0c...9d","added":["1041c25c..."],"removed":[]}
+```
+
+There is no `text` field: it is a control record, not chat. On the wire the
+encrypted payload also carries a plain `text` ("alice added bob") and the
+group envelope, so a client predating this record shows it as a group message
+and still adopts the roster.
+
+Every group envelope may carry `names`: `{fingerprint: name}`, the names its
+sender recommends for the members (their saved contact names, and their own
+display name). They are display hints, like a shared contact's recommended
+`name` -- never identity.
 
 ### Share receipt
 
